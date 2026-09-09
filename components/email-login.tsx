@@ -1,0 +1,166 @@
+'use client';
+import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { FileText, LockKeyhole, Mail, LoaderCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { api, errorText } from '@/lib/client-api';
+
+export function EmailLogin({
+  documentId,
+  mode = 'email',
+}: {
+  documentId?: string;
+  mode?: 'email' | 'test';
+}) {
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  async function submit(event: React.SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      if (mode === 'test') {
+        const result = await api<{ redirect: string }>('auth/test', 'POST', {
+          email,
+          documentId,
+        });
+        window.location.assign(result.redirect);
+        return;
+      }
+      const result = await api<{ message: string }>('auth/request', 'POST', {
+        email,
+        documentId,
+      });
+      setMessage(result.message);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <main className="login-state">
+      <LockKeyhole size={28} />
+      <h1>
+        {mode === 'test'
+          ? 'Entre para testar.'
+          : 'Seus documentos, com acesso restrito.'}
+      </h1>
+      <p>
+        {mode === 'test'
+          ? 'Informe qualquer e-mail para identificar seus comentários. A entrada é imediata, sem senha e sem confirmação por e-mail.'
+          : 'Informe o e-mail que recebeu o convite. Você receberá um link para entrar, sem senha.'}
+      </p>
+      <form className="login-form" onSubmit={(event) => void submit(event)}>
+        <label htmlFor="login-email">Seu e-mail</label>
+        <input
+          id="login-email"
+          name="email"
+          type="email"
+          autoComplete="email"
+          placeholder="voce@empresa.com"
+          required
+          maxLength={254}
+          value={email}
+          disabled={busy}
+          onChange={(event) => {
+            setEmail(event.target.value);
+            setMessage('');
+            setError('');
+          }}
+        />
+        <Button type="submit" disabled={busy || !email.trim()}>
+          {busy ? (
+            <LoaderCircle size={17} className="spin" />
+          ) : (
+            <Mail size={17} />
+          )}
+          {mode === 'test'
+            ? busy
+              ? 'Entrando…'
+              : 'Entrar'
+            : busy
+              ? 'Solicitando…'
+              : message
+                ? 'Solicitar outro link'
+                : 'Receber link por e-mail'}
+        </Button>
+        {message && (
+          <output className="login-message" aria-live="polite">
+            {message}
+          </output>
+        )}
+        {error && (
+          <p role="alert" className="form-error">
+            {error}
+          </p>
+        )}
+      </form>
+    </main>
+  );
+}
+
+export function ConfirmAccess() {
+  const token = useRef<string | null>(null);
+  const initialized = useRef(false);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+    token.current = new URLSearchParams(window.location.hash.slice(1)).get(
+      'token',
+    );
+    window.history.replaceState(null, '', '/access');
+    // oxlint-disable-next-line react/react-compiler -- Token comes from the browser URL after mounting.
+    setReady(true);
+  }, []);
+  async function confirm() {
+    if (busy) return;
+    if (!token.current) {
+      setError('Abra o link recebido por e-mail ou solicite um novo abaixo.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api<{ redirect: string }>('auth/verify', 'POST', {
+        token: token.current,
+      });
+      token.current = null;
+      window.location.replace(result.redirect);
+    } catch (e) {
+      setError(errorText(e));
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="workspace">
+      <header className="app-header">
+        <Link href="/" className="wordmark">
+          <FileText size={21} /> Documentos
+        </Link>
+      </header>
+      <main className="login-state">
+        <Mail size={28} />
+        <h1>Abra seus documentos.</h1>
+        <p>Confirme abaixo para entrar com o e-mail que recebeu este link.</p>
+        <Button disabled={!ready || busy} onClick={() => void confirm()}>
+          {busy && <LoaderCircle size={17} className="spin" />}
+          {busy ? 'Entrando…' : 'Confirmar acesso'}
+        </Button>
+        {error && (
+          <p role="alert" className="form-error">
+            {error}
+          </p>
+        )}
+        <Link href="/">Solicitar um novo link por e-mail</Link>
+      </main>
+    </div>
+  );
+}

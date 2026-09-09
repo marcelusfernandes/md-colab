@@ -141,3 +141,27 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Project-specific exclusions
+/node_modules
+/.pnp
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+/coverage
+/.next/
+/.vinext/
+/out/
+.DS_Store
+*.pem
+.pnpm-debug.log*
+.env*
+!.env.example
+.dev.vars*
+.vercel
+next-env.d.ts
+/dist/
+/.wrangler/
+/outputs/
+/work/

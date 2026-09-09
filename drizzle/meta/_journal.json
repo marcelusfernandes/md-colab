@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1788928491018,
+      "tag": "0000_mute_microchip",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788930136660,
+      "tag": "0001_email_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788932464048,
+      "tag": "0002_link_test_mode",
+      "breakpoints": true
+    }
+  ]
+}
