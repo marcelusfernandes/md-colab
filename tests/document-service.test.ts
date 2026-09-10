@@ -443,6 +443,48 @@ void test('página suplementa a raiz de uma resposta sem mover o cursor de sequ�
   }
 });
 
+void test('raízes suplementares em página cheia respeitam o limite de 100 bindings do D1', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Plano', filename: 'plano.md',
+    });
+    for (let index = 0; index < 100; index += 1) {
+      const rootId = stableCommentId(index + 5000);
+      await db.prepare(
+        'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,root_id,created_at) VALUES (?,?,?,?,?,?,?,?)',
+      ).bind(rootId, document.id, owner.viewer.id, `Raiz ${index}`, '', null, rootId, '2026-01-01T00:00:00.000Z').run();
+    }
+    for (let index = 0; index < 100; index += 1) {
+      const rootId = stableCommentId(index + 5000);
+      await db.prepare(
+        'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,root_id,created_at) VALUES (?,?,?,?,?,?,?,?)',
+      ).bind(stableCommentId(index + 6000), document.id, owner.viewer.id, `Resposta ${index}`, '', null, rootId, '2026-01-02T00:00:00.000Z').run();
+    }
+    const guarded = Object.create(db) as D1Database;
+    guarded.prepare = (sql: string) => {
+      const statement = db.prepare(sql);
+      if (!sql.includes('c.id IN (')) return statement;
+      return {
+        bind(...values: unknown[]) {
+          assert.ok(values.length <= 100, `D1 recebeu ${values.length} bindings`);
+          return statement.bind(...values);
+        },
+      } as unknown as D1PreparedStatement;
+    };
+    const page = await new DocumentService(guarded, { ...owner.viewer }).comments(document.id);
+    assert.equal(page.comments.length, 100);
+    assert.equal(page.roots.length, 100);
+    assert.deepEqual(
+      page.roots.map((root) => root.id),
+      Array.from({ length: 100 }, (_, index) => stableCommentId(index + 5000)).reverse(),
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
 void test('replay de comentário revalida acesso após localizar a linha existente', async (t) => {
   const { sqlite, db, owner, guest } = fixture();
   t.after(() => sqlite.close());

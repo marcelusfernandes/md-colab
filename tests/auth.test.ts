@@ -318,6 +318,69 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
   );
 });
 
+void test('HTTP mantém respostas na raiz autorizada e rejeita replay, outro plano, terceiro e revogado', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const ownerSession = await data(await f.call('session', 'GET', undefined, owner.cookie));
+  const create = async (filename: string) => {
+    const response = await f.call('documents', 'POST', {
+      id: crypto.randomUUID(), authorId: ownerSession.viewer.id,
+      markdown: '# Plano', filename,
+    }, owner.cookie);
+    assert.equal(response.status, 201);
+    return (await data(response)).document.id;
+  };
+  const documentId = await create('principal.md');
+  const otherDocumentId = await create('outro.md');
+  const invite = async (documentId: string, email: string) => {
+    const response = await f.call(`documents/${documentId}/shares`, 'POST', { email }, owner.cookie);
+    assert.equal(response.status, 200);
+    return f.mailbox.lastToken();
+  };
+  const guestToken = await invite(documentId, 'guest@example.com');
+  const strangerToken = await invite(otherDocumentId, 'stranger@example.com');
+  const guestLogin = await f.call('auth/verify', 'POST', { token: guestToken });
+  const guestCookie = guestLogin.headers.get('set-cookie')!.split(';')[0];
+  const guestSession = await data(await f.call('session', 'GET', undefined, guestCookie));
+  const strangerLogin = await f.call('auth/verify', 'POST', { token: strangerToken });
+  const strangerCookie = strangerLogin.headers.get('set-cookie')!.split(';')[0];
+  const strangerSession = await data(await f.call('session', 'GET', undefined, strangerCookie));
+  const rootId = crypto.randomUUID();
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    id: rootId, authorId: guestSession.viewer.id, body: 'Crítica.', quote: '', sourceStart: null,
+  }, guestCookie)).status, 201);
+  const replyId = crypto.randomUUID();
+  const reply = { id: replyId, authorId: ownerSession.viewer.id, body: 'Resposta.', rootId };
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', reply, owner.cookie)).status, 201);
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    id: crypto.randomUUID(), authorId: guestSession.viewer.id, body: 'Também respondo.', rootId,
+  }, guestCookie)).status, 201);
+  const secondRootId = crypto.randomUUID();
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    id: secondRootId, authorId: ownerSession.viewer.id, body: 'Outra conversa.', quote: '', sourceStart: null,
+  }, owner.cookie)).status, 201);
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    ...reply, rootId: secondRootId,
+  }, owner.cookie)).status, 409);
+  const otherRootId = crypto.randomUUID();
+  assert.equal((await f.call(`documents/${otherDocumentId}/comments`, 'POST', {
+    id: otherRootId, authorId: ownerSession.viewer.id, body: 'Outra raiz.', quote: '', sourceStart: null,
+  }, owner.cookie)).status, 201);
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    id: crypto.randomUUID(), authorId: ownerSession.viewer.id, body: 'Não cruza.', rootId: otherRootId,
+  }, owner.cookie)).status, 404);
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    id: crypto.randomUUID(), authorId: strangerSession.viewer.id, body: 'Não autorizado.', rootId,
+  }, strangerCookie)).status, 404);
+  assert.equal((await f.call(`documents/${documentId}/shares`, 'DELETE', {
+    email: 'guest@example.com',
+  }, owner.cookie)).status, 200);
+  assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
+    id: crypto.randomUUID(), authorId: guestSession.viewer.id, body: 'Após revogação.', rootId,
+  }, guestCookie)).status, 404);
+});
+
 void test('listas HTTP aceitam somente um cursor opcional e preservam envelopes nomeados', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());

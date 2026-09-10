@@ -131,6 +131,10 @@ aceita somente uma raiz do mesmo plano. Respostas não recebem uma nova citaçã
 offset: elas preservam o contexto publicado pela raiz. Não há aninhamento além
 desse nível.
 
+Esta entrega preserva IDs, citações e offsets no comentário atual. A associação
+explícita desses registros à revisão imutável original será feita pela migração
+de #5; não há `source_revision_id` nem uma revisão persistida nesta versão.
+
 O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
 conversa idênticos. A listagem continua paginada pela sequência persistida; quando
 uma página contém resposta cuja raiz ficou fora dela, a resposta JSON inclui essa

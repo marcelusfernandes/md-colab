@@ -592,16 +592,31 @@ export class DocumentService {
       ),
     ];
     if (rootIds.length === 0) return [];
-    const placeholders = rootIds.map(() => '?').join(',');
-    return (
-      await this.db
-        .prepare(
-          `SELECT ${publicCommentFields} FROM comments c JOIN users u ON u.id=c.author_id
-           WHERE c.document_id=? AND c.id IN (${placeholders})`,
-        )
-        .bind(id, ...rootIds)
-        .all<CommentRow>()
-    ).results;
+    // D1 accepts at most 100 bindings. document_id consumes one, so a root
+    // lookup may contain at most 99 ids even when a page has 100 replies.
+    const chunks = Array.from(
+      { length: Math.ceil(rootIds.length / 99) },
+      (_, index) => rootIds.slice(index * 99, (index + 1) * 99),
+    );
+    const pages = await Promise.all(
+      chunks.map(async (ids) => {
+        const placeholders = ids.map(() => '?').join(',');
+        return (
+          await this.db
+            .prepare(
+              `SELECT ${publicCommentFields} FROM comments c JOIN users u ON u.id=c.author_id
+               WHERE c.document_id=? AND c.id IN (${placeholders})`,
+            )
+            .bind(id, ...ids)
+            .all<CommentRow>()
+        ).results;
+      }),
+    );
+    const roots = new Map(pages.flat().map((root) => [root.id, root]));
+    return rootIds.flatMap((rootId) => {
+      const root = roots.get(rootId);
+      return root ? [root] : [];
+    });
   }
 
   async comment(id: string, commentId: string) {

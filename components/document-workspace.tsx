@@ -296,6 +296,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           left.root.id.localeCompare(right.root.id),
       );
   }, [comments]);
+  const pendingReplyRoot = useMemo(
+    () =>
+      commentOperation?.rootId
+        ? comments.find((entry) => entry.id === commentOperation.rootId) ?? null
+        : null,
+    [commentOperation?.rootId, comments],
+  );
+  const composerReplyRoot = pendingReplyRoot ?? replyRoot;
+  const composerIsReply = Boolean(composerReplyRoot || commentOperation?.rootId);
 
   useEffect(() => {
     if (!hasUnconfirmedWork) return;
@@ -549,12 +558,22 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         commentsHistoryInProgress.current = false;
         activeDocumentId.current = result.document.id;
         activeViewerId.current = user.id;
-        setReplyRoot(null);
         setDoc(result.document);
         const commentPage = commentPageFromResponse(result);
         commentsNextCursor.current = commentPage.pagination.nextCursor;
         commentsOlderCursor.current = commentPage.pagination.olderCursor;
-        setComments(mergeComments(commentPage.comments, commentPage.roots));
+        const loadedComments = mergeComments(
+          commentPage.comments,
+          commentPage.roots,
+        );
+        setComments(loadedComments);
+        setReplyRoot(
+          currentOperation?.rootId
+            ? loadedComments.find(
+                (entry) => entry.id === currentOperation.rootId,
+              ) ?? null
+            : null,
+        );
         setHasOlderComments(commentPage.pagination.olderCursor !== null);
         setCommentsUpdating(false);
         setCommentsLoadingOlder(false);
@@ -1315,7 +1334,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
   }
   const captureSelection = useCallback(() => {
-    if (busy === 'comment' || replyRoot) return;
+    if (busy === 'comment' || composerIsReply) return;
     const selection = window.getSelection();
     if (
       !selection ||
@@ -1344,7 +1363,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       anchor === undefined || anchor === null ? null : Number(anchor),
     );
     composerRevision.current += 1;
-  }, [busy, replyRoot]);
+  }, [busy, composerIsReply]);
   useEffect(() => {
     const node = article.current;
     if (!node) return;
@@ -2130,16 +2149,26 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 </output>
               )}
               <form onSubmit={(event) => void addComment(event)}>
-                {replyRoot ? (
+                {composerIsReply ? (
                   <div className="quote-composer">
                     <p>
-                      Respondendo a <strong>{replyRoot.author_name}</strong> na
-                      conversa iniciada em {dateLabel(replyRoot.created_at)}.
+                      {composerReplyRoot ? (
+                        <>
+                          Respondendo a{' '}
+                          <strong>{composerReplyRoot.author_name}</strong> na
+                          conversa iniciada em{' '}
+                          {dateLabel(composerReplyRoot.created_at)}.
+                        </>
+                      ) : (
+                        'Respondendo à conversa selecionada.'
+                      )}
                     </p>
                     <button
                       type="button"
                       aria-label="Cancelar resposta"
+                      disabled={!!commentOperation}
                       onClick={() => {
+                        if (commentOperation) return;
                         setReplyRoot(null);
                         composerRevision.current += 1;
                       }}
@@ -2174,7 +2203,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   ref={commentInput}
                   id="comment"
                   placeholder={
-                    replyRoot
+                    composerIsReply
                       ? 'Escreva uma resposta…'
                       : 'Escreva um comentário…'
                   }
@@ -2261,7 +2290,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                     ? 'Enviando…'
                     : commentOperation
                       ? 'Resolva o envio anterior'
-                      : replyRoot
+                      : composerIsReply
                         ? 'Responder'
                         : 'Comentar'}
                 </Button>
