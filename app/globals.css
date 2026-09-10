@@ -1058,6 +1058,37 @@ a:focus-visible {
   border-top: 1px solid var(--border);
   padding-top: 14px;
 }
+@media (max-width: 540px) {
+  .share-dialog .access-person {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+  }
+  .share-dialog .access-person > div:first-child {
+    width: 100%;
+  }
+  .share-dialog .access-person .access-role {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .share-dialog .access-pagination {
+    align-items: stretch;
+  }
+  .share-dialog .access-pagination > button {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 2rem;
+    padding-block: 6px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+}
 .form-error {
   font-size: 14px;
   color: #a52a22;
