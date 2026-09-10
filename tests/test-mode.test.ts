@@ -119,8 +119,10 @@ void test('link permite comentar com outro e-mail; somente a sessão criadora ad
   const read = await guest.call('documents/' + id);
   assert.equal(read.status, 200);
   assert.equal(read.body.isOwner, false);
+  const guestViewerId = (await guest.call('session')).body.viewer.id;
   const comment = await guest.call(`documents/${id}/comments`, 'POST', {
     id: crypto.randomUUID(),
+    authorId: guestViewerId,
     body: 'Comentário pelo link',
     quote: 'Um trecho.',
     sourceStart: 9,
@@ -213,6 +215,7 @@ void test('documentos privados e contas reais não são expostos ao habilitar o 
     (
       await guest.call(`documents/${privateDoc.id}/comments`, 'POST', {
         id: crypto.randomUUID(),
+        authorId: (await guest.call('session')).body.viewer.id,
         body: 'Sem acesso',
       })
     ).status,

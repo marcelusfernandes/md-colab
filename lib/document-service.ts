@@ -159,6 +159,16 @@ export class DocumentService {
   }
   async addComment(id: string, input: Record<string, unknown>) {
     const doc = await this.document(id);
+    const authorId = requiredText(
+      input.authorId,
+      'Identidade do comentário',
+      128,
+    );
+    if (authorId !== this.viewer.id)
+      throw new HttpError(
+        409,
+        'Este envio pertence a outra sessão. Revise o comentário antes de tentar novamente.',
+      );
     const body = requiredText(input.body, 'Comentário', 5000);
     const quote = typeof input.quote === 'string' ? input.quote.trim() : '';
     if (quote.length > 4000)
@@ -178,47 +188,42 @@ export class DocumentService {
     const commentId = requiredText(input.id, 'Identificador do comentário', 64);
     if (!/^[0-9a-f-]{36}$/i.test(commentId))
       throw new HttpError(400, 'Identificador inválido.');
-    const previous = await this.db
-      .prepare('SELECT * FROM comments WHERE id=?')
-      .bind(commentId)
-      .first<{
-        author_id: string;
-        document_id: string;
-        body: string;
-        quote: string;
-        source_start: number | null;
-      }>();
-    if (previous) {
-      if (
-        previous.author_id !== this.viewer.id ||
-        previous.document_id !== id ||
-        previous.body !== body ||
-        previous.quote !== quote ||
-        previous.source_start !== sourceStart
+    await this.db
+      .prepare(
+        'INSERT INTO comments (id,document_id,author_id,body,quote,source_start,created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
       )
-        throw new HttpError(
-          409,
-          'Este comentário já foi enviado com outro conteúdo.',
-        );
-    } else {
-      await this.db
-        .prepare(
-          'INSERT INTO comments (id,document_id,author_id,body,quote,source_start,created_at) VALUES (?,?,?,?,?,?,?)',
-        )
-        .bind(
-          commentId,
-          id,
-          this.viewer.id,
-          body,
-          quote,
-          sourceStart,
-          new Date().toISOString(),
-        )
-        .run();
-    }
-    return (await this.comments(id)).find(
-      (comment) => comment.id === commentId,
-    );
+      .bind(
+        commentId,
+        id,
+        authorId,
+        body,
+        quote,
+        sourceStart,
+        new Date().toISOString(),
+      )
+      .run();
+    // Access can be revoked while the write is in flight. Do not disclose the
+    // persisted row in the response unless this request still has access.
+    await this.document(id);
+    const comment = await this.db
+      .prepare(
+        'SELECT c.*,u.name AS author_name FROM comments c JOIN users u ON u.id=c.author_id WHERE c.id=?',
+      )
+      .bind(commentId)
+      .first<CommentRow & { document_id: string }>();
+    if (!comment) throw new Error('Inserted comment could not be read back.');
+    if (
+      comment.author_id !== authorId ||
+      comment.document_id !== id ||
+      comment.body !== body ||
+      comment.quote !== quote ||
+      comment.source_start !== sourceStart
+    )
+      throw new HttpError(
+        409,
+        'Este comentário já foi enviado com outro conteúdo.',
+      );
+    return comment;
   }
   async shares(id: string) {
     await this.document(id, true);
