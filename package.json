@@ -3,14 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.16.0"
   },
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
     "build:node": "node scripts/build-node.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
-    "start:node": "node dist/standalone/server.js",
+    "start:node": "node --experimental-transform-types scripts/start-node.ts",
     "start:workers": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint app db lib scripts components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx tests",
     "format": "oxfmt",

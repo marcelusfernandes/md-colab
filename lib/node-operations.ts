@@ -39,6 +39,17 @@ function removeIncomplete(path: string) {
     rmSync(candidate, { force: true });
 }
 
+function tableExists(
+  sqlite: ReturnType<typeof openNodeSqlite>['sqlite'],
+  name: string,
+) {
+  return Boolean(
+    sqlite
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?")
+      .get(name),
+  );
+}
+
 export async function backupNodeDatabase(
   databasePath: string,
   outputPath: string,
@@ -92,54 +103,72 @@ export async function restoreNodeDatabase(
     verifyNodeDatabase(
       source.sqlite,
       options.migrationsPath ?? migrationDirectory(),
+      { allowPending: true },
     );
     try {
       await sqliteBackup(source.sqlite, targetPath, { rate: 100 });
       chmodSync(targetPath, 0o600);
       const restored = openNodeSqlite(targetPath);
+      let status: ReturnType<typeof verifyNodeDatabase>;
+      let revokedShares = 0;
+      let revokedCredentials = 0;
       try {
         verifyNodeDatabase(
           restored.sqlite,
           options.migrationsPath ?? migrationDirectory(),
+          { allowPending: true },
         );
         restored.sqlite.exec('BEGIN IMMEDIATE');
-        let revokedShares = 0;
-        let revokedCredentials = 0;
         try {
-          revokedShares = Number(
-            restored.sqlite.prepare('DELETE FROM shares').run().changes,
-          );
-          restored.sqlite.exec(
-            'DELETE FROM magic_links; DELETE FROM sessions; DELETE FROM auth_limits',
-          );
-          revokedCredentials = Number(
-            restored.sqlite
-              .prepare(
-                'UPDATE publishing_tokens SET revoked_at=COALESCE(revoked_at,?)',
-              )
-              .run(options.now ?? Math.floor(Date.now() / 1000)).changes,
-          );
+          if (tableExists(restored.sqlite, 'shares'))
+            revokedShares = Number(
+              restored.sqlite.prepare('DELETE FROM shares').run().changes,
+            );
+          for (const table of ['magic_links', 'sessions', 'auth_limits'])
+            if (tableExists(restored.sqlite, table))
+              restored.sqlite.exec(`DELETE FROM "${table}"`);
+          if (tableExists(restored.sqlite, 'publishing_tokens'))
+            revokedCredentials = Number(
+              restored.sqlite
+                .prepare(
+                  'UPDATE publishing_tokens SET revoked_at=COALESCE(revoked_at,?)',
+                )
+                .run(options.now ?? Math.floor(Date.now() / 1000)).changes,
+            );
           restored.sqlite.exec('COMMIT');
         } catch (error) {
           restored.sqlite.exec('ROLLBACK');
           throw error;
         }
-        const status = verifyNodeDatabase(
+        status = verifyNodeDatabase(
           restored.sqlite,
           options.migrationsPath ?? migrationDirectory(),
+          { allowPending: true },
         );
-        return {
-          path: targetPath,
-          bytes: statSync(targetPath).size,
-          sha256: await fileSha256(targetPath),
-          applied: status.applied,
-          revokedShares,
-          revokedCredentials,
-          authenticationArtifactsCleared: true,
-        };
+        restored.sqlite.exec('PRAGMA wal_checkpoint(TRUNCATE)');
       } finally {
         restored.sqlite.close();
       }
+      const checked = openNodeSqlite(targetPath, { readOnly: true });
+      try {
+        verifyNodeDatabase(
+          checked.sqlite,
+          options.migrationsPath ?? migrationDirectory(),
+          { allowPending: true },
+        );
+      } finally {
+        checked.sqlite.close();
+      }
+      return {
+        path: targetPath,
+        bytes: statSync(targetPath).size,
+        sha256: await fileSha256(targetPath),
+        applied: status.applied,
+        pending: status.pending,
+        revokedShares,
+        revokedCredentials,
+        authenticationArtifactsCleared: true,
+      };
     } catch (error) {
       removeIncomplete(targetPath);
       throw error;

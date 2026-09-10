@@ -1,5 +1,7 @@
 # Migração e recuperação do D1
 
+Para o SQLite persistente do runtime Node, use o [runbook próprio](node-operations.md); os ledgers e procedimentos operacionais são distintos.
+
 Este runbook prepara operações reviewáveis. Ele não autoriza acesso remoto,
 deploy, custo ou alteração de dados existentes. Os helpers recusam `--remote`,
 operam somente nesta worktree e exigem um caminho explícito terminado em

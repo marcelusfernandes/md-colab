@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   cpSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
 } from 'node:fs';
@@ -84,10 +86,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     () => migrateNodeDatabase(legacy.sqlite),
     /refusing to adopt unknown legacy state/,
   );
-  assert.equal(
-    inspectNodeMigrations(legacy.sqlite).legacy,
-    true,
-  );
+  assert.equal(inspectNodeMigrations(legacy.sqlite).legacy, true);
   legacy.sqlite.close();
 
   const divergent = openNodeSqlite(database);
@@ -97,10 +96,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     )
     .run();
   divergent.sqlite.close();
-  assert.throws(
-    () => openPersistentD1(database),
-    /Migration ledger diverges/,
-  );
+  assert.throws(() => openPersistentD1(database), /Migration ledger diverges/);
 });
 
 function seedBeforeCommentsMigration(sqlite: DatabaseSync) {
@@ -172,9 +168,8 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
     /no such table/,
   );
   assert.equal(
-    failure
-      .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
-      .get()?.count,
+    failure.prepare('SELECT count(*) AS count FROM _md_colab_migrations').get()
+      ?.count,
     4,
   );
   assert.equal(
@@ -183,7 +178,9 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
   );
   assert.equal(
     failure
-      .prepare("SELECT count(*) AS count FROM pragma_table_info('comments') WHERE name='sequence'")
+      .prepare(
+        "SELECT count(*) AS count FROM pragma_table_info('comments') WHERE name='sequence'",
+      )
       .get()?.count,
     0,
   );
@@ -227,17 +224,22 @@ void test('restore is isolated and invalidates snapshot access artifacts', async
   );
   source.sqlite.close();
 
-  const result = await restoreNodeDatabase(backupPath, restorePath, { now: 42 });
+  const result = await restoreNodeDatabase(backupPath, restorePath, {
+    now: 42,
+  });
   assert.equal(result.revokedShares, 1);
   assert.equal(result.revokedCredentials, 1);
   assert.equal(statSync(restorePath).mode & 0o777, 0o600);
+  assert.equal(
+    result.sha256,
+    createHash('sha256').update(readFileSync(restorePath)).digest('hex'),
+  );
 
   const restored = openPersistentD1(restorePath);
   for (const table of ['shares', 'sessions', 'magic_links', 'auth_limits'])
     assert.equal(
-      restored.sqlite
-        .prepare(`SELECT count(*) AS count FROM "${table}"`)
-        .get()?.count,
+      restored.sqlite.prepare(`SELECT count(*) AS count FROM "${table}"`).get()
+        ?.count,
       0,
     );
   assert.equal(
@@ -247,11 +249,99 @@ void test('restore is isolated and invalidates snapshot access artifacts', async
     42,
   );
   assert.equal(
-    restored.sqlite
-      .prepare('SELECT count(*) AS count FROM publications')
-      .get()?.count,
+    restored.sqlite.prepare('SELECT count(*) AS count FROM publications').get()
+      ?.count,
     1,
   );
-  assert.deepEqual(restored.sqlite.prepare('PRAGMA foreign_key_check').all(), []);
+  assert.deepEqual(
+    restored.sqlite.prepare('PRAGMA foreign_key_check').all(),
+    [],
+  );
   restored.sqlite.close();
+});
+
+void test('a verified pre-upgrade backup restores separately and requires explicit migration', async (t) => {
+  const directory = temporary(t);
+  const activePath = join(directory, 'active.sqlite');
+  const backupPath = join(directory, 'pre-0004.sqlite');
+  const restorePath = join(directory, 'restored.sqlite');
+  const active = openNodeSqlite(activePath, { create: true });
+  migrateNodeDatabase(active.sqlite, undefined, 4);
+  active.sqlite.exec(`
+    INSERT INTO users(id,email,name) VALUES
+      ('owner','owner@example.test','Owner'),
+      ('guest','guest@example.test','Guest');
+    INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test)
+      VALUES('doc','owner','Plan','plan.md','# Plan','2026-09-10T00:00:00Z',0);
+    INSERT INTO shares(document_id,email,name,created_at)
+      VALUES('doc','guest@example.test','Guest','2026-09-10T00:00:01Z');
+    INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
+      VALUES('credential','owner','CLI','hash','2026-09-10T00:00:00Z',9999999999,NULL);
+    INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
+      VALUES('publication','doc','owner','credential','key','payload','2026-09-10T00:00:03Z');
+    INSERT INTO sessions(token_hash,user_id,expires_at)
+      VALUES('session','guest',9999999999);
+  `);
+  active.sqlite.close();
+
+  const backup = await backupNodeDatabase(activePath, backupPath, {
+    allowPending: true,
+  });
+  assert.deepEqual(backup.pending, ['0004_polite_mandrill']);
+  const upgraded = openNodeSqlite(activePath);
+  migrateNodeDatabase(upgraded.sqlite);
+  upgraded.sqlite.close();
+
+  const result = await restoreNodeDatabase(backupPath, restorePath, {
+    now: 42,
+  });
+  assert.deepEqual(result.applied, [
+    '0000_mute_microchip',
+    '0001_email_access',
+    '0002_link_test_mode',
+    '0003_pink_blazing_skull',
+  ]);
+  assert.deepEqual(result.pending, ['0004_polite_mandrill']);
+  assert.throws(
+    () => openPersistentD1(restorePath),
+    /complete known migration history/,
+  );
+
+  const restored = openNodeSqlite(restorePath);
+  assert.equal(
+    restored.sqlite.prepare('SELECT count(*) AS count FROM shares').get()
+      ?.count,
+    0,
+  );
+  assert.equal(
+    restored.sqlite.prepare('SELECT count(*) AS count FROM sessions').get()
+      ?.count,
+    0,
+  );
+  assert.equal(
+    restored.sqlite
+      .prepare("SELECT revoked_at FROM publishing_tokens WHERE id='credential'")
+      .get()?.revoked_at,
+    42,
+  );
+  migrateNodeDatabase(restored.sqlite);
+  restored.sqlite.close();
+
+  const ready = openPersistentD1(restorePath);
+  assert.deepEqual(inspectNodeMigrations(ready.sqlite).pending, []);
+  ready.sqlite.close();
+
+  const snapshot = openNodeSqlite(backupPath, { readOnly: true });
+  assert.equal(
+    snapshot.sqlite.prepare('SELECT count(*) AS count FROM shares').get()
+      ?.count,
+    1,
+  );
+  assert.equal(
+    snapshot.sqlite
+      .prepare("SELECT revoked_at FROM publishing_tokens WHERE id='credential'")
+      .get()?.revoked_at,
+    null,
+  );
+  snapshot.sqlite.close();
 });

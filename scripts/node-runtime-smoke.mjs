@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,18 +36,22 @@ function migrate() {
     throw new Error(`Migration failed: ${result.stderr}`);
 }
 
-function start(port) {
-  const child = spawn(process.execPath, ['dist/standalone/server.js'], {
-    env: {
-      ...process.env,
-      HOST: '127.0.0.1',
-      PORT: String(port),
-      MD_COLAB_DB_PATH: database,
-      ACCESS_MODE: 'test',
-      APP_ORIGIN: `http://127.0.0.1:${port}`,
+function start(port, databasePath = database) {
+  const child = spawn(
+    process.execPath,
+    ['--experimental-transform-types', 'scripts/start-node.ts'],
+    {
+      env: {
+        ...process.env,
+        HOST: '127.0.0.1',
+        PORT: String(port),
+        MD_COLAB_DB_PATH: databasePath,
+        ACCESS_MODE: 'test',
+        APP_ORIGIN: `http://127.0.0.1:${port}`,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  );
   let output = '';
   for (const stream of [child.stdout, child.stderr])
     stream.on('data', (chunk) => {
@@ -101,6 +105,22 @@ function chunkedJson(value) {
 
 let running;
 try {
+  const invalidPort = await freePort();
+  const missingDatabase = join(directory, 'missing.sqlite');
+  const invalid = start(invalidPort, missingDatabase);
+  await Promise.race([
+    new Promise((resolve) => invalid.child.once('exit', resolve)),
+    new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error('Invalid standalone did not exit.')),
+        5000,
+      ),
+    ),
+  ]);
+  assert.notEqual(invalid.child.exitCode, 0);
+  assert.match(invalid.output(), /run db:node migrate first/);
+  assert.equal(existsSync(missingDatabase), false);
+
   migrate();
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
@@ -167,13 +187,17 @@ try {
   });
   assert.equal(listed.status, 200);
   const body = await listed.json();
-  assert.equal(body.documents.some((document) => document.id === documentId), true);
+  assert.equal(
+    body.documents.some((document) => document.id === documentId),
+    true,
+  );
 
   console.log(
     JSON.stringify({
       health: 'ok',
       readiness: 'ready',
       chunkedOversizeStatus: oversized.status,
+      invalidDatabaseRejectedBeforeListen: true,
       persistedAcrossRestart: true,
     }),
   );

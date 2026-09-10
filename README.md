@@ -23,7 +23,7 @@ são aceitos no fluxo autenticado. Não há conversão automática entre os modo
 ## Executar localmente
 
 Para reproduzir a validação, use Node.js 22.22.3 e npm 10.9.8. O mínimo técnico
-declarado em `package.json` é Node 22.13.0; a versão exercitada neste procedimento
+declarado em `package.json` é Node 22.16.0; a versão exercitada neste procedimento
 e na CI é 22.22.3. Wrangler 4.92.0 vem do lockfile.
 
 ```sh
@@ -34,7 +34,7 @@ npm run db:migrate:local -- --persist-to .wrangler/state
 npm run dev
 ```
 
-O Wrangler aplica `drizzle/0000..0003` na ordem e registra o ledger no banco;
+O Wrangler aplica `drizzle/0000..0004` na ordem e registra o ledger no banco;
 repetir o comando não reaplica DDL. Use sempre um `--persist-to` explícito e não
 reutilize a persistência de outra sessão. Se `status` encontrar schema sem ledger,
 `migrate` recusa a escrita: siga o [runbook de D1](docs/d1-recovery.md) para
@@ -64,6 +64,15 @@ No preview compilado, a configuração do Wrangler fica em `dist/server`; por is
 um `--env-file` relativo é resolvido a partir desse diretório. O caminho absoluto
 `"$PWD/.env.local"` referencia o arquivo ignorado fora de `dist`, sem copiar
 segredos para o artefato. A configuração local, por si só, não envia e-mails.
+
+### Runtime Node standalone
+
+O build Node mantém os mesmos fluxos da aplicação e grava SQLite persistente fora
+do artefato. A inicialização e as migrações são explícitas; o processo recusa banco
+ausente, pendente, legado ou divergente antes de escutar. Para container, backup,
+restore sanitizado, permissões e proxy confiável, siga o
+[runbook do runtime Node](docs/node-operations.md). O preview Workers continua em
+`npm start`; a produção Node usa `npm run start:node` ou o launcher da imagem.
 
 ## Acesso por e-mail
 
@@ -304,6 +313,8 @@ npm run check
 npm run lint
 npm test
 npm run build
+npm run build:node
+npm run test:node:smoke
 ```
 
 Os testes usam SQLite com as migrações reais e um transporte de e-mail em memória.
