@@ -12,6 +12,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
+import { analyzeMarkdown, warningMessage } from '../lib/markdown-analysis.mjs';
 
 const MAX_MARKDOWN_BYTES = 1024 * 1024;
 const MAX_STATE_BYTES = 64 * 1024;
@@ -569,6 +570,8 @@ async function main() {
   });
   const operation = await loadOrCreateOperation(args.operation, candidate);
   assertOperationMatches(operation, { ...args, bytes, markdown, token });
+  for (const reference of analyzeMarkdown(markdown).references)
+    process.stderr.write(`Aviso (linha ${reference.line}): ${warningMessage(reference)}\n`);
   await ensureOperationDurable(args.operation);
   const result = await publish(operation, markdown, token, timeout);
   await persistReceipt(args.operation, operation, result);

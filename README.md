@@ -139,6 +139,14 @@ conteúdo. Em sucesso, a saída JSON contém `documentId`, `publicationId` e `ur
 O timeout padrão de uma tentativa é 30 segundos e pode ser reduzido localmente
 com `MD_COLAB_PUBLISH_TIMEOUT_MS`.
 
+Antes do envio, a CLI avisa em stderr sobre links e imagens que apontam para
+arquivos locais, caminhos relativos, `file://`, caminhos Windows/UNC, URLs sem
+protocolo, `data:` ou esquemas não suportados. O aviso não altera o Markdown, o
+payload, o digest ou a operação, e não pede confirmação adicional. Apenas o
+Markdown escolhido é publicado: torne o plano autocontido ou use uma URL HTTP(S)
+explícita para recursos externos. Links `mailto:` continuam utilizáveis, mas não
+são aceitos como imagens.
+
 O arquivo de operação pressupõe um filesystem local com criação exclusiva,
 hard links, rename atômico e sincronização. Preservá-lo permite recuperar respostas
 perdidas; ele não protege contra exclusão ou perda do próprio disco.
@@ -192,6 +200,9 @@ o provedor falha. Solicitações de links têm limites por e-mail e endereço de
 - Importação de `.md` e `.markdown` de até 1 MB, preservando o texto original.
 - Títulos, subtítulos, negritos, tabelas, listas, links e código renderizados;
   HTML arbitrário é descartado.
+- Títulos têm âncoras estáveis e links de seção navegam no próprio documento.
+  Links e imagens que dependem de recursos não publicados são explicados no leitor;
+  recursos locais não são buscados nem enviados.
 - Documentos e comentários persistidos em SQLite/D1.
 - Compartilhamento por nome opcional e e-mail, com convite e reenvio.
 - Comentários gerais ou em trechos selecionados, com autor e data.
