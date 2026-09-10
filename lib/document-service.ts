@@ -45,6 +45,10 @@ export type DocumentInput = {
   title: string;
   requestedTitle: string | null;
 };
+type ManualDocumentInput = DocumentInput & {
+  id: string;
+  authorId: string;
+};
 export function documentInput(
   input: Record<string, unknown>,
   exact = false,
@@ -78,6 +82,35 @@ export function documentInput(
       filename.replace(/\.(md|markdown)$/i, '')
     ).slice(0, 240);
   return { markdown, filename, title, requestedTitle };
+}
+function manualDocumentInput(
+  input: Record<string, unknown>,
+): ManualDocumentInput {
+  if (
+    Object.keys(input).some(
+      (key) =>
+        !['id', 'authorId', 'markdown', 'filename', 'title'].includes(key),
+    )
+  )
+    throw new HttpError(
+      400,
+      'A importação aceita somente identificador, autor, Markdown, nome e título.',
+    );
+  const id = requiredText(input.id, 'Identificador da importação', 36);
+  if (
+    input.id !== id ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      id,
+    )
+  )
+    throw new HttpError(400, 'Identificador da importação inválido.');
+  const authorId = requiredText(input.authorId, 'Autor da importação', 128);
+  const documentFields: Record<string, unknown> = {
+    markdown: input.markdown,
+    filename: input.filename,
+  };
+  if (input.title !== undefined) documentFields.title = input.title;
+  return { id, authorId, ...documentInput(documentFields, true) };
 }
 export class DocumentService {
   constructor(
@@ -128,23 +161,59 @@ export class DocumentService {
     return doc;
   }
   async create(input: Record<string, unknown>) {
-    const { markdown, filename, title } = documentInput(input);
-    const id = crypto.randomUUID();
+    const { id, authorId, markdown, filename, title } =
+      manualDocumentInput(input);
+    if (authorId !== this.viewer.id)
+      throw new HttpError(
+        409,
+        'Esta importação pertence a outra sessão e não pode ser reutilizada.',
+      );
+    const isTest = this.viewer.isTest ? 1 : 0;
     await this.db
       .prepare(
-        'INSERT INTO documents (id,owner_id,title,filename,markdown,created_at,is_test) VALUES (?,?,?,?,?,?,?)',
+        'INSERT INTO documents (id,owner_id,title,filename,markdown,created_at,is_test) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
       )
       .bind(
         id,
-        this.viewer.id,
+        authorId,
         title,
         filename,
         markdown,
         new Date().toISOString(),
-        this.viewer.isTest ? 1 : 0,
+        isTest,
       )
       .run();
-    return this.document(id);
+    const persistedContext = await this.db
+      .prepare('SELECT owner_id,is_test FROM documents WHERE id=?')
+      .bind(id)
+      .first<Pick<DocumentRow, 'owner_id' | 'is_test'>>();
+    if (!persistedContext)
+      throw new Error('Inserted document could not be read back.');
+    if (
+      persistedContext.owner_id !== authorId ||
+      persistedContext.is_test !== isTest
+    )
+      throw new HttpError(
+        409,
+        'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
+      );
+    const document = await this.db
+      .prepare(
+        'SELECT * FROM documents WHERE id=? AND owner_id=? AND is_test=?',
+      )
+      .bind(id, authorId, isTest)
+      .first<DocumentRow>();
+    if (!document) throw new Error('Inserted document could not be read back.');
+    if (
+      document.markdown !== markdown ||
+      document.filename !== filename ||
+      document.title !== title
+    )
+      throw new HttpError(
+        409,
+        'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
+      );
+    return document;
   }
   async comments(id: string) {
     await this.document(id);

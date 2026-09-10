@@ -86,6 +86,36 @@ function fixture() {
   };
 }
 
+function pauseAfterDocumentInsert(db: D1Database) {
+  let inserted!: () => void;
+  let resume!: () => void;
+  const insertedPromise = new Promise<void>((resolve) => {
+    inserted = resolve;
+  });
+  const resumePromise = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.startsWith('INSERT INTO documents')) return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async run() {
+            const result = await bound.run();
+            inserted();
+            await resumePromise;
+            return result;
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return { controlled, inserted: insertedPromise, resume };
+}
+
 void test('login exige posse do e-mail: token aleatório, somente hash no banco e consumo único mesmo em concorrência', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());
@@ -158,15 +188,19 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
   const ownerLogin = await f.call('auth/verify', 'POST', { token: proof });
   assert.equal(ownerLogin.status, 200);
   const ownerCookie = ownerLogin.headers.get('set-cookie')!.split(';')[0];
-  assert.equal(
-    (await data(await f.call('session', 'GET', undefined, ownerCookie)))
-      .canCreate,
-    true,
+  const ownerSession = await data(
+    await f.call('session', 'GET', undefined, ownerCookie),
   );
+  assert.equal(ownerSession.canCreate, true);
   const created = await f.call(
     'documents',
     'POST',
-    { markdown: '# Privado\n\nUm trecho.', filename: 'privado.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: ownerSession.viewer.id,
+      markdown: '# Privado\n\nUm trecho.',
+      filename: 'privado.md',
+    },
     ownerCookie,
   );
   assert.equal(created.status, 201);
@@ -274,12 +308,84 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
   );
 });
 
+void test('POST documents exige UUID e autor da sessão sem fallback para outra operação', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const base = { markdown: '# Contrato', filename: 'contrato.md' };
+  for (const invalid of [
+    base,
+    { ...base, id: crypto.randomUUID() },
+    { ...base, id: [crypto.randomUUID()], authorId: owner.viewer.id },
+    {
+      ...base,
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      title: [],
+    },
+  ])
+    assert.equal(
+      (await f.call('documents', 'POST', invalid, owner.cookie)).status,
+      400,
+    );
+  assert.equal(
+    (
+      await f.call(
+        'documents',
+        'POST',
+        { ...base, id: crypto.randomUUID(), authorId: 'outra-sessão' },
+        owner.cookie,
+      )
+    ).status,
+    409,
+  );
+  assert.equal(
+    f.sqlite.prepare('SELECT count(*) n FROM documents').get()?.n,
+    0,
+  );
+});
+
+void test('perda de canCreate durante a escrita impede confirmar o documento', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const operationId = crypto.randomUUID();
+  const schedule = pauseAfterDocumentInsert(f.db);
+  f.values.DB = schedule.controlled;
+  const pending = f.call(
+    'documents',
+    'POST',
+    {
+      id: operationId,
+      authorId: owner.viewer.id,
+      markdown: '# Sem confirmação',
+      filename: 'sem-confirmacao.md',
+    },
+    owner.cookie,
+  );
+  await schedule.inserted;
+  f.values.APP_OWNER_EMAIL = undefined;
+  schedule.resume();
+  assert.equal((await pending).status, 403);
+  assert.equal(
+    f.sqlite
+      .prepare('SELECT count(*) n FROM documents WHERE id=?')
+      .get(operationId)?.n,
+    1,
+  );
+});
+
 void test('remover convite invalida links antigos, inclusive se a pessoa for adicionada novamente', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());
   const user = await f.login();
   const owner = new DocumentService(f.db, user.viewer);
-  const doc = await owner.create({ markdown: '# Teste', filename: 'teste.md' });
+  const doc = await owner.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Teste',
+    filename: 'teste.md',
+  });
   await owner.share(doc.id, { email: 'guest@example.com' });
   await f.auth.invite('guest@example.com', doc.id, user.viewer.id);
   const old = f.mailbox.lastToken();
@@ -358,7 +464,12 @@ void test('dois autores entram sem convite, recuperam identidade e ficam isolado
   const documentA = await f.call(
     'documents',
     'POST',
-    { markdown: '# Plano A', filename: 'a.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: firstA.session.viewer.id,
+      markdown: '# Plano A',
+      filename: 'a.md',
+    },
     firstA.cookie,
   );
   assert.equal(documentA.status, 201);
@@ -375,7 +486,12 @@ void test('dois autores entram sem convite, recuperam identidade e ficam isolado
   const documentB = await f.call(
     'documents',
     'POST',
-    { markdown: '# Plano B', filename: 'b.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: authorB.session.viewer.id,
+      markdown: '# Plano B',
+      filename: 'b.md',
+    },
     authorB.cookie,
   );
   assert.equal(documentB.status, 201);
@@ -455,7 +571,12 @@ void test('revogar habilitação bloqueia criação e resgate sem acesso, preser
   const created = await f.call(
     'documents',
     'POST',
-    { markdown: '# Já existente', filename: 'existente.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: author.viewer.id,
+      markdown: '# Já existente',
+      filename: 'existente.md',
+    },
     author.cookie,
   );
   const id = (await data(created)).document.id;
@@ -520,13 +641,23 @@ void test('revogação é seletiva entre planos e invalida somente o convite pen
   const first = await f.call(
     'documents',
     'POST',
-    { markdown: '# Primeiro', filename: 'primeiro.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '# Primeiro',
+      filename: 'primeiro.md',
+    },
     owner.cookie,
   );
   const second = await f.call(
     'documents',
     'POST',
-    { markdown: '# Segundo', filename: 'segundo.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '# Segundo',
+      filename: 'segundo.md',
+    },
     owner.cookie,
   );
   const firstId = (await data(first)).document.id;
@@ -744,7 +875,12 @@ void test('falha do provedor não é sucesso; reenvio manual recupera o convite 
   const created = await f.call(
     'documents',
     'POST',
-    { markdown: '# Documento', filename: 'doc.md' },
+    {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '# Documento',
+      filename: 'doc.md',
+    },
     owner.cookie,
   );
   const id = (await data(created)).document.id as string;

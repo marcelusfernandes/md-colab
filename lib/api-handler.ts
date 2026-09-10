@@ -57,11 +57,9 @@ export async function handleApi(
 ) {
   try {
     const config = authConfig(values);
-    const auth = new AuthService(
-      values.DB,
-      config,
-      mailer ?? new ResendMailer(values.RESEND_API_KEY, values.MAIL_FROM),
-    );
+    const configuredMailer =
+      mailer ?? new ResendMailer(values.RESEND_API_KEY, values.MAIL_FROM);
+    const auth = new AuthService(values.DB, config, configuredMailer);
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\//, '').split('/');
     const publishing = new PublicationService(values.DB, config);
@@ -204,7 +202,24 @@ export async function handleApi(
             403,
             'Sua conta pode ler e comentar os documentos recebidos.',
           );
-        return json({ document: await service.create(input) }, 201);
+        const document = await service.create(input);
+        const currentAuth = new AuthService(
+          values.DB,
+          authConfig(values),
+          configuredMailer,
+        );
+        const currentViewer = await currentAuth.viewer(request);
+        if (
+          !currentViewer ||
+          currentViewer.id !== viewer.id ||
+          Boolean(currentViewer.isTest) !== Boolean(viewer.isTest) ||
+          !currentAuth.canCreate(currentViewer)
+        )
+          throw new HttpError(
+            403,
+            'Sua conta não está mais habilitada para importar este documento.',
+          );
+        return json({ document }, 201);
       }
       if (action === 'comments')
         return json({ comment: await service.addComment(id, input) }, 201);

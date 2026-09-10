@@ -25,6 +25,16 @@ function fixture() {
 function denied(error: unknown) {
   return error instanceof HttpError && error.status === 404;
 }
+function createDocument(
+  service: DocumentService,
+  input: Record<string, unknown>,
+) {
+  return service.create({
+    id: crypto.randomUUID(),
+    authorId: service.viewer.id,
+    ...input,
+  });
+}
 
 function pauseConcurrentCommentInserts(db: D1Database) {
   let arrivals = 0;
@@ -36,6 +46,33 @@ function pauseConcurrentCommentInserts(db: D1Database) {
   controlled.prepare = (sql: string) => {
     const statement = db.prepare(sql);
     if (!sql.startsWith('INSERT INTO comments')) return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async run() {
+            arrivals += 1;
+            if (arrivals === 2) release();
+            await gate;
+            return bound.run();
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return { controlled, arrivals: () => arrivals };
+}
+
+function pauseConcurrentDocumentInserts(db: D1Database) {
+  let arrivals = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.startsWith('INSERT INTO documents')) return statement;
     return {
       bind(...values: unknown[]) {
         const bound = statement.bind(...values);
@@ -91,7 +128,7 @@ void test('somente dono e convidados conseguem ler o documento e os comentários
       guest.registerViewer(),
       stranger.registerViewer(),
     ]);
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Privado\n\n**Conteúdo** interno.',
       filename: 'privado.md',
     });
@@ -127,7 +164,7 @@ void test('convidado comenta sem poder compartilhar; dono vê o comentário pers
   try {
     await owner.registerViewer();
     await guest.registerViewer();
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Proposta\n\nUm trecho.',
       filename: 'proposta.md',
     });
@@ -160,7 +197,7 @@ void test('revogar acesso bloqueia leitura e novos comentários sem apagar os ex
   try {
     await owner.registerViewer();
     await guest.registerViewer();
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Proposta',
       filename: 'proposta.md',
     });
@@ -194,7 +231,7 @@ void test('reenvio do mesmo comentário não duplica e não pode sobrescrever ou
   try {
     await owner.registerViewer();
     await guest.registerViewer();
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Proposta',
       filename: 'proposta.md',
     });
@@ -231,7 +268,7 @@ void test('reenvio do mesmo comentário não duplica e não pode sobrescrever ou
         guest.addComment(doc.id, divergent),
         (error) => error instanceof HttpError && error.status === 409,
       );
-    const otherDoc = await owner.create({
+    const otherDoc = await createDocument(owner, {
       markdown: '# Outra proposta',
       filename: 'outra.md',
     });
@@ -255,7 +292,7 @@ void test('duas chamadas pausadas antes do INSERT convergem na mesma contribuiç
   try {
     await owner.registerViewer();
     await guest.registerViewer();
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Concorrência',
       filename: 'concorrencia.md',
     });
@@ -290,7 +327,7 @@ void test('falha inesperada de escrita não é convertida em comentário confirm
   const { sqlite, db, owner } = fixture();
   try {
     await owner.registerViewer();
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Falha',
       filename: 'falha.md',
     });
@@ -328,7 +365,7 @@ void test('revogação concluída durante o envio impede confirmar ou revelar o 
   try {
     await owner.registerViewer();
     await guest.registerViewer();
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: '# Revogação concorrente',
       filename: 'revogacao.md',
     });
@@ -358,10 +395,12 @@ void test('entrada inválida não grava documentos, compartilhamentos ou coment�
   const { sqlite, owner } = fixture();
   try {
     await owner.registerViewer();
-    await assert.rejects(owner.create({ markdown: ' ', filename: 'vazio.md' }));
+    await assert.rejects(
+      createDocument(owner, { markdown: ' ', filename: 'vazio.md' }),
+    );
     assert.deepEqual(await owner.list(), []);
     const original = '    código com indentação\n\n# Título\n';
-    const doc = await owner.create({
+    const doc = await createDocument(owner, {
       markdown: original,
       filename: 'arquivo.md',
     });
@@ -396,20 +435,190 @@ void test('entrada inválida não grava documentos, compartilhamentos ou coment�
   }
 });
 
-void test('upload manual continua inferindo título quando o campo opcional vem vazio ou nulo', async () => {
+void test('upload manual infere título quando omitido e valida título explícito', async () => {
   const { sqlite, owner } = fixture();
   await owner.registerViewer();
-  const empty = await owner.create({
+  const inferred = await createDocument(owner, {
     markdown: '# Título do Markdown',
-    filename: 'vazio.md',
-    title: '',
+    filename: 'inferido.md',
   });
-  const nullable = await owner.create({
+  const explicit = await createDocument(owner, {
     markdown: 'Sem cabeçalho',
     filename: 'arquivo.md',
-    title: null,
+    title: 'Título explícito',
   });
-  assert.equal(empty.title, 'Título do Markdown');
-  assert.equal(nullable.title, 'arquivo');
+  assert.equal(inferred.title, 'Título do Markdown');
+  assert.equal(explicit.title, 'Título explícito');
+  for (const title of ['', null, [], {}])
+    await assert.rejects(
+      createDocument(owner, {
+        markdown: '# Inválido',
+        filename: 'invalido.md',
+        title,
+      }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
   sqlite.close();
+});
+
+void test('replay e concorrência da mesma importação convergem em uma linha exata', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const payload = {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '\n# Importação estável\n\nConteúdo exato.\n',
+      filename: 'estavel.md',
+    };
+    const schedule = pauseConcurrentDocumentInserts(db);
+    const concurrentOwner = new DocumentService(schedule.controlled, {
+      ...owner.viewer,
+    });
+    const [first, second] = await Promise.all([
+      concurrentOwner.create(payload),
+      concurrentOwner.create(payload),
+    ]);
+    assert.equal(schedule.arrivals(), 2);
+    assert.deepEqual(second, first);
+    assert.equal(first.id, payload.id);
+    assert.equal(first.markdown, payload.markdown);
+    assert.equal(
+      sqlite
+        .prepare('SELECT count(*) n FROM documents WHERE id=?')
+        .get(payload.id)?.n,
+      1,
+    );
+    assert.deepEqual(await owner.create(payload), first);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('mesmo UUID rejeita autor, contexto ou payload divergente sem sobrescrever', async () => {
+  const { sqlite, db, owner, guest } = fixture();
+  try {
+    await owner.registerViewer();
+    await guest.registerViewer();
+    const payload = {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '# Original',
+      filename: 'original.md',
+    };
+    const original = await owner.create(payload);
+    for (const divergent of [
+      { ...payload, markdown: '# Alterado' },
+      { ...payload, filename: 'alterado.md' },
+      { ...payload, title: 'Título explícito' },
+    ])
+      await assert.rejects(
+        owner.create(divergent),
+        (error) => error instanceof HttpError && error.status === 409,
+      );
+
+    await assert.rejects(
+      guest.create({
+        ...payload,
+        authorId: guest.viewer.id,
+        markdown: '# Conteúdo de outro autor',
+      }),
+      (error) =>
+        error instanceof HttpError &&
+        error.status === 409 &&
+        !error.message.includes(original.markdown),
+    );
+    const testContext = new DocumentService(db, {
+      ...owner.viewer,
+      isTest: true,
+    });
+    await assert.rejects(
+      testContext.create(payload),
+      (error) => error instanceof HttpError && error.status === 409,
+    );
+    assert.deepEqual(await owner.document(payload.id), original);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('importação exige UUID e autor esperado sem gerar identificador alternativo', async () => {
+  const { sqlite, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const base = { markdown: '# Contrato', filename: 'contrato.md' };
+    for (const invalid of [
+      base,
+      { ...base, id: crypto.randomUUID() },
+      { ...base, id: ['não escalar'], authorId: owner.viewer.id },
+      { ...base, id: 'não-uuid', authorId: owner.viewer.id },
+      {
+        ...base,
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        title: [],
+      },
+    ])
+      await assert.rejects(
+        owner.create(invalid),
+        (error) => error instanceof HttpError && error.status === 400,
+      );
+    await assert.rejects(
+      owner.create({
+        ...base,
+        id: crypto.randomUUID(),
+        authorId: 'outra-sessão',
+      }),
+      (error) => error instanceof HttpError && error.status === 409,
+    );
+    assert.equal(
+      sqlite.prepare('SELECT count(*) n FROM documents').get()?.n,
+      0,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('falha inesperada após INSERT confirmado não é convertida em sucesso', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const payload = {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '# Persistido sem resposta',
+      filename: 'incerto.md',
+    };
+    const ambiguous = Object.create(db) as D1Database;
+    ambiguous.prepare = (sql: string) => {
+      const statement = db.prepare(sql);
+      if (!sql.startsWith('INSERT INTO documents')) return statement;
+      return {
+        bind(...values: unknown[]) {
+          const bound = statement.bind(...values);
+          return {
+            async run() {
+              await bound.run();
+              throw new Error('transport failed after commit');
+            },
+          };
+        },
+      } as unknown as D1PreparedStatement;
+    };
+    const uncertain = new DocumentService(ambiguous, { ...owner.viewer });
+    await assert.rejects(
+      uncertain.create(payload),
+      /transport failed after commit/,
+    );
+    assert.equal(
+      sqlite
+        .prepare('SELECT count(*) n FROM documents WHERE id=?')
+        .get(payload.id)?.n,
+      1,
+    );
+    assert.equal((await owner.create(payload)).markdown, payload.markdown);
+  } finally {
+    sqlite.close();
+  }
 });
