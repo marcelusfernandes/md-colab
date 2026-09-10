@@ -58,8 +58,20 @@ import {
   updateCommentOperation,
   type CommentOperation,
 } from '@/lib/comment-operation';
+import {
+  createImportOperation,
+  documentFromImportResponse,
+  importAttemptMatches,
+  importOperationMatchesSession,
+  importOperationRequest,
+  importSessionFromResponse,
+  updateImportOperation,
+  type ImportAttempt,
+  type ImportOperation,
+} from '@/lib/import-operation';
 
 const COMMENT_REQUEST_TIMEOUT_MS = 30_000;
+const IMPORT_REQUEST_TIMEOUT_MS = 30_000;
 
 type Summary = Omit<DocumentRow, 'markdown'> & {
   owner_name: string;
@@ -166,14 +178,23 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const commentInput = useRef<HTMLTextAreaElement>(null);
   const mounted = useRef(true);
   const commentOperationRef = useRef<CommentOperation | null>(null);
+  const importOperationRef = useRef<ImportOperation | null>(null);
   const commentValue = useRef('');
   const composerRevision = useRef(0);
   const contextGeneration = useRef(0);
   const activeDocumentId = useRef<string | null>(null);
   const activeViewerId = useRef<string | null>(null);
+  const activeViewerIsTest = useRef<boolean | null>(null);
+  const collectionSession = useRef<{
+    viewerId: string;
+    isTest: boolean;
+  } | null>(null);
   const commentsRevision = useRef(0);
   const commentsRequest = useRef(0);
   const commentSendRequest = useRef(0);
+  const importReadRequest = useRef(0);
+  const importReadInProgress = useRef(false);
+  const importSendRequest = useRef(0);
   const loadRequest = useRef(0);
   const refreshCommentsRef = useRef<(() => Promise<void>) | null>(null);
   const [viewer, setViewer] = useState<Viewer | null>(null);
@@ -195,6 +216,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [comment, setComment] = useState('');
   const [commentOperation, setCommentOperation] =
     useState<CommentOperation | null>(null);
+  const [importOperation, setImportOperation] =
+    useState<ImportOperation | null>(null);
+  const [confirmedImport, setConfirmedImport] = useState<Pick<
+    DocumentRow,
+    'id' | 'filename'
+  > | null>(null);
   const [commentsError, setCommentsError] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -204,6 +231,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [notice, setNotice] = useState('');
   const hasUnconfirmedComment =
     Boolean(comment.trim()) || Boolean(commentOperation?.body.trim());
+  const hasUnconfirmedWork = hasUnconfirmedComment || Boolean(importOperation);
   const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
     () =>
       doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] },
@@ -217,13 +245,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   );
 
   useEffect(() => {
-    if (!hasUnconfirmedComment) return;
+    if (!hasUnconfirmedWork) return;
     function preventUnload(event: BeforeUnloadEvent) {
       event.preventDefault();
     }
     window.addEventListener('beforeunload', preventUnload);
     return () => window.removeEventListener('beforeunload', preventUnload);
-  }, [hasUnconfirmedComment]);
+  }, [hasUnconfirmedWork]);
 
   const storeCommentOperation = useCallback(
     (operation: CommentOperation | null) => {
@@ -231,6 +259,32 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setCommentOperation(operation);
     },
     [],
+  );
+  const storeImportOperation = useCallback(
+    (operation: ImportOperation | null) => {
+      importOperationRef.current = operation;
+      setImportOperation(operation);
+    },
+    [],
+  );
+  const clearCollectionContext = useCallback(() => {
+    collectionSession.current = null;
+    setList([]);
+    setConfirmedImport(null);
+    setNotice('');
+  }, []);
+  const blockImportOperation = useCallback(
+    (message: string) => {
+      const operation = importOperationRef.current;
+      if (!operation) return;
+      contextGeneration.current += 1;
+      importSendRequest.current += 1;
+      setBusy((current) => (current === 'import' ? '' : current));
+      storeImportOperation(
+        updateImportOperation(operation, 'blocked', message),
+      );
+    },
+    [storeImportOperation],
   );
   const confirmCommentOperation = useCallback(
     (operation: CommentOperation, confirmed: CommentRow) => {
@@ -284,6 +338,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     );
     if (cause.status === 401) {
       activeViewerId.current = null;
+      activeViewerIsTest.current = null;
       setNeedsLogin(true);
       setViewer(null);
       setCanCreate(false);
@@ -292,6 +347,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
 
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
+    let sessionRecognized = false;
     try {
       const access = await api<{ mode: 'email' | 'test' }>('access');
       if (!mounted.current || request !== loadRequest.current) return;
@@ -301,6 +357,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         canCreate: boolean;
       }>('session');
       if (!mounted.current || request !== loadRequest.current) return;
+      sessionRecognized = true;
+      const userIsTest = Boolean(user.isTest);
+      if (
+        activeViewerId.current !== null &&
+        (activeViewerId.current !== user.id ||
+          activeViewerIsTest.current !== userIsTest)
+      )
+        clearCollectionContext();
       const previousOperation = commentOperationRef.current;
       if (previousOperation && previousOperation.viewerId !== user.id) {
         storeCommentOperation(null);
@@ -313,7 +377,27 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           'A tentativa anterior pertencia a outra sessão e não foi reutilizada.',
         );
       }
+      const previousImport = importOperationRef.current;
+      if (
+        previousImport &&
+        !importOperationMatchesSession(previousImport, {
+          viewer: user,
+          canCreate: allowed,
+        })
+      )
+        blockImportOperation(
+          'A identidade, o contexto ou a permissão de criação mudou. Este arquivo não será enviado pela sessão atual.',
+        );
+      else if (previousImport?.status === 'blocked')
+        storeImportOperation(
+          updateImportOperation(
+            previousImport,
+            'uncertain',
+            'A mesma sessão foi restaurada. Verifique o resultado antes de reenviar.',
+          ),
+        );
       activeViewerId.current = user.id;
+      activeViewerIsTest.current = userIsTest;
       setViewer(user);
       setCanCreate(allowed);
       setNeedsLogin(false);
@@ -362,6 +446,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           contextGeneration.current += 1;
           activeDocumentId.current = null;
           setList(result.documents);
+          collectionSession.current = {
+            viewerId: user.id,
+            isTest: userIsTest,
+          };
         }
       }
     } catch (e) {
@@ -377,11 +465,16 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         commentsRequest.current += 1;
         activeDocumentId.current = null;
         activeViewerId.current = null;
+        activeViewerIsTest.current = null;
         setNeedsLogin(true);
         setViewer(null);
         setCanCreate(false);
+        clearCollectionContext();
         setDoc(null);
         setComments([]);
+        blockImportOperation(
+          'A sessão terminou. Este arquivo não será enviado por outra identidade.',
+        );
       } else {
         contextGeneration.current += 1;
         commentsRequest.current += 1;
@@ -389,11 +482,34 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setError(errorText(e));
         setDoc(null);
         setComments([]);
+        if (!sessionRecognized) {
+          activeViewerId.current = null;
+          activeViewerIsTest.current = null;
+          setViewer(null);
+          setCanCreate(false);
+          clearCollectionContext();
+        }
+        const operation = importOperationRef.current;
+        if (operation && operation.status !== 'blocked')
+          storeImportOperation(
+            updateImportOperation(
+              operation,
+              'uncertain',
+              'Não foi possível revalidar a sessão. Verifique antes de reenviar.',
+            ),
+          );
       }
     } finally {
       if (mounted.current) setLoading(false);
     }
-  }, [documentId, hideProtectedContent, storeCommentOperation]);
+  }, [
+    blockImportOperation,
+    clearCollectionContext,
+    documentId,
+    hideProtectedContent,
+    storeCommentOperation,
+    storeImportOperation,
+  ]);
   useEffect(() => {
     mounted.current = true;
     // oxlint-disable-next-line react/react-compiler -- load updates state after the awaited HTTP request settles.
@@ -499,28 +615,310 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     viewer,
   ]);
 
+  function importAttemptIsCurrent(
+    operation: ImportOperation,
+    attempt: ImportAttempt,
+  ) {
+    return (
+      mounted.current &&
+      importAttemptMatches(
+        operation,
+        importOperationRef.current,
+        attempt,
+        contextGeneration.current,
+        importSendRequest.current,
+      )
+    );
+  }
+  async function revalidateImportSession(
+    operation: ImportOperation,
+    attempt: ImportAttempt,
+  ) {
+    let session: ReturnType<typeof importSessionFromResponse>;
+    try {
+      session = importSessionFromResponse(
+        await api<unknown>('session', 'GET', undefined, {
+          timeoutMs: IMPORT_REQUEST_TIMEOUT_MS,
+        }),
+      );
+    } catch (cause) {
+      if (importAttemptIsCurrent(operation, attempt)) {
+        activeViewerId.current = null;
+        activeViewerIsTest.current = null;
+        setViewer(null);
+        setCanCreate(false);
+        clearCollectionContext();
+      }
+      throw cause;
+    }
+    if (!importAttemptIsCurrent(operation, attempt)) return false;
+    const sessionIsTest = Boolean(session.viewer.isTest);
+    if (
+      activeViewerId.current !== null &&
+      (activeViewerId.current !== session.viewer.id ||
+        activeViewerIsTest.current !== sessionIsTest)
+    )
+      clearCollectionContext();
+    activeViewerId.current = session.viewer.id;
+    activeViewerIsTest.current = sessionIsTest;
+    setViewer(session.viewer);
+    setCanCreate(session.canCreate);
+    if (!importOperationMatchesSession(operation, session)) {
+      blockImportOperation(
+        'A identidade, o contexto ou a permissão de criação mudou. Este arquivo não será enviado pela sessão atual.',
+      );
+      setLoading(true);
+      void load();
+      return false;
+    }
+    if (
+      collectionSession.current?.viewerId !== session.viewer.id ||
+      collectionSession.current.isTest !== sessionIsTest
+    ) {
+      try {
+        const result = await api<{ documents: Summary[] }>(
+          'documents',
+          'GET',
+          undefined,
+          { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+        );
+        if (!importAttemptIsCurrent(operation, attempt)) return false;
+        if (!Array.isArray(result?.documents))
+          throw new Error('O servidor retornou uma lista inválida.');
+        setList(result.documents);
+        collectionSession.current = {
+          viewerId: session.viewer.id,
+          isTest: sessionIsTest,
+        };
+      } catch (cause) {
+        if (!importAttemptIsCurrent(operation, attempt)) return false;
+        blockImportOperation(
+          'A sessão foi restaurada, mas a lista de documentos não pôde ser carregada. Tente verificar novamente.',
+        );
+        setError(
+          'Não foi possível carregar os documentos desta sessão. ' +
+            errorText(cause),
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+  function confirmImportOperation(
+    operation: ImportOperation,
+    created: DocumentRow,
+  ) {
+    if (importOperationRef.current?.id !== operation.id) return;
+    importSendRequest.current += 1;
+    setBusy((current) => (current === 'import' ? '' : current));
+    storeImportOperation(null);
+    setConfirmedImport({ id: created.id, filename: created.filename });
+    const summary: Summary = {
+      id: created.id,
+      owner_id: created.owner_id,
+      title: created.title,
+      filename: created.filename,
+      is_test: created.is_test,
+      created_at: created.created_at,
+      owner_name:
+        viewer?.id === operation.viewerId ? viewer.name : operation.viewerId,
+      comment_count: 0,
+    };
+    setList((current) =>
+      current.some((entry) => entry.id === created.id)
+        ? current
+        : [summary, ...current],
+    );
+    setNotice('Importação confirmada. O plano está pronto para abrir.');
+  }
+  async function handleImportFailure(
+    operation: ImportOperation,
+    attempt: ImportAttempt,
+    cause: unknown,
+  ) {
+    if (!importAttemptIsCurrent(operation, attempt)) return;
+    if (cause instanceof ApiError && [401, 403].includes(cause.status)) {
+      blockImportOperation(
+        'A sessão ou a permissão mudou antes da confirmação. Este arquivo não será enviado pela identidade atual.',
+      );
+      setLoading(true);
+      void load();
+      return;
+    }
+    if (cause instanceof ApiError && cause.status === 409) {
+      try {
+        if (!(await revalidateImportSession(operation, attempt))) return;
+      } catch (sessionError) {
+        if (!importAttemptIsCurrent(operation, attempt)) return;
+        if (
+          sessionError instanceof ApiError &&
+          [401, 403].includes(sessionError.status)
+        ) {
+          blockImportOperation(
+            'A sessão mudou antes da confirmação. Este arquivo não será enviado pela identidade atual.',
+          );
+          return;
+        }
+        storeImportOperation(
+          updateImportOperation(
+            operation,
+            'uncertain',
+            'Não foi possível revalidar a sessão após o conflito. Verifique o resultado antes de reenviar.',
+          ),
+        );
+        return;
+      }
+    }
+    const rejected =
+      cause instanceof ApiError && [400, 409].includes(cause.status);
+    storeImportOperation(
+      updateImportOperation(
+        operation,
+        rejected ? 'error' : 'uncertain',
+        rejected
+          ? errorText(cause)
+          : errorText(cause) +
+              ' O servidor pode ter recebido o arquivo; verifique o resultado ou reenvie a mesma operação.',
+      ),
+    );
+  }
+  async function sendImportOperation(operation: ImportOperation) {
+    if (
+      busy ||
+      !importOperationRef.current ||
+      importOperationRef.current.id !== operation.id
+    )
+      return;
+    const attempt = {
+      generation: contextGeneration.current,
+      request: ++importSendRequest.current,
+    };
+    storeImportOperation(updateImportOperation(operation, 'sending', ''));
+    setBusy('import');
+    setError('');
+    setNotice('');
+    try {
+      if (!(await revalidateImportSession(operation, attempt))) return;
+      const result = await api<unknown>(
+        'documents',
+        'POST',
+        importOperationRequest(operation),
+        { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+      );
+      if (!importAttemptIsCurrent(operation, attempt)) return;
+      if (!(await revalidateImportSession(operation, attempt))) return;
+      if (!importAttemptIsCurrent(operation, attempt)) return;
+      confirmImportOperation(
+        operation,
+        documentFromImportResponse(result, operation),
+      );
+    } catch (e) {
+      await handleImportFailure(operation, attempt, e);
+    } finally {
+      if (mounted.current && attempt.request === importSendRequest.current)
+        setBusy((current) => (current === 'import' ? '' : current));
+    }
+  }
+  async function verifyImportOperation(operation: ImportOperation) {
+    if (
+      busy ||
+      !importOperationRef.current ||
+      importOperationRef.current.id !== operation.id
+    )
+      return;
+    const attempt = {
+      generation: contextGeneration.current,
+      request: ++importSendRequest.current,
+    };
+    storeImportOperation(
+      updateImportOperation(
+        operation,
+        'sending',
+        'Verificando o plano desta operação…',
+      ),
+    );
+    setBusy('import');
+    setError('');
+    try {
+      if (!(await revalidateImportSession(operation, attempt))) return;
+      const result = await api<unknown>(
+        'documents/' + operation.id,
+        'GET',
+        undefined,
+        {
+          timeoutMs: IMPORT_REQUEST_TIMEOUT_MS,
+        },
+      );
+      if (!importAttemptIsCurrent(operation, attempt)) return;
+      if (!(await revalidateImportSession(operation, attempt))) return;
+      if (!importAttemptIsCurrent(operation, attempt)) return;
+      confirmImportOperation(
+        operation,
+        documentFromImportResponse(result, operation),
+      );
+    } catch (e) {
+      await handleImportFailure(operation, attempt, e);
+    } finally {
+      if (mounted.current && attempt.request === importSendRequest.current)
+        setBusy((current) => (current === 'import' ? '' : current));
+    }
+  }
   async function importFile(file?: File) {
-    if (!file || busy) return;
+    if (
+      !file ||
+      busy ||
+      importReadInProgress.current ||
+      importOperationRef.current
+    )
+      return;
+    const request = ++importReadRequest.current;
+    importReadInProgress.current = true;
+    const generation = contextGeneration.current;
+    const selectedViewer = viewer;
+    if (input.current) input.current.value = '';
+    setConfirmedImport(null);
     setError('');
     setBusy('import');
     try {
+      if (!selectedViewer || !canCreate)
+        throw new Error('Sua sessão não permite importar documentos.');
       if (!/\.(md|markdown)$/i.test(file.name))
         throw new Error('Escolha um arquivo .md ou .markdown.');
       if (file.size > 1024 * 1024)
         throw new Error('O arquivo deve ter no máximo 1 MB.');
       const markdown = await file.text();
+      if (
+        !mounted.current ||
+        request !== importReadRequest.current ||
+        generation !== contextGeneration.current ||
+        activeViewerId.current !== selectedViewer.id
+      )
+        return;
       if (!markdown.trim()) throw new Error('O arquivo está vazio.');
-      const { document: created } = await api<{ document: DocumentRow }>(
-        'documents',
-        'POST',
-        { markdown, filename: file.name },
-      );
-      window.location.assign('/d/' + created.id);
+      const operation = createImportOperation({
+        viewerId: selectedViewer.id,
+        isTest: Boolean(selectedViewer.isTest),
+        filename: file.name,
+        markdown,
+      });
+      storeImportOperation(operation);
+      await sendImportOperation(operation);
     } catch (e) {
-      setError(errorText(e));
-      setBusy('');
+      if (
+        mounted.current &&
+        request === importReadRequest.current &&
+        generation === contextGeneration.current
+      )
+        setError(errorText(e));
     } finally {
-      if (input.current) input.current.value = '';
+      if (
+        mounted.current &&
+        request === importReadRequest.current &&
+        !importOperationRef.current
+      )
+        setBusy((current) => (current === 'import' ? '' : current));
+      if (request === importReadRequest.current)
+        importReadInProgress.current = false;
     }
   }
   const captureSelection = useCallback(() => {
@@ -798,7 +1196,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               <button
                 type="button"
                 onClick={() => void signout()}
-                disabled={!!busy}
+                disabled={!!busy || !!importOperation}
                 aria-label="Sair"
                 className="signout"
               >
@@ -819,6 +1217,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         type="file"
         accept=".md,.markdown"
         hidden
+        disabled={!!busy || !!importOperation}
         onChange={(e) => void importFile(e.target.files?.[0])}
       />
       {error && (
@@ -849,7 +1248,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           <div className="page-heading">
             <h1>Seus documentos</h1>
             {canCreate && (
-              <Button disabled={!!busy} onClick={() => input.current?.click()}>
+              <Button
+                disabled={!!busy || !!importOperation}
+                onClick={() => input.current?.click()}
+              >
                 {busy === 'import' ? (
                   <LoaderCircle className="spin" size={17} />
                 ) : (
@@ -864,6 +1266,90 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               Use este navegador e permaneça conectado para administrar os
               documentos que criar neste teste.
             </p>
+          )}
+          {importOperation && (
+            <section
+              className={
+                'import-operation import-operation-' + importOperation.status
+              }
+              role={importOperation.status === 'sending' ? 'status' : 'alert'}
+              aria-label="Importação pendente"
+            >
+              <strong>
+                {importOperation.status === 'sending'
+                  ? importOperation.message || 'Importando Markdown…'
+                  : importOperation.status === 'uncertain'
+                    ? 'Resultado ainda não confirmado'
+                    : importOperation.status === 'blocked'
+                      ? 'Retomada bloqueada nesta sessão'
+                      : 'A importação precisa da sua atenção'}
+              </strong>
+              <p className="import-operation-file">
+                <FileText size={17} /> {importOperation.filename}
+              </p>
+              {importOperation.message &&
+                importOperation.status !== 'sending' && (
+                  <p>{importOperation.message}</p>
+                )}
+              <p>
+                Esta retomada existe somente enquanto esta página permanecer
+                aberta. Se fechar ou recarregar, procure o plano na lista antes
+                de iniciar outra importação.
+              </p>
+              {importOperation.status === 'uncertain' && (
+                <div className="import-operation-actions">
+                  <button
+                    type="button"
+                    disabled={!!busy}
+                    onClick={() => void verifyImportOperation(importOperation)}
+                  >
+                    Verificar resultado
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!!busy}
+                    onClick={() => void sendImportOperation(importOperation)}
+                  >
+                    Reenviar a mesma operação
+                  </button>
+                </div>
+              )}
+              {importOperation.status === 'blocked' && (
+                <button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() => void verifyImportOperation(importOperation)}
+                >
+                  Revalidar esta sessão e verificar
+                </button>
+              )}
+              {(importOperation.status === 'blocked' ||
+                importOperation.status === 'error') && (
+                <button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() => {
+                    importSendRequest.current += 1;
+                    storeImportOperation(null);
+                    setNotice(
+                      'A tentativa de importação foi encerrada nesta página.',
+                    );
+                  }}
+                >
+                  Encerrar esta tentativa
+                </button>
+              )}
+            </section>
+          )}
+          {confirmedImport && (
+            <section className="confirmed-import" aria-live="polite">
+              <div>
+                <strong>Importação confirmada</strong>
+                <p>{confirmedImport.filename}</p>
+              </div>
+              {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation preserves the existing beforeunload protection. */}
+              <a href={'/d/' + confirmedImport.id}>Abrir plano</a>
+            </section>
           )}
           {list.length === 0 ? (
             <div className="empty-document">
@@ -880,7 +1366,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               </p>
               {canCreate && (
                 <Button
-                  disabled={!!busy}
+                  disabled={!!busy || !!importOperation}
                   variant="outline"
                   onClick={() => input.current?.click()}
                 >

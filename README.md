@@ -97,6 +97,15 @@ As permissões por documento são verificadas no servidor a cada leitura ou escr
 Remover um convidado invalida convites antigos e bloqueia leitura e comentários,
 mesmo com uma sessão aberta; comentários anteriores são preservados.
 
+A importação manual usa o cookie da sessão e envia `POST /api/documents` com
+`id` (UUID gerado antes da tentativa), `authorId` igual à identidade da sessão,
+`markdown`, `filename` e `title` opcional não vazio. Repetir o mesmo UUID, autor,
+contexto e conteúdo retorna o mesmo plano; qualquer divergência retorna `409` sem
+sobrescrever o registro. Após timeout, resposta inválida ou falha de rede, a página
+mantém o arquivo e a operação somente em memória e oferece verificar o resultado
+ou reenviar os mesmos valores. Fechar ou recarregar perde essa retomada; procure o
+plano na lista antes de iniciar uma nova importação.
+
 ## Publicação por API
 
 Uma pessoa autenticada por e-mail e atualmente habilitada como autora pode abrir

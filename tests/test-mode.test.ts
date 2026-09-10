@@ -103,7 +103,10 @@ void test('link permite comentar com outro e-mail; somente a sessão criadora ad
   const owner = f.client(),
     guest = f.client();
   await owner.call('auth/test', 'POST', { email: 'primeiro@example.com' });
+  const ownerViewer = (await owner.call('session')).body.viewer;
   const created = await owner.call('documents', 'POST', {
+    id: crypto.randomUUID(),
+    authorId: ownerViewer.id,
     markdown: '# Teste\n\nUm trecho.',
     filename: 'teste.md',
   });
@@ -158,7 +161,10 @@ void test('digitar o mesmo e-mail de outro dono não assume identidade nem revel
   const owner = f.client(),
     other = f.client();
   await owner.call('auth/test', 'POST', { email: 'owner@example.com' });
+  const ownerViewer = (await owner.call('session')).body.viewer;
   const created = await owner.call('documents', 'POST', {
+    id: crypto.randomUUID(),
+    authorId: ownerViewer.id,
     markdown: '# Dono',
     filename: 'dono.md',
   });
@@ -194,6 +200,8 @@ void test('documentos privados e contas reais não são expostos ao habilitar o 
   });
   await real.registerViewer();
   const privateDoc = await real.create({
+    id: crypto.randomUUID(),
+    authorId: real.viewer.id,
     markdown: '# Conteúdo privado',
     filename: 'privado.md',
   });
@@ -232,7 +240,10 @@ void test('desabilitar o teste bloqueia a entrada sem confirmação e invalida s
   t.after(() => f.sqlite.close());
   const guest = f.client();
   await guest.call('auth/test', 'POST', { email: 'example@gmail.com' });
+  const guestViewer = (await guest.call('session')).body.viewer;
   const created = await guest.call('documents', 'POST', {
+    id: crypto.randomUUID(),
+    authorId: guestViewer.id,
     markdown: '# Teste',
     filename: 'teste.md',
   });

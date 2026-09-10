@@ -206,6 +206,76 @@ a:focus-visible {
   font-size: 28px;
   letter-spacing: -0.8px;
 }
+.import-operation,
+.confirmed-import {
+  margin: 0 0 24px;
+  padding: 16px 18px;
+  border: 1px solid #d8a936;
+  border-radius: 10px;
+  background: #fff9e8;
+  color: #544519;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.import-operation-sending {
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+.import-operation-error,
+.import-operation-blocked {
+  border-color: #e2aaa5;
+  background: #fff1ef;
+  color: #7e2822;
+}
+.import-operation strong,
+.import-operation p,
+.confirmed-import strong,
+.confirmed-import p {
+  display: block;
+}
+.import-operation p {
+  margin-top: 6px;
+}
+.import-operation-file {
+  display: flex !important;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+}
+.import-operation button,
+.confirmed-import a {
+  margin-top: 10px;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.import-operation button + button {
+  margin-left: 16px;
+}
+.import-operation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.import-operation-actions button + button {
+  margin-left: 0;
+}
+.confirmed-import {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-color: #9bc7ae;
+  background: #edf8f1;
+  color: #246347;
+}
+.confirmed-import a {
+  flex: none;
+  margin-top: 0;
+}
 .empty-document {
   text-align: center;
   padding: 76px 24px;
