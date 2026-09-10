@@ -1,5 +1,9 @@
 import { AuthService, authConfig, validEmail } from './auth-service.ts';
-import { DocumentService, HttpError } from './document-service.ts';
+import {
+  DocumentService,
+  HttpError,
+  type CommentPageQuery,
+} from './document-service.ts';
 import { ResendMailer, type Mailer } from './mailer.ts';
 import { PublicationService } from './publication-service.ts';
 
@@ -48,6 +52,24 @@ async function inputFrom(request: Request, maximum: number) {
   } catch {
     throw new HttpError(400, 'Solicitação inválida.');
   }
+}
+
+function commentPageQuery(parameters: URLSearchParams): CommentPageQuery {
+  const keys = [...parameters.keys()];
+  if (
+    keys.some((key) => key !== 'before' && key !== 'after') ||
+    parameters.getAll('before').length > 1 ||
+    parameters.getAll('after').length > 1
+  )
+    throw new HttpError(400, 'Parâmetros de comentários inválidos.');
+  const before = parameters.get('before');
+  const after = parameters.get('after');
+  if (before !== null && after !== null)
+    throw new HttpError(400, 'Use apenas um cursor de comentários.');
+  return {
+    ...(before === null ? {} : { before }),
+    ...(after === null ? {} : { after }),
+  };
 }
 
 export async function handleApi(
@@ -175,22 +197,29 @@ export async function handleApi(
         });
       throw new HttpError(405, 'Ação indisponível.');
     }
-    if (path[0] !== 'documents' || path.length > 3)
+    if (path[0] !== 'documents' || path.length > 4)
       throw new HttpError(404, 'Página não encontrada.');
-    const [, id, action] = path;
+    const [, id, action, resourceId] = path;
+    if (resourceId && !(request.method === 'GET' && action === 'comments'))
+      throw new HttpError(404, 'Página não encontrada.');
     if (request.method === 'GET') {
       if (!id) return json({ documents: await service.list() });
       if (!action) {
         const document = await service.document(id);
+        const commentPage = await service.comments(id);
         return json({
           document,
-          comments: await service.comments(id),
+          ...commentPage,
           isOwner: document.owner_id === viewer.id,
         });
       }
+      if (action === 'comments' && resourceId)
+        return json({ comment: await service.comment(id, resourceId) });
       if (action === 'comments')
-        return json({ comments: await service.comments(id) });
-      if (action === 'shares')
+        return json(
+          await service.comments(id, commentPageQuery(url.searchParams)),
+        );
+      if (action === 'shares' && !resourceId)
         return json({ shares: await service.shares(id) });
       throw new HttpError(404, 'Página não encontrada.');
     }

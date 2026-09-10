@@ -36,6 +36,23 @@ function createDocument(
   });
 }
 
+function stableCommentId(index: number) {
+  const value = index.toString(16);
+  return `${value.padStart(8, '0')}-0000-4000-8000-${value.padStart(12, '0')}`;
+}
+
+function assertVisualOrder(entries: { id: string; created_at: string }[]) {
+  const expected = [...entries].sort(
+    (left, right) =>
+      left.created_at.localeCompare(right.created_at) ||
+      left.id.localeCompare(right.id),
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.id),
+    expected.map((entry) => entry.id),
+  );
+}
+
 function pauseConcurrentCommentInserts(db: D1Database) {
   let arrivals = 0;
   let release!: () => void;
@@ -177,7 +194,7 @@ void test('convidado comenta sem poder compartilhar; dono vê o comentário pers
       sourceStart: 12,
     };
     await guest.addComment(doc.id, payload);
-    const entries = await owner.comments(doc.id);
+    const { comments: entries } = await owner.comments(doc.id);
     assert.equal(entries.length, 1);
     assert.equal(entries[0].author_name, 'Convidado');
     assert.equal(entries[0].quote, 'Um trecho.');
@@ -219,7 +236,7 @@ void test('revogar acesso bloqueia leitura e novos comentários sem apagar os ex
       denied,
     );
     assert.deepEqual(await guest.list(), []);
-    assert.equal((await owner.comments(doc.id)).length, 1);
+    assert.equal((await owner.comments(doc.id)).comments.length, 1);
     assert.equal((await owner.document(doc.id)).owner_id, 'owner');
   } finally {
     sqlite.close();
@@ -243,7 +260,7 @@ void test('reenvio do mesmo comentário não duplica e não pode sobrescrever ou
     };
     await guest.addComment(doc.id, payload);
     await guest.addComment(doc.id, payload);
-    assert.equal((await owner.comments(doc.id)).length, 1);
+    assert.equal((await owner.comments(doc.id)).comments.length, 1);
     await assert.rejects(
       owner.addComment(doc.id, payload),
       (error) => error instanceof HttpError && error.status === 409,
@@ -278,8 +295,9 @@ void test('reenvio do mesmo comentário não duplica e não pode sobrescrever ou
       (error) => error instanceof HttpError && error.status === 409,
     );
     assert.equal(
-      (await owner.comments(doc.id)).find((entry) => entry.id === payload.id)
-        ?.body,
+      (await owner.comments(doc.id)).comments.find(
+        (entry) => entry.id === payload.id,
+      )?.body,
       'Comentário único.',
     );
   } finally {
@@ -317,7 +335,7 @@ void test('duas chamadas pausadas antes do INSERT convergem na mesma contribuiç
     );
     assert.equal(first.id, payload.id);
     assert.deepEqual(second, first);
-    assert.equal((await owner.comments(doc.id)).length, 1);
+    assert.equal((await owner.comments(doc.id)).comments.length, 1);
   } finally {
     sqlite.close();
   }
@@ -354,7 +372,7 @@ void test('falha inesperada de escrita não é convertida em comentário confirm
       }),
       /storage unavailable/,
     );
-    assert.deepEqual(await owner.comments(doc.id), []);
+    assert.deepEqual((await owner.comments(doc.id)).comments, []);
   } finally {
     sqlite.close();
   }
@@ -385,7 +403,7 @@ void test('revogação concluída durante o envio impede confirmar ou revelar o 
     await owner.revoke(doc.id, guest.viewer.email);
     schedule.resume();
     await assert.rejects(sending, denied);
-    assert.equal((await owner.comments(doc.id)).length, 1);
+    assert.equal((await owner.comments(doc.id)).comments.length, 1);
   } finally {
     sqlite.close();
   }
@@ -429,7 +447,7 @@ void test('entrada inválida não grava documentos, compartilhamentos ou coment�
         body: ' ',
       }),
     );
-    assert.deepEqual(await owner.comments(doc.id), []);
+    assert.deepEqual((await owner.comments(doc.id)).comments, []);
   } finally {
     sqlite.close();
   }
@@ -574,6 +592,166 @@ void test('importação exige UUID e autor esperado sem gerar identificador alte
     assert.equal(
       sqlite.prepare('SELECT count(*) n FROM documents').get()?.n,
       0,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('paginação usa sequência persistida sem lacunas, inclusive após janela vazia e inserção tardia', async () => {
+  const { sqlite, db, owner, stranger } = fixture();
+  try {
+    await owner.registerViewer();
+    await stranger.registerViewer();
+    const doc = await createDocument(owner, {
+      markdown: '# Muitas contribuições',
+      filename: 'muitas.md',
+    });
+    const empty = await owner.comments(doc.id);
+    assert.deepEqual(empty.comments, []);
+    assert.equal(empty.pagination.olderCursor, null);
+    assert.equal(empty.pagination.hasMore, false);
+
+    for (let index = 0; index < 205; index += 1)
+      await db
+        .prepare(
+          'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at) VALUES (?,?,?,?,?,?,?)',
+        )
+        .bind(
+          stableCommentId(index + 1000),
+          doc.id,
+          owner.viewer.id,
+          `Comentário ${index}`,
+          '',
+          null,
+          `2026-01-0${(index % 3) + 1}T00:00:00.000Z`,
+        )
+        .run();
+
+    let nextCursor = empty.pagination.nextCursor;
+    const incremental = [];
+    const incrementalSizes = [];
+    for (;;) {
+      const page = await owner.comments(doc.id, { after: nextCursor });
+      assert.ok(page.comments.length <= 100);
+      assert.equal(page.pagination.olderCursor, null);
+      assertVisualOrder(page.comments);
+      incremental.push(...page.comments);
+      incrementalSizes.push(page.comments.length);
+      nextCursor = page.pagination.nextCursor;
+      if (!page.pagination.hasMore) break;
+    }
+    assert.deepEqual(incrementalSizes, [100, 100, 5]);
+    assert.equal(new Set(incremental.map((entry) => entry.id)).size, 205);
+    assert.equal('sequence' in incremental[0], false);
+
+    const lateId = stableCommentId(0);
+    await db
+      .prepare(
+        'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at) VALUES (?,?,?,?,?,?,?)',
+      )
+      .bind(
+        lateId,
+        doc.id,
+        owner.viewer.id,
+        'Inserido depois com timestamp anterior',
+        '',
+        null,
+        '2026-01-01T00:00:00.000Z',
+      )
+      .run();
+    assert.equal(
+      (await owner.comment(doc.id, lateId))?.body.startsWith('Inserido'),
+      true,
+    );
+    const latePage = await owner.comments(doc.id, { after: nextCursor });
+    assert.deepEqual(
+      latePage.comments.map((entry) => entry.id),
+      [lateId],
+    );
+
+    const latest = await owner.comments(doc.id);
+    assert.equal(latest.comments.length, 100);
+    assert.ok(latest.pagination.olderCursor);
+    assertVisualOrder(latest.comments);
+    assert.equal(
+      (await owner.comment(doc.id, stableCommentId(1000)))?.body,
+      'Comentário 0',
+    );
+    const concurrentHistoryId = stableCommentId(1);
+    await db
+      .prepare(
+        'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at) VALUES (?,?,?,?,?,?,?)',
+      )
+      .bind(
+        concurrentHistoryId,
+        doc.id,
+        owner.viewer.id,
+        'Chegou durante a paginação antiga',
+        '',
+        null,
+        '2026-01-01T00:00:00.000Z',
+      )
+      .run();
+    const historical = [...latest.comments];
+    const historicalSizes = [latest.comments.length];
+    let olderCursor: string | null = latest.pagination.olderCursor;
+    while (olderCursor) {
+      const page = await owner.comments(doc.id, { before: olderCursor });
+      assert.equal(page.pagination.hasMore, false);
+      assertVisualOrder(page.comments);
+      historical.push(...page.comments);
+      historicalSizes.push(page.comments.length);
+      olderCursor = page.pagination.olderCursor;
+    }
+    assert.deepEqual(historicalSizes, [100, 100, 6]);
+    assert.equal(new Set(historical.map((entry) => entry.id)).size, 206);
+    assert.equal(
+      historical.some((entry) => entry.id === concurrentHistoryId),
+      false,
+    );
+    assert.deepEqual(
+      (
+        await owner.comments(doc.id, {
+          after: latest.pagination.nextCursor,
+        })
+      ).comments.map((entry) => entry.id),
+      [concurrentHistoryId],
+    );
+
+    const other = await createDocument(owner, {
+      markdown: '# Outro',
+      filename: 'outro.md',
+    });
+    await assert.rejects(
+      owner.comments(other.id, { after: empty.pagination.nextCursor }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    await assert.rejects(
+      owner.comments(doc.id, { after: latest.pagination.olderCursor! }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    const unsafe = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        d: doc.id,
+        k: 'after',
+        s: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toString('base64url');
+    for (const query of [
+      { after: 'not-a-cursor' },
+      { after: unsafe },
+      { after: nextCursor, before: latest.pagination.olderCursor! },
+    ])
+      await assert.rejects(
+        owner.comments(doc.id, query),
+        (error) => error instanceof HttpError && error.status === 400,
+      );
+    assert.equal(await owner.comment(doc.id, stableCommentId(9999)), null);
+    await assert.rejects(
+      stranger.comment(doc.id, 'invalid'),
+      (error) => error instanceof HttpError && error.status === 404,
     );
   } finally {
     sqlite.close();

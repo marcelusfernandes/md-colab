@@ -35,6 +35,7 @@ const currentMigrations = [
   '0001_email_access.sql',
   '0002_link_test_mode.sql',
   '0003_pink_blazing_skull.sql',
+  '0004_polite_mandrill.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -108,6 +109,9 @@ INSERT INTO shares(document_id,email,name,created_at)
 VALUES('${ids.document}','guest@example.test','Guest','2026-09-10T00:01:00.000Z');
 INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
 VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'2026-09-10T00:02:00.000Z');
+INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
+VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'2026-09-10T00:02:00.000Z')
+ON CONFLICT(id) DO NOTHING;
 INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
 VALUES('${ids.credential}','${ids.owner}','Revoked synthetic credential','${revokedHash}','2026-09-10T00:03:00.000Z',1900000000,1789014000);
 INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
@@ -127,6 +131,7 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT count(*) FROM publishing_tokens WHERE revoked_at IS NOT NULL) AS revoked_count,
       (SELECT owner_id FROM documents WHERE id='${ids.document}') AS owner_id,
       (SELECT author_id FROM comments WHERE id='${ids.comment}') AS comment_author_id,
+      (SELECT sequence FROM comments WHERE id='${ids.comment}') AS comment_sequence,
       (SELECT publishing_token_id FROM publications WHERE id='${ids.publication}') AS publication_token_id,
       (SELECT title FROM documents WHERE id='${ids.document}') AS marker,
       EXISTS(SELECT 1 FROM shares WHERE document_id='${ids.document}' AND email='guest@example.test') AS guest_grant,
@@ -135,35 +140,86 @@ function verifyFixture(environment, marker = 'source-marker') {
   assert(rows.length === 1, 'Fixture nao retornou uma linha de verificacao.');
   const row = rows[0];
   assert(row.users_count === 3, 'Contagem de identidades divergente.');
-  assert(row.documents_count === 1 && row.comments_count === 1, 'Plano/comentario divergentes.');
-  assert(row.shares_count === 1 && row.publications_count === 1, 'Share/publicacao divergentes.');
+  assert(
+    row.documents_count === 1 && row.comments_count === 1,
+    'Plano/comentario divergentes.',
+  );
+  assert(
+    row.shares_count === 1 && row.publications_count === 1,
+    'Share/publicacao divergentes.',
+  );
   assert(row.revoked_count === 1, 'Credencial revogada ausente.');
   assert(row.owner_id === ids.owner, 'Propriedade do plano divergente.');
-  assert(row.comment_author_id === ids.guest, 'Autoria do comentario divergente.');
-  assert(row.publication_token_id === ids.credential, 'Relacao da publicacao divergente.');
+  assert(
+    row.comment_author_id === ids.guest,
+    'Autoria do comentario divergente.',
+  );
+  assert(
+    Number.isSafeInteger(row.comment_sequence) && row.comment_sequence > 0,
+    'Sequencia persistida do comentario divergente.',
+  );
+  assert(
+    row.publication_token_id === ids.credential,
+    'Relacao da publicacao divergente.',
+  );
   assert(row.marker === marker, 'Marcador do banco divergente.');
-  assert(row.guest_grant === 1 && row.stranger_grant === 0, 'Permissoes sinteticas divergentes.');
-  assert(foreignKeyViolations(environment).length === 0, 'foreign_key_check falhou.');
+  assert(
+    row.guest_grant === 1 && row.stranger_grant === 0,
+    'Permissoes sinteticas divergentes.',
+  );
+  assert(
+    foreignKeyViolations(environment).length === 0,
+    'foreign_key_check falhou.',
+  );
   return {
     users: row.users_count,
     documents: row.documents_count,
     comments: row.comments_count,
+    commentSequence: row.comment_sequence,
     shares: row.shares_count,
     publications: row.publications_count,
     revokedCredentials: row.revoked_count,
   };
 }
 
+function verifyNextCommentSequence(environment) {
+  const previous = executeSql(
+    environment,
+    'SELECT max(sequence) AS sequence FROM comments',
+  ).results[0]?.sequence;
+  const nextId = '00000000-0000-4000-8000-000000000302';
+  executeSql(
+    environment,
+    `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
+     VALUES('${nextId}','${ids.document}','${ids.owner}','After restore','',NULL,'2026-09-10T00:05:00.000Z')`,
+  );
+  const next = executeSql(
+    environment,
+    `SELECT sequence FROM comments WHERE id='${nextId}'`,
+  ).results[0]?.sequence;
+  assert(
+    Number.isSafeInteger(previous) &&
+      Number.isSafeInteger(next) &&
+      next > previous,
+    'Nova insercao nao recebeu sequencia maior depois do restore.',
+  );
+  return { previous, next };
+}
+
 function applyFilesManually(environment, files) {
-  for (const file of files) executeFile(environment, join(migrationsDirectory, file));
-  assert(ledger(environment) === null, 'Execucao manual criou ledger inesperado.');
+  for (const file of files)
+    executeFile(environment, join(migrationsDirectory, file));
+  assert(
+    ledger(environment) === null,
+    'Execucao manual criou ledger inesperado.',
+  );
 }
 
 function alteredDefaultMigration(outputDirectory) {
   const path = join(outputDirectory, '0002_altered_default.sql');
   privateFile(
     path,
-    "ALTER TABLE `documents` ADD `is_test` integer DEFAULT 1 NOT NULL;\nALTER TABLE `users` ADD `test_email` text;\n",
+    'ALTER TABLE `documents` ADD `is_test` integer DEFAULT 1 NOT NULL;\nALTER TABLE `users` ADD `test_email` text;\n',
   );
   return path;
 }
@@ -189,7 +245,10 @@ export function run(outputValue) {
       schemaSnapshot(source)
         .tables.map((table) => table.name)
         .sort(),
-    ) === JSON.stringify(currentTables.filter((table) => table !== 'd1_migrations')),
+    ) ===
+      JSON.stringify(
+        currentTables.filter((table) => table !== 'd1_migrations'),
+      ),
     'Tabela inesperada na origem; export allowlisted recusado.',
   );
 
@@ -215,12 +274,25 @@ export function run(outputValue) {
   const restoredCounts = verifyFixture(destination);
   expectedLedger(destination);
   assert(
-    fingerprint(schemaSnapshot(source)) === fingerprint(schemaSnapshot(destination)),
+    fingerprint(schemaSnapshot(source)) ===
+      fingerprint(schemaSnapshot(destination)),
     'Schema restaurado diverge da origem.',
   );
   const restoredExportPath = join(outputDirectory, 'restored-reexport.sql');
   exportDatabase(destination, restoredExportPath);
-  assert(digestFile(backupPath) === digestFile(restoredExportPath), 'Roundtrip SQL divergiu.');
+  const restoredDataExportPath = join(
+    outputDirectory,
+    'restored-data-reexport.sql',
+  );
+  exportDatabase(destination, restoredDataExportPath, {
+    includeSchema: false,
+    tables: currentTables,
+  });
+  assert(
+    digestFile(dataExportPath) === digestFile(restoredDataExportPath),
+    'Dados allowlisted divergiram no roundtrip.',
+  );
+  const restoredSequence = verifyNextCommentSequence(destination);
 
   const legacy = createEnvironment(join(outputDirectory, 'legacy-0002'));
   applyFilesManually(legacy, currentMigrations.slice(0, 3));
@@ -228,14 +300,41 @@ export function run(outputValue) {
     legacy,
     "INSERT INTO users(id,email,name,test_email) VALUES('legacy-user','legacy@example.test','Legacy',NULL)",
   );
+  executeSql(
+    legacy,
+    `INSERT INTO documents(id,owner_id,title,filename,markdown,is_test,created_at)
+     VALUES('legacy-document','legacy-user','Legacy','legacy.md','# Legacy',0,'2026-01-01T00:00:00.000Z')`,
+  );
+  executeSql(
+    legacy,
+    `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at) VALUES
+     ('ffffffff-ffff-4fff-8fff-ffffffffffff','legacy-document','legacy-user','second by id','quote b',2,'2026-01-02T00:00:00.000Z'),
+     ('00000000-0000-4000-8000-000000000001','legacy-document','legacy-user','first by id','quote a',1,'2026-01-02T00:00:00.000Z'),
+     ('11111111-1111-4111-8111-111111111111','legacy-document','legacy-user','earlier timestamp','quote c',3,'2026-01-01T00:00:00.000Z')`,
+  );
+  const legacyCommentsBefore = executeSql(
+    legacy,
+    `SELECT id,document_id,author_id,body,quote,source_start,created_at
+     FROM comments ORDER BY created_at,id`,
+  ).results;
+  const legacyBytesBefore = executeSql(
+    legacy,
+    `SELECT hex(id) AS id,hex(document_id) AS document_id,
+       hex(author_id) AS author_id,hex(body) AS body,hex(quote) AS quote,
+       source_start,hex(created_at) AS created_at
+     FROM comments ORDER BY created_at,id`,
+  ).results;
   const legacySchemaBeforeStatus = fingerprint(schemaSnapshot(legacy));
   const legacyStatus = localStatus(legacy);
-  assert(!legacyStatus.tracked, 'Status criou ou encontrou ledger inesperado no legado.');
-  assertRejected(
-    () => migrateLocal(legacy),
-    'Schema sem ledger rastreado',
+  assert(
+    !legacyStatus.tracked,
+    'Status criou ou encontrou ledger inesperado no legado.',
   );
-  assert(ledger(legacy) === null, 'Status/migrate recusado criou ledger no legado.');
+  assertRejected(() => migrateLocal(legacy), 'Schema sem ledger rastreado');
+  assert(
+    ledger(legacy) === null,
+    'Status/migrate recusado criou ledger no legado.',
+  );
   assert(
     fingerprint(schemaSnapshot(legacy)) === legacySchemaBeforeStatus,
     'Status/migrate recusado alterou o schema legado.',
@@ -260,8 +359,43 @@ export function run(outputValue) {
     legacy,
     "SELECT count(*) AS count FROM users WHERE id='legacy-user' AND email='legacy@example.test'",
   ).results;
-  assert(legacyRows[0]?.count === 1, 'A adocao/upgrade nao preservou o dado legado.');
-  assert(foreignKeyViolations(legacy).length === 0, 'FK do legado atualizado falhou.');
+  assert(
+    legacyRows[0]?.count === 1,
+    'A adocao/upgrade nao preservou o dado legado.',
+  );
+  const legacyCommentsAfter = executeSql(
+    legacy,
+    `SELECT id,document_id,author_id,body,quote,source_start,created_at
+     FROM comments ORDER BY created_at,id`,
+  ).results;
+  const legacyBytesAfter = executeSql(
+    legacy,
+    `SELECT hex(id) AS id,hex(document_id) AS document_id,
+       hex(author_id) AS author_id,hex(body) AS body,hex(quote) AS quote,
+       source_start,hex(created_at) AS created_at
+     FROM comments ORDER BY created_at,id`,
+  ).results;
+  assert(
+    JSON.stringify(legacyCommentsAfter) ===
+      JSON.stringify(legacyCommentsBefore) &&
+      JSON.stringify(legacyBytesAfter) === JSON.stringify(legacyBytesBefore),
+    'A migracao nao preservou exatamente os valores e bytes dos comentarios legados.',
+  );
+  const legacySequences = executeSql(
+    legacy,
+    'SELECT sequence,id FROM comments ORDER BY sequence',
+  ).results;
+  assert(
+    JSON.stringify(legacySequences.map((row) => row.id)) ===
+      JSON.stringify(legacyCommentsBefore.map((row) => row.id)) &&
+      JSON.stringify(legacySequences.map((row) => row.sequence)) ===
+        JSON.stringify([1, 2, 3]),
+    'Backfill legado nao seguiu created_at,id.',
+  );
+  assert(
+    foreignKeyViolations(legacy).length === 0,
+    'FK do legado atualizado falhou.',
+  );
 
   const partial = createEnvironment(join(outputDirectory, 'negative-partial'));
   applyFilesManually(partial, currentMigrations.slice(0, 1));
@@ -280,7 +414,7 @@ export function run(outputValue) {
   applyFilesManually(trigger, currentMigrations.slice(0, 3));
   executeSql(
     trigger,
-    "CREATE TRIGGER unexpected_trigger AFTER INSERT ON users BEGIN UPDATE users SET name=name WHERE id=NEW.id; END",
+    'CREATE TRIGGER unexpected_trigger AFTER INSERT ON users BEGIN UPDATE users SET name=name WHERE id=NEW.id; END',
   );
   assertRejected(
     () =>
@@ -307,7 +441,9 @@ export function run(outputValue) {
   );
   assert(ledger(sqlitex) === null, 'Negativo sqlitex_extra recebeu ledger.');
 
-  const alteredDefault = createEnvironment(join(outputDirectory, 'negative-default'));
+  const alteredDefault = createEnvironment(
+    join(outputDirectory, 'negative-default'),
+  );
   applyFilesManually(alteredDefault, currentMigrations.slice(0, 2));
   executeFile(alteredDefault, alteredDefaultMigration(outputDirectory));
   assertRejected(
@@ -319,7 +455,10 @@ export function run(outputValue) {
       }),
     'parcial ou divergente',
   );
-  assert(ledger(alteredDefault) === null, 'Negativo com default alterado recebeu ledger.');
+  assert(
+    ledger(alteredDefault) === null,
+    'Negativo com default alterado recebeu ledger.',
+  );
 
   const summary = {
     node: process.version,
@@ -332,9 +471,12 @@ export function run(outputValue) {
     backupSha256: digestFile(backupPath),
     schemaExportSha256: digestFile(schemaExportPath),
     dataExportSha256: digestFile(dataExportPath),
+    restoredExportSha256: digestFile(restoredExportPath),
+    restoredDataExportSha256: digestFile(restoredDataExportPath),
     schemaSha256: fingerprint(schemaSnapshot(destination)),
     fixture: fixtureCounts,
     restoredFixture: restoredCounts,
+    restoredSequence,
     ledger: currentMigrations,
     negatives: [
       'partial',
@@ -343,7 +485,7 @@ export function run(outputValue) {
       'altered-is_test-default',
     ],
     legacyAdoptedThrough: currentMigrations[2],
-    legacyUpgradedThrough: currentMigrations[3],
+    legacyUpgradedThrough: currentMigrations[4],
   };
   const summaryPath = join(outputDirectory, 'verification.json');
   privateFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
@@ -374,7 +516,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
     main();
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    );
     process.exitCode = 1;
   }
 }
