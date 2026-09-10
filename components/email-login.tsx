@@ -53,7 +53,9 @@ export function EmailLogin({
       <p>
         {mode === 'test'
           ? 'Informe qualquer e-mail para identificar seus comentários. A entrada é imediata, sem senha e sem confirmação por e-mail.'
-          : 'Informe o e-mail que recebeu o convite. Você receberá um link para entrar, sem senha.'}
+          : documentId
+            ? 'Informe o e-mail convidado para este documento. Você receberá um link para entrar, sem senha.'
+            : 'Informe seu e-mail para acessar seus planos e os compartilhados com você. Você receberá um link para entrar, sem senha.'}
       </p>
       <form className="login-form" onSubmit={(event) => void submit(event)}>
         <label htmlFor="login-email">Seu e-mail</label>
@@ -107,35 +109,67 @@ export function EmailLogin({
 export function ConfirmAccess() {
   const token = useRef<string | null>(null);
   const initialized = useRef(false);
+  const inFlight = useRef(false);
+  const verificationAttempt = useRef(0);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
-    if (initialized.current) return;
-    initialized.current = true;
-    token.current = new URLSearchParams(window.location.hash.slice(1)).get(
-      'token',
-    );
-    window.history.replaceState(null, '', '/access');
-    // oxlint-disable-next-line react/react-compiler -- Token comes from the browser URL after mounting.
-    setReady(true);
+    const attempts = verificationAttempt;
+    function receiveToken() {
+      attempts.current++;
+      token.current = new URLSearchParams(window.location.hash.slice(1)).get(
+        'token',
+      );
+      window.history.replaceState(null, '', '/access');
+      if (!inFlight.current) setBusy(false);
+      setError('');
+      setReady(true);
+    }
+    if (!initialized.current) {
+      initialized.current = true;
+      receiveToken();
+    }
+    window.addEventListener('hashchange', receiveToken);
+    return () => {
+      attempts.current++;
+      window.removeEventListener('hashchange', receiveToken);
+    };
   }, []);
   async function confirm() {
-    if (busy) return;
-    if (!token.current) {
+    if (inFlight.current) return;
+    const currentToken = token.current;
+    if (!currentToken) {
       setError('Abra o link recebido por e-mail ou solicite um novo abaixo.');
       return;
     }
+    inFlight.current = true;
+    const attempt = ++verificationAttempt.current;
+    const isCurrentAttempt = () => {
+      const nextToken = new URLSearchParams(window.location.hash.slice(1)).get(
+        'token',
+      );
+      return (
+        attempt === verificationAttempt.current &&
+        (!nextToken || nextToken === currentToken)
+      );
+    };
     setBusy(true);
     setError('');
     try {
       const result = await api<{ redirect: string }>('auth/verify', 'POST', {
-        token: token.current,
+        token: currentToken,
       });
+      if (!isCurrentAttempt()) {
+        inFlight.current = false;
+        setBusy(false);
+        return;
+      }
       token.current = null;
       window.location.replace(result.redirect);
     } catch (e) {
-      setError(errorText(e));
+      if (isCurrentAttempt()) setError(errorText(e));
+      inFlight.current = false;
       setBusy(false);
     }
   }

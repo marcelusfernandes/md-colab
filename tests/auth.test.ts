@@ -21,6 +21,7 @@ const isDenied = (error: unknown) =>
 async function data(response: Response) {
   return response.json() as Promise<{
     canCreate: boolean;
+    viewer: { id: string; email: string; name: string };
     document: { id: string };
     emailSubmitted: boolean;
     redirect: string;
@@ -33,9 +34,10 @@ function fixture() {
   const mailbox = new TestMailbox();
   let now = Math.floor(Date.now() / 1000);
   const auth = new AuthService(db, config, mailbox, () => now);
-  const values = {
+  const values: Cloudflare.Env = {
     DB: db,
     APP_ORIGIN: config.origin,
+    APP_AUTHOR_EMAILS: '',
     APP_OWNER_EMAIL: config.ownerEmail,
     APP_OWNER_NAME: config.ownerName,
   };
@@ -128,6 +130,7 @@ void test('link e sessão expiram; logout revoga a sessão no servidor', async (
   f.advance(LINK_SECONDS);
   await assert.rejects(f.auth.redeem(expired), isDenied);
   const user = await f.login();
+  assert.equal(user.viewer.name, config.ownerName);
   const request = f.request('session', 'GET', undefined, user.cookie);
   assert.equal((await f.auth.viewer(request))?.email, config.ownerEmail);
   assert.match(
@@ -291,6 +294,362 @@ void test('remover convite invalida links antigos, inclusive se a pessoa for adi
     .bind(doc.id)
     .run();
   await assert.rejects(f.auth.redeem(f.mailbox.lastToken()), isDenied);
+});
+
+void test('configuração normaliza e deduplica autores sem desabilitar o dono legado', () => {
+  const configured = authConfig({
+    APP_ORIGIN: config.origin,
+    APP_AUTHOR_EMAILS:
+      ' Autora@Example.com,autor@example.com, AUTORA@example.com ,,',
+  });
+  assert.equal(configured.ownerEmail, undefined);
+  assert.deepEqual(configured.authorEmails, [
+    'autora@example.com',
+    'autor@example.com',
+  ]);
+
+  const legacy = authConfig({
+    APP_ORIGIN: config.origin,
+    APP_OWNER_EMAIL: ' OWNER@EXAMPLE.COM ',
+    APP_OWNER_NAME: 'Dono legado',
+  });
+  assert.equal(legacy.ownerEmail, config.ownerEmail);
+  assert.equal(legacy.ownerName, 'Dono legado');
+  assert.deepEqual(legacy.authorEmails, []);
+
+  assert.throws(() =>
+    authConfig({
+      APP_ORIGIN: config.origin,
+      APP_AUTHOR_EMAILS: 'invalido',
+    }),
+  );
+  assert.deepEqual(authConfig({ APP_ORIGIN: config.origin }).authorEmails, []);
+});
+
+void test('dois autores entram sem convite, recuperam identidade e ficam isolados por plano via HTTP', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  f.values.APP_AUTHOR_EMAILS =
+    ' AUTORA@example.com, autorb@example.com,autora@example.com ';
+
+  async function login(email: string) {
+    const before = f.mailbox.messages.length;
+    const requested = await f.call('auth/request', 'POST', { email });
+    assert.equal(requested.status, 200);
+    assert.equal(f.mailbox.messages.length, before + 1);
+    const verified = await f.call('auth/verify', 'POST', {
+      token: f.mailbox.lastToken(),
+    });
+    assert.equal(verified.status, 200);
+    const cookie = verified.headers.get('set-cookie')!.split(';')[0];
+    return {
+      cookie,
+      session: await data(await f.call('session', 'GET', undefined, cookie)),
+    };
+  }
+
+  const firstA = await login('autora@example.com');
+  assert.equal(firstA.session.canCreate, true);
+  assert.equal(firstA.session.viewer.name, 'autora@example.com');
+  const documentA = await f.call(
+    'documents',
+    'POST',
+    { markdown: '# Plano A', filename: 'a.md' },
+    firstA.cookie,
+  );
+  assert.equal(documentA.status, 201);
+  const idA = (await data(documentA)).document.id;
+
+  const secondA = await login(' AUTORA@EXAMPLE.COM ');
+  assert.equal(secondA.session.viewer.id, firstA.session.viewer.id);
+  assert.equal(
+    (await f.call('documents/' + idA, 'GET', undefined, secondA.cookie)).status,
+    200,
+  );
+
+  const authorB = await login('autorb@example.com');
+  const documentB = await f.call(
+    'documents',
+    'POST',
+    { markdown: '# Plano B', filename: 'b.md' },
+    authorB.cookie,
+  );
+  assert.equal(documentB.status, 201);
+  const idB = (await data(documentB)).document.id;
+
+  assert.equal(
+    (await f.call('documents/' + idB, 'GET', undefined, secondA.cookie)).status,
+    404,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `documents/${idB}/comments`,
+        'POST',
+        { id: crypto.randomUUID(), body: 'Sem convite' },
+        secondA.cookie,
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `documents/${idB}/shares`,
+        'POST',
+        { email: 'guest@example.com' },
+        secondA.cookie,
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (await f.call('documents/' + idA, 'GET', undefined, authorB.cookie)).status,
+    404,
+  );
+
+  const messages = f.mailbox.messages.length;
+  assert.equal(
+    (
+      await f.call('auth/request', 'POST', {
+        email: 'autora@example.com',
+        documentId: idB,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(f.mailbox.messages.length, messages);
+});
+
+void test('revogar habilitação bloqueia criação e resgate sem acesso, preservando planos existentes', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  f.values.APP_OWNER_EMAIL = undefined;
+  f.values.APP_AUTHOR_EMAILS =
+    'autora@example.com,autor-sem-planos@example.com';
+
+  async function login(email: string) {
+    await f.call('auth/request', 'POST', { email });
+    const verified = await f.call('auth/verify', 'POST', {
+      token: f.mailbox.lastToken(),
+    });
+    assert.equal(verified.status, 200);
+    const cookie = verified.headers.get('set-cookie')!.split(';')[0];
+    return {
+      cookie,
+      viewer: (await data(await f.call('session', 'GET', undefined, cookie)))
+        .viewer,
+    };
+  }
+
+  const author = await login('autora@example.com');
+  const idleAuthor = await login('autor-sem-planos@example.com');
+  const created = await f.call(
+    'documents',
+    'POST',
+    { markdown: '# Já existente', filename: 'existente.md' },
+    author.cookie,
+  );
+  const id = (await data(created)).document.id;
+
+  await f.call('auth/request', 'POST', { email: 'autora@example.com' });
+  const ownerToken = f.mailbox.lastToken();
+  await f.call('auth/request', 'POST', {
+    email: 'autor-sem-planos@example.com',
+  });
+  const idleToken = f.mailbox.lastToken();
+  f.values.APP_AUTHOR_EMAILS = '';
+
+  assert.equal(
+    (
+      await f.call(
+        'documents',
+        'POST',
+        { markdown: '# Bloqueado', filename: 'bloqueado.md' },
+        author.cookie,
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.call(
+        'documents',
+        'POST',
+        { markdown: '# Bloqueado', filename: 'bloqueado.md' },
+        idleAuthor.cookie,
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await f.call('documents/' + id, 'GET', undefined, author.cookie)).status,
+    200,
+  );
+
+  const recovered = await f.call('auth/verify', 'POST', { token: ownerToken });
+  assert.equal(recovered.status, 200);
+  const recoveredCookie = recovered.headers.get('set-cookie')!.split(';')[0];
+  const recoveredSession = await data(
+    await f.call('session', 'GET', undefined, recoveredCookie),
+  );
+  assert.equal(recoveredSession.viewer.id, author.viewer.id);
+  assert.equal(recoveredSession.canCreate, false);
+  assert.equal(
+    (await f.call('documents/' + id, 'GET', undefined, recoveredCookie)).status,
+    200,
+  );
+  assert.equal(
+    (await f.call('auth/verify', 'POST', { token: idleToken })).status,
+    401,
+  );
+});
+
+void test('revogação é seletiva entre planos e invalida somente o convite pendente removido', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const first = await f.call(
+    'documents',
+    'POST',
+    { markdown: '# Primeiro', filename: 'primeiro.md' },
+    owner.cookie,
+  );
+  const second = await f.call(
+    'documents',
+    'POST',
+    { markdown: '# Segundo', filename: 'segundo.md' },
+    owner.cookie,
+  );
+  const firstId = (await data(first)).document.id;
+  const secondId = (await data(second)).document.id;
+
+  await f.call(
+    `documents/${firstId}/shares`,
+    'POST',
+    { email: 'guest@example.com', name: 'Convidada' },
+    owner.cookie,
+  );
+  const pendingFirst = f.mailbox.lastToken();
+  await f.call(
+    `documents/${secondId}/shares`,
+    'POST',
+    { email: 'guest@example.com', name: 'Convidada' },
+    owner.cookie,
+  );
+  const guestLogin = await f.call('auth/verify', 'POST', {
+    token: f.mailbox.lastToken(),
+  });
+  const guestCookie = guestLogin.headers.get('set-cookie')!.split(';')[0];
+  assert.equal(
+    (await f.call('documents/' + firstId, 'GET', undefined, guestCookie))
+      .status,
+    200,
+  );
+  assert.equal(
+    (await f.call('documents/' + secondId, 'GET', undefined, guestCookie))
+      .status,
+    200,
+  );
+
+  await f.call(
+    `documents/${firstId}/shares`,
+    'DELETE',
+    { email: 'guest@example.com' },
+    owner.cookie,
+  );
+  assert.equal(
+    (await f.call('documents/' + firstId, 'GET', undefined, guestCookie))
+      .status,
+    404,
+  );
+  assert.equal(
+    (await f.call('documents/' + secondId, 'GET', undefined, guestCookie))
+      .status,
+    200,
+  );
+  assert.equal(
+    (await f.call('auth/verify', 'POST', { token: pendingFirst })).status,
+    401,
+  );
+  assert.equal(
+    (await f.call('documents/' + secondId, 'GET', undefined, guestCookie))
+      .status,
+    200,
+  );
+});
+
+void test('registros legados de teste não concedem link nem nome a uma conta verificada', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  f.values.APP_AUTHOR_EMAILS = 'autora@example.com';
+  const testOwner = crypto.randomUUID();
+  const testDocument = crypto.randomUUID();
+  f.sqlite
+    .prepare('INSERT INTO users(id,email,name,test_email) VALUES(?,?,?,?)')
+    .run(
+      testOwner,
+      `test.${testOwner}@sessions.invalid`,
+      'Identidade de teste',
+      'autora@example.com',
+    );
+  f.sqlite
+    .prepare(
+      `INSERT INTO documents(id,owner_id,title,filename,markdown,is_test,created_at)
+      VALUES(?,?,?,?,?,1,?)`,
+    )
+    .run(
+      testDocument,
+      testOwner,
+      'Teste',
+      'teste.md',
+      '# Teste',
+      new Date().toISOString(),
+    );
+  f.sqlite
+    .prepare(
+      'INSERT INTO shares(document_id,email,name,created_at) VALUES(?,?,?,?)',
+    )
+    .run(
+      testDocument,
+      'autora@example.com',
+      'Nome vindo do teste',
+      new Date().toISOString(),
+    );
+  f.sqlite
+    .prepare(
+      'INSERT INTO shares(document_id,email,name,created_at) VALUES(?,?,?,?)',
+    )
+    .run(
+      testDocument,
+      'estranha@example.com',
+      'Estranha no teste',
+      new Date().toISOString(),
+    );
+
+  await f.call('auth/request', 'POST', { email: 'autora@example.com' });
+  const verified = await f.call('auth/verify', 'POST', {
+    token: f.mailbox.lastToken(),
+  });
+  assert.equal(verified.status, 200);
+  const verifiedCookie = verified.headers.get('set-cookie')!.split(';')[0];
+  assert.equal(
+    (await data(await f.call('session', 'GET', undefined, verifiedCookie)))
+      .viewer.name,
+    'autora@example.com',
+  );
+
+  const messages = f.mailbox.messages.length;
+  await f.call('auth/request', 'POST', {
+    email: 'autora@example.com',
+    documentId: testDocument,
+  });
+  await f.call('auth/request', 'POST', { email: 'estranha@example.com' });
+  await f.call('auth/request', 'POST', {
+    email: 'estranha@example.com',
+    documentId: testDocument,
+  });
+  assert.equal(f.mailbox.messages.length, messages);
 });
 
 void test('API rejeita identidade forjada e solicitações de outra origem sem criar acesso', async (t) => {
