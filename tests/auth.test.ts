@@ -185,11 +185,10 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
   });
   assert.equal((await data(guestLogin)).redirect, '/d/' + id);
   const guestCookie = guestLogin.headers.get('set-cookie')!.split(';')[0];
-  assert.equal(
-    (await data(await f.call('session', 'GET', undefined, guestCookie)))
-      .canCreate,
-    false,
+  const guestSession = await data(
+    await f.call('session', 'GET', undefined, guestCookie),
   );
+  assert.equal(guestSession.canCreate, false);
   const read = await f.call('documents/' + id, 'GET', undefined, guestCookie);
   assert.equal(read.status, 200);
   assert.equal((await data(read)).isOwner, false);
@@ -222,6 +221,7 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
         'POST',
         {
           id: crypto.randomUUID(),
+          authorId: guestSession.viewer.id,
           body: 'Minha contribuição',
           quote: 'Um trecho.',
           sourceStart: 11,
@@ -252,7 +252,11 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
       await f.call(
         `documents/${id}/comments`,
         'POST',
-        { id: crypto.randomUUID(), body: 'Sem permissão' },
+        {
+          id: crypto.randomUUID(),
+          authorId: guestSession.viewer.id,
+          body: 'Sem permissão',
+        },
         guestCookie,
       )
     ).status,
@@ -386,7 +390,11 @@ void test('dois autores entram sem convite, recuperam identidade e ficam isolado
       await f.call(
         `documents/${idB}/comments`,
         'POST',
-        { id: crypto.randomUUID(), body: 'Sem convite' },
+        {
+          id: crypto.randomUUID(),
+          authorId: secondA.session.viewer.id,
+          body: 'Sem convite',
+        },
         secondA.cookie,
       )
     ).status,

@@ -216,8 +216,11 @@ o provedor falha. Solicitações de links têm limites por e-mail e endereço de
 - Documentos e comentários persistidos em SQLite/D1.
 - Compartilhamento por nome opcional e e-mail, com convite e reenvio.
 - Comentários gerais ou em trechos selecionados, com autor e data.
-- Atualização de comentários ao voltar à página e a cada 15 segundos.
-- Reenvio de comentário com o mesmo identificador sem duplicação.
+- Atualização de comentários ao voltar à página e a cada 15 segundos, com aviso
+  visível quando a atualização falha.
+- Reenvio explícito de comentário com a mesma operação sem duplicação. Uma
+  tentativa incerta e sua redação permanecem somente em memória enquanto a página
+  está aberta; não há recuperação do rascunho depois de fechar ou recarregar.
 
 ## Estado da disponibilização
 
