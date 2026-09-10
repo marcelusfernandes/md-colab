@@ -16,8 +16,10 @@ O banco e os backups são criados como `0600`.
 
 Copie `runtime.env.example` para um arquivo privado ignorado pelo Git e substitua
 origem, autores, remetente e segredo. Não imprima o arquivo durante diagnóstico e
-não o inclua no build da imagem. `ACCESS_MODE=email` é o modo esperado para
-convidados reais; `ACCESS_MODE=test` aceita qualquer e-mail declarado e serve
+não o inclua no build da imagem. `APP_AUTHOR_MODE=open` libera criação somente
+depois da confirmação do e-mail; `allowlist`, valor padrão quando ausente ou vazio,
+usa `APP_AUTHOR_EMAILS` e `APP_OWNER_EMAIL`. `ACCESS_MODE=email` é o modo esperado
+para convidados reais; `ACCESS_MODE=test` aceita qualquer e-mail declarado e serve
 somente para testes isolados.
 
 Na imagem publicada, defina as variáveis em execução e monte `/data`. Não publique

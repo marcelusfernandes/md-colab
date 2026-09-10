@@ -75,10 +75,7 @@ function diagnosticRoute(request: Request): DiagnosticRoute {
     if (parts[1] !== 'documents') return 'unknown';
     if (parts.length === 2) return 'documents';
     if (parts.length === 3) return 'document';
-    if (
-      parts[3] === 'comments' &&
-      (parts.length === 4 || parts.length === 5)
-    )
+    if (parts[3] === 'comments' && (parts.length === 4 || parts.length === 5))
       return 'comments';
     if (parts[3] === 'shares' && parts.length === 4) return 'shares';
     return 'unknown';
@@ -211,9 +208,17 @@ export async function handleApi(
     const auth = new AuthService(values.DB, config, configuredMailer);
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\//, '').split('/');
-    const publishing = new PublicationService(values.DB, config, undefined, values);
+    const publishing = new PublicationService(
+      values.DB,
+      config,
+      undefined,
+      values,
+    );
     if (path[0] === 'access' && path.length === 1 && request.method === 'GET')
-      return json({ mode: config.testMode ? 'test' : 'email' });
+      return json({
+        mode: config.testMode ? 'test' : 'email',
+        authorMode: config.authorMode ?? 'allowlist',
+      });
     if (request.method !== 'GET') {
       const origin = request.headers.get('origin');
       if (

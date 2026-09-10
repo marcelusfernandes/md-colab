@@ -47,6 +47,7 @@ function start(port, databasePath = database) {
         PORT: String(port),
         MD_COLAB_DB_PATH: databasePath,
         ACCESS_MODE: 'test',
+        APP_AUTHOR_MODE: 'open',
         APP_ORIGIN: `http://127.0.0.1:${port}`,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -131,6 +132,13 @@ try {
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: 'ok' });
 
+  const access = await fetch(origin + '/api/access');
+  assert.equal(access.status, 200);
+  assert.deepEqual(await access.json(), {
+    mode: 'test',
+    authorMode: 'open',
+  });
+
   const oversized = await fetch(origin + '/api/auth/test', {
     method: 'POST',
     headers: {
@@ -195,6 +203,7 @@ try {
   console.log(
     JSON.stringify({
       health: 'ok',
+      openAuthorBinding: true,
       readiness: 'ready',
       chunkedOversizeStatus: oversized.status,
       invalidDatabaseRejectedBeforeListen: true,

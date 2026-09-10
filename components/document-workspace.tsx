@@ -211,6 +211,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const refreshCommentsRef = useRef<(() => Promise<void>) | null>(null);
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [accessMode, setAccessMode] = useState<'email' | 'test'>('email');
+  const [authorMode, setAuthorMode] = useState<'allowlist' | 'open'>(
+    'allowlist',
+  );
   const [canCreate, setCanCreate] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -417,9 +420,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     setShareOpen(false);
     let sessionRecognized = false;
     try {
-      const access = await api<{ mode: 'email' | 'test' }>('access');
+      const access = await api<{
+        mode: 'email' | 'test';
+        authorMode: 'allowlist' | 'open';
+      }>('access');
       if (!mounted.current || request !== loadRequest.current) return;
       setAccessMode(access.mode);
+      setAuthorMode(access.authorMode);
       const { viewer: user, canCreate: allowed } = await api<{
         viewer: Viewer;
         canCreate: boolean;
@@ -1819,7 +1826,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           <LoaderCircle className="spin" size={20} /> Abrindo seus documentos…
         </main>
       ) : needsLogin ? (
-        <EmailLogin documentId={documentId} mode={accessMode} />
+        <EmailLogin
+          authorMode={authorMode}
+          documentId={documentId}
+          mode={accessMode}
+        />
       ) : !documentId ? (
         <main className="documents-home">
           <div className="page-heading">

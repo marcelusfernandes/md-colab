@@ -77,10 +77,14 @@ restore sanitizado, permissões e proxy confiável, siga o
 ## Acesso por e-mail
 
 - `APP_ORIGIN`: origem canônica, sem caminho. HTTPS na hospedagem;
-  HTTP permitido apenas em localhost ou 127.0.0.1.
-- `APP_AUTHOR_EMAILS`: lista de e-mails autorizados a importar documentos,
-  separados por vírgula. Espaços e maiúsculas são normalizados e repetições são
-  ignoradas.
+  HTTP permitido apenas em localhost ou 127.0.0.1. A instância atual usa
+  `https://collab.openprd.ai`.
+- `APP_AUTHOR_MODE`: `allowlist` limita criação à lista configurada; `open`
+  permite que qualquer pessoa crie planos depois de confirmar a posse do e-mail.
+  Ausente ou vazio usa `allowlist`; outro valor torna a configuração inválida.
+- `APP_AUTHOR_EMAILS`: lista de e-mails autorizados a importar documentos no modo
+  `allowlist`, separados por vírgula. Espaços e maiúsculas são normalizados e
+  repetições são ignoradas. Lista vazia nunca ativa autoria aberta.
 - `APP_OWNER_EMAIL`: configuração legada opcional. O e-mail continua autorizado
   a importar documentos mesmo quando não aparece em `APP_AUTHOR_EMAILS`.
 - `APP_OWNER_NAME`: nome exibido nos comentários do dono legado, opcional.
@@ -96,10 +100,13 @@ Para enviar a convidados, configure um remetente autorizado no serviço. As
 variáveis da hospedagem são independentes de `.env.local` e precisam ser
 configuradas como valores de execução; a chave deve ser um segredo.
 
-Na página inicial, um autor habilitado solicita seu primeiro link sem convite
-prévio. A confirmação cria sua conta; logins seguintes recuperam a mesma identidade
-e os planos que possui. Ao compartilhar, o convidado recebe seu próprio link; não
-precisa definir senha nem ter ChatGPT.
+Na página inicial, `APP_AUTHOR_MODE=open` permite que qualquer pessoa solicite seu
+primeiro link; ela só cria planos depois de confirmar a posse do e-mail. Em
+`allowlist`, o primeiro link sem convite continua restrito aos e-mails configurados.
+A confirmação cria a conta; logins seguintes recuperam a mesma identidade e os
+planos próprios ou compartilhados. Cada plano permanece privado: ser autor não dá
+acesso ao plano de outra pessoa, que exige convite específico. Ao compartilhar, o
+convidado recebe seu próprio link; não precisa definir senha nem ter ChatGPT.
 O link expira em 15 minutos e funciona uma vez. Uma confirmação na página evita
 que uma simples prévia de link feita pelo serviço de e-mail o consuma.
 Links vencidos podem ser solicitados de novo na entrada ou reenviados pelo dono.
@@ -160,7 +167,7 @@ A gestão usa o cookie da sessão verificada:
 
 O segredo autentica exclusivamente `POST /api/publications`. Ele não substitui
 o cookie na gestão de credenciais, leitura, comentários ou compartilhamento. A
-publicação também confere novamente a lista atual de autores e fica indisponível
+publicação também confere novamente a política atual de autoria e fica indisponível
 em `ACCESS_MODE=test`. Credenciais expiradas ou revogadas são recusadas.
 
 A requisição aceita JSON com `markdown`, `filename` e `title` opcional. O Markdown

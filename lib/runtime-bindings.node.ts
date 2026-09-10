@@ -11,6 +11,7 @@ export function getRuntimeBindings(): Cloudflare.Env {
     DB: database,
     ACCESS_MODE: process.env.ACCESS_MODE,
     APP_ORIGIN: process.env.APP_ORIGIN,
+    APP_AUTHOR_MODE: process.env.APP_AUTHOR_MODE,
     APP_AUTHOR_EMAILS: process.env.APP_AUTHOR_EMAILS,
     APP_OWNER_EMAIL: process.env.APP_OWNER_EMAIL,
     APP_OWNER_NAME: process.env.APP_OWNER_NAME,
@@ -18,7 +19,6 @@ export function getRuntimeBindings(): Cloudflare.Env {
     MAIL_FROM: process.env.MAIL_FROM,
     MAX_OWNED_DOCUMENTS: process.env.MAX_OWNED_DOCUMENTS,
     MAX_COMMENTS_PER_DOCUMENT: process.env.MAX_COMMENTS_PER_DOCUMENT,
-    MAX_ACTIVE_SHARES_PER_DOCUMENT:
-      process.env.MAX_ACTIVE_SHARES_PER_DOCUMENT,
+    MAX_ACTIVE_SHARES_PER_DOCUMENT: process.env.MAX_ACTIVE_SHARES_PER_DOCUMENT,
   };
 }
