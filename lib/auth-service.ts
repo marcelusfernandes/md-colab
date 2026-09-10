@@ -7,8 +7,9 @@ export const REQUEST_MESSAGE =
   'Se este e-mail tiver acesso, você receberá um link em instantes. Confira também a pasta de spam.';
 export type AuthConfig = {
   origin: string;
-  ownerEmail: string;
+  ownerEmail?: string;
   ownerName?: string;
+  authorEmails?: readonly string[];
   testMode?: boolean;
 };
 
@@ -24,6 +25,7 @@ export function validEmail(value: unknown) {
 export function authConfig(values: {
   ACCESS_MODE?: string;
   APP_ORIGIN?: string;
+  APP_AUTHOR_EMAILS?: string;
   APP_OWNER_EMAIL?: string;
   APP_OWNER_NAME?: string;
 }): AuthConfig {
@@ -42,10 +44,23 @@ export function authConfig(values: {
         ))
     )
       throw new Error();
+    const ownerEmail = values.APP_OWNER_EMAIL?.trim()
+      ? validEmail(values.APP_OWNER_EMAIL)
+      : undefined;
+    const authorEmails = Array.from(
+      new Set(
+        (values.APP_AUTHOR_EMAILS ?? '')
+          .split(',')
+          .map((email) => email.trim())
+          .filter(Boolean)
+          .map(validEmail),
+      ),
+    );
     return {
       origin: url.origin,
-      ownerEmail: validEmail(values.APP_OWNER_EMAIL),
+      ownerEmail,
       ownerName: values.APP_OWNER_NAME,
+      authorEmails,
       testMode: values.ACCESS_MODE === 'test',
     };
   } catch {
@@ -76,9 +91,21 @@ export class AuthService {
   ) {}
 
   canCreate(viewer: Viewer) {
-    return viewer.isTest
-      ? !!this.config.testMode
-      : viewer.email === this.config.ownerEmail;
+    return viewer.isTest ? !!this.config.testMode : this.isAuthor(viewer.email);
+  }
+
+  private authorEmails() {
+    return Array.from(
+      new Set(
+        [this.config.ownerEmail, ...(this.config.authorEmails ?? [])].filter(
+          (email): email is string => !!email,
+        ),
+      ),
+    );
+  }
+
+  private isAuthor(email: string) {
+    return this.authorEmails().includes(email);
   }
 
   async enterTest(input: Record<string, unknown>, request: Request) {
@@ -124,14 +151,20 @@ export class AuthService {
     if (documentId) {
       return !!(await this.db
         .prepare(`SELECT d.id FROM documents d JOIN users u ON u.id=d.owner_id
-        WHERE d.id=? AND (u.email=? OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=?))`)
+        WHERE d.id=? AND d.is_test=0 AND u.test_email IS NULL
+        AND (u.email=? OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=?))`)
         .bind(documentId, email, email)
         .first());
     }
-    if (email === this.config.ownerEmail) return true;
+    if (this.isAuthor(email)) return true;
     return !!(await this.db
-      .prepare(`SELECT 1 WHERE EXISTS(SELECT 1 FROM shares WHERE email=?)
-      OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id WHERE u.email=?)`)
+      .prepare(`SELECT 1 WHERE EXISTS(
+        SELECT 1 FROM shares s JOIN documents d ON d.id=s.document_id
+        WHERE s.email=? AND d.is_test=0
+      ) OR EXISTS(
+        SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id
+        WHERE u.email=? AND u.test_email IS NULL AND d.is_test=0
+      )`)
       .bind(email, email)
       .first());
   }
@@ -234,21 +267,30 @@ export class AuthService {
     if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value))
       throw invalid();
     const now = this.now();
+    const authorEmails = this.authorEmails();
+    const authorCondition = authorEmails.length
+      ? `email IN (${authorEmails.map(() => '?').join(',')})`
+      : '0';
     // Consume and authorize in one atomic statement, including current grants.
     const link = await this.db
       .prepare(`UPDATE magic_links SET used_at=?
       WHERE token_hash=? AND used_at IS NULL AND expires_at>? AND (
-        (document_id IS NULL AND (email=? OR EXISTS(SELECT 1 FROM shares s WHERE s.email=magic_links.email)
-          OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id WHERE u.email=magic_links.email)))
-        OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id WHERE d.id=magic_links.document_id
+        (document_id IS NULL AND (${authorCondition}
+          OR EXISTS(SELECT 1 FROM shares s JOIN documents d ON d.id=s.document_id
+            WHERE s.email=magic_links.email AND d.is_test=0)
+          OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id
+            WHERE u.email=magic_links.email AND u.test_email IS NULL AND d.is_test=0)))
+        OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id
+          WHERE d.id=magic_links.document_id AND d.is_test=0 AND u.test_email IS NULL
           AND (u.email=magic_links.email OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=magic_links.email)))
       ) RETURNING email,document_id`)
-      .bind(now, await hashToken(value), now, this.config.ownerEmail)
+      .bind(now, await hashToken(value), now, ...authorEmails)
       .first<{ email: string; document_id: string | null }>();
     if (!link) throw invalid();
     const invited = await this.db
       .prepare(
-        'SELECT name FROM shares WHERE email=? ORDER BY created_at LIMIT 1',
+        `SELECT s.name FROM shares s JOIN documents d ON d.id=s.document_id
+        WHERE s.email=? AND d.is_test=0 ORDER BY s.created_at LIMIT 1`,
       )
       .bind(link.email)
       .first<{ name: string }>();

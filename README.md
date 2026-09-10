@@ -34,15 +34,20 @@ npm run dev
 ```
 
 Aplique cada migração uma única vez no banco local. Preencha `.env.local` com a
-origem exata do servidor e o e-mail do dono. A chave deve permanecer nesse arquivo
-ignorado pelo Git; não a coloque no código ou em mensagens.
+origem exata do servidor e a lista de autores (ou o e-mail legado do dono). A
+chave deve permanecer nesse arquivo ignorado pelo Git; não a coloque no código
+ou em mensagens.
 
-## Acesso por e-mail, para uma etapa posterior
+## Acesso por e-mail
 
 - `APP_ORIGIN`: origem canônica, sem caminho. HTTPS na hospedagem;
   HTTP permitido apenas em localhost ou 127.0.0.1.
-- `APP_OWNER_EMAIL`: e-mail autorizado a importar documentos.
-- `APP_OWNER_NAME`: nome exibido nos comentários do dono, opcional.
+- `APP_AUTHOR_EMAILS`: lista de e-mails autorizados a importar documentos,
+  separados por vírgula. Espaços e maiúsculas são normalizados e repetições são
+  ignoradas.
+- `APP_OWNER_EMAIL`: configuração legada opcional. O e-mail continua autorizado
+  a importar documentos mesmo quando não aparece em `APP_AUTHOR_EMAILS`.
+- `APP_OWNER_NAME`: nome exibido nos comentários do dono legado, opcional.
 - `RESEND_API_KEY`: chave do serviço de envio.
 - `MAIL_FROM`: endereço remetente em domínio verificado no serviço.
 
@@ -51,8 +56,10 @@ Para enviar a convidados, configure um remetente autorizado no serviço. As
 variáveis da hospedagem são independentes de `.env.local` e precisam ser
 configuradas como valores de execução; a chave deve ser um segredo.
 
-Na página inicial, informe o e-mail do dono e solicite um link. Ao compartilhar,
-o convidado recebe seu próprio link; não precisa definir senha nem ter ChatGPT.
+Na página inicial, um autor habilitado solicita seu primeiro link sem convite
+prévio. A confirmação cria sua conta; logins seguintes recuperam a mesma identidade
+e os planos que possui. Ao compartilhar, o convidado recebe seu próprio link; não
+precisa definir senha nem ter ChatGPT.
 O link expira em 15 minutos e funciona uma vez. Uma confirmação na página evita
 que uma simples prévia de link feita pelo serviço de e-mail o consuma.
 Links vencidos podem ser solicitados de novo na entrada ou reenviados pelo dono.
@@ -62,6 +69,14 @@ fica em cookie HttpOnly, SameSite=Lax e Secure em HTTPS, com validade de sete di
 As permissões por documento são verificadas no servidor a cada leitura ou escrita.
 Remover um convidado invalida convites antigos e bloqueia leitura e comentários,
 mesmo com uma sessão aberta; comentários anteriores são preservados.
+
+A habilitação para criar é conferida no servidor em cada importação. Remover um
+e-mail da configuração de autores — incluindo `APP_OWNER_EMAIL`, se usado —
+bloqueia novas importações, inclusive em sessões já abertas, sem retirar a
+propriedade ou os convites que a conta já possui. A lista pode ficar vazia durante
+essa revogação sem indisponibilizar o acesso existente. Um link para um documento
+específico nunca concede acesso apenas porque o e-mail está na lista de autores:
+posse ou convite para aquele documento continuam obrigatórios.
 
 Sem serviço de e-mail configurado, o sistema exibe essa pendência e não finge um
 envio. Se um convite falhar após a concessão do acesso, o dono vê a situação e pode
