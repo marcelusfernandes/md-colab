@@ -435,6 +435,92 @@ a:focus-visible {
   font-size: 14px;
   font-weight: 500;
 }
+.publishing-token-dialog {
+  max-height: calc(100dvh - 32px);
+  max-width: 520px;
+  overflow-y: auto;
+  padding: 24px;
+}
+.publishing-token-form,
+.publishing-token-secret {
+  display: grid;
+  gap: 9px;
+}
+.publishing-token-form > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.publishing-token-note,
+.publishing-token-list > p,
+.publishing-token-secret p {
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.publishing-token-secret {
+  border: 1px solid #d8a936;
+  border-radius: 9px;
+  background: #fff9e8;
+  color: #433919;
+  padding: 14px;
+}
+.publishing-token-secret textarea {
+  width: 100%;
+  resize: none;
+  border: 1px solid #d8c88d;
+  border-radius: 7px;
+  background: white;
+  color: #202d40;
+  padding: 10px;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.publishing-token-secret button {
+  justify-self: start;
+}
+.publishing-token-list {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.publishing-token-list h3 {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.publishing-token-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+}
+.publishing-token-row strong,
+.publishing-token-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.publishing-token-row strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+.publishing-token-row span {
+  margin-top: 3px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.publishing-token-revoke-dialog {
+  width: calc(100vw - 2rem);
+  min-width: 0;
+}
+.publishing-token-revoke-dialog [data-slot='alert-dialog-header'],
+.publishing-token-revoke-dialog [data-slot='alert-dialog-description'] {
+  min-width: 0;
+}
+.publishing-token-revoke-dialog [data-slot='alert-dialog-description'] {
+  overflow-wrap: anywhere;
+}
 .restricted-note {
   border-top: 1px solid var(--border);
   padding-top: 18px;
@@ -815,6 +901,7 @@ a:focus-visible {
 @media (pointer: coarse) {
   .signout,
   .access-role > button,
+  .publishing-token-row button,
   .quote-composer > button {
     min-width: 44px;
     min-height: 44px;

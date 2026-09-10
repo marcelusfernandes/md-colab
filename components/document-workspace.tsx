@@ -3,6 +3,7 @@ import { createElement, useCallback, useEffect, useRef, useState } from 'react';
 import type { HTMLAttributes } from 'react';
 import Link from 'next/link';
 import { EmailLogin } from '@/components/email-login';
+import { PublishingTokens } from '@/components/publishing-tokens';
 import { api, ApiError, errorText } from '@/lib/client-api';
 import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -435,6 +436,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           )}
           {viewer && (
             <>
+              {!viewer.isTest && <PublishingTokens canCreate={canCreate} />}
               <span className="viewer-name">{viewer.name}</span>
               <button
                 type="button"

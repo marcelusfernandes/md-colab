@@ -4,6 +4,7 @@ import {
   integer,
   primaryKey,
   index,
+  uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
@@ -97,5 +98,50 @@ export const authLimits = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.scope, table.keyHash] }),
     index('auth_limits_expiry').on(table.expiresAt),
+  ],
+);
+
+export const publishingTokens = sqliteTable(
+  'publishing_tokens',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull().unique(),
+    createdAt: text('created_at').notNull(),
+    expiresAt: integer('expires_at').notNull(),
+    revokedAt: integer('revoked_at'),
+  },
+  (table) => [
+    index('publishing_tokens_user_created').on(table.userId, table.createdAt),
+    index('publishing_tokens_expiry').on(table.expiresAt),
+  ],
+);
+
+export const publications = sqliteTable(
+  'publications',
+  {
+    id: text('id').primaryKey(),
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    authorId: text('author_id')
+      .notNull()
+      .references(() => users.id),
+    publishingTokenId: text('publishing_token_id')
+      .notNull()
+      .references(() => publishingTokens.id),
+    idempotencyKeyHash: text('idempotency_key_hash').notNull(),
+    payloadDigest: text('payload_digest').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('publications_author_idempotency').on(
+      table.authorId,
+      table.idempotencyKeyHash,
+    ),
+    uniqueIndex('publications_document').on(table.documentId),
   ],
 );

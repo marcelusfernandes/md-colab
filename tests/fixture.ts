@@ -12,6 +12,7 @@ export function database() {
     .sort())
     sqlite.exec(readFileSync(new URL(file, directory), 'utf8'));
   function prepare(sql: string, values: (string | number | null)[] = []) {
+    const execute = () => ({ results: sqlite.prepare(sql).all(...values) });
     return {
       bind(...bound: (string | number | null)[]) {
         return prepare(sql, bound);
@@ -20,11 +21,12 @@ export function database() {
         return sqlite.prepare(sql).get(...values) ?? null;
       },
       async all() {
-        return { results: sqlite.prepare(sql).all(...values) };
+        return execute();
       },
       async run() {
         return sqlite.prepare(sql).run(...values);
       },
+      execute,
     };
   }
   const db = {
@@ -32,8 +34,10 @@ export function database() {
     async batch(statements: ReturnType<typeof prepare>[]) {
       sqlite.exec('BEGIN');
       try {
-        const results = [];
-        for (const statement of statements) results.push(await statement.all());
+        // D1 executes a batch sequentially as one transaction. Keep the test
+        // adapter synchronous inside BEGIN/COMMIT so concurrent requests cannot
+        // interleave and manufacture a nested transaction failure.
+        const results = statements.map((statement) => statement.execute());
         sqlite.exec('COMMIT');
         return results;
       } catch (error) {

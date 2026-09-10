@@ -185,3 +185,21 @@ void test('entrada inválida não grava documentos, compartilhamentos ou coment�
     sqlite.close();
   }
 });
+
+void test('upload manual continua inferindo título quando o campo opcional vem vazio ou nulo', async () => {
+  const { sqlite, owner } = fixture();
+  await owner.registerViewer();
+  const empty = await owner.create({
+    markdown: '# Título do Markdown',
+    filename: 'vazio.md',
+    title: '',
+  });
+  const nullable = await owner.create({
+    markdown: 'Sem cabeçalho',
+    filename: 'arquivo.md',
+    title: null,
+  });
+  assert.equal(empty.title, 'Título do Markdown');
+  assert.equal(nullable.title, 'arquivo');
+  sqlite.close();
+});
