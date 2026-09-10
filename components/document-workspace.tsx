@@ -237,6 +237,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [personEmail, setPersonEmail] = useState('');
   const [quote, setQuote] = useState('');
   const [sourceStart, setSourceStart] = useState<number | null>(null);
+  const [replyRoot, setReplyRoot] = useState<CommentRow | null>(null);
   const [comment, setComment] = useState('');
   const [commentOperation, setCommentOperation] =
     useState<CommentOperation | null>(null);
@@ -268,6 +269,33 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       markdownComponents(markdownAnalysis.headingIds as Record<number, string>),
     [markdownAnalysis.headingIds],
   );
+  const conversations = useMemo(() => {
+    const byRoot = new Map<string, CommentRow[]>();
+    for (const entry of comments) {
+      const entries = byRoot.get(entry.root_id) ?? [];
+      entries.push(entry);
+      byRoot.set(entry.root_id, entries);
+    }
+    return [...byRoot.entries()]
+      .map(([rootId, entries]) => {
+        const root = entries.find((entry) => entry.id === rootId) ?? entries[0];
+        return {
+          root,
+          replies: entries
+            .filter((entry) => entry.id !== root.id)
+            .sort(
+              (left, right) =>
+                left.created_at.localeCompare(right.created_at) ||
+                left.id.localeCompare(right.id),
+            ),
+        };
+      })
+      .sort(
+        (left, right) =>
+          left.root.created_at.localeCompare(right.root.created_at) ||
+          left.root.id.localeCompare(right.root.id),
+      );
+  }, [comments]);
 
   useEffect(() => {
     if (!hasUnconfirmedWork) return;
@@ -348,6 +376,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setComment('');
         setQuote('');
         setSourceStart(null);
+        setReplyRoot(null);
         composerRevision.current += 1;
       }
       commentOperationRef.current = null;
@@ -380,6 +409,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setCommentsLoadingOlder(false);
       setQuote('');
       setSourceStart(null);
+      setReplyRoot(null);
       setCommentsRefreshError('');
       setCommentsHistoryError('');
       const operation = commentOperationRef.current;
@@ -449,6 +479,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setComment('');
         setQuote('');
         setSourceStart(null);
+        setReplyRoot(null);
         composerRevision.current += 1;
         setNotice(
           'A tentativa anterior pertencia a outra sessão e não foi reutilizada.',
@@ -482,6 +513,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         const result = await api<{
           document: DocumentRow;
           comments: CommentRow[];
+          roots: CommentRow[];
           pagination: CommentPagination;
           isOwner: boolean;
         }>('documents/' + documentId);
@@ -496,6 +528,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           setComment('');
           setQuote('');
           setSourceStart(null);
+          setReplyRoot(null);
           composerRevision.current += 1;
           setNotice(
             'A tentativa anterior pertencia a outro documento e não foi reutilizada.',
@@ -516,11 +549,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         commentsHistoryInProgress.current = false;
         activeDocumentId.current = result.document.id;
         activeViewerId.current = user.id;
+        setReplyRoot(null);
         setDoc(result.document);
         const commentPage = commentPageFromResponse(result);
         commentsNextCursor.current = commentPage.pagination.nextCursor;
         commentsOlderCursor.current = commentPage.pagination.olderCursor;
-        setComments(commentPage.comments);
+        setComments(mergeComments(commentPage.comments, commentPage.roots));
         setHasOlderComments(commentPage.pagination.olderCursor !== null);
         setCommentsUpdating(false);
         setCommentsLoadingOlder(false);
@@ -827,7 +861,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             throw new Error(
               'O servidor retornou uma continuação de comentários inválida.',
             );
-          setComments((current) => mergeComments(current, result.comments));
+          setComments((current) =>
+            mergeComments(current, [...result.comments, ...result.roots]),
+          );
           commentsNextCursor.current = result.pagination.nextCursor;
           setCommentsRefreshError('');
           const operation = commentOperationRef.current;
@@ -937,7 +973,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       // Historical pages never replace the independent incremental watermark.
       commentsOlderCursor.current = result.pagination.olderCursor;
       setHasOlderComments(result.pagination.olderCursor !== null);
-      setComments((current) => mergeComments(current, result.comments));
+      setComments((current) =>
+        mergeComments(current, [...result.comments, ...result.roots]),
+      );
       setCommentsHistoryError('');
     } catch (e) {
       if (
@@ -1277,7 +1315,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
   }
   const captureSelection = useCallback(() => {
-    if (busy === 'comment') return;
+    if (busy === 'comment' || replyRoot) return;
     const selection = window.getSelection();
     if (
       !selection ||
@@ -1306,7 +1344,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       anchor === undefined || anchor === null ? null : Number(anchor),
     );
     composerRevision.current += 1;
-  }, [busy]);
+  }, [busy, replyRoot]);
   useEffect(() => {
     const node = article.current;
     if (!node) return;
@@ -1501,6 +1539,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       body: comment,
       quote,
       sourceStart,
+      rootId: replyRoot?.id ?? null,
       composerRevision: composerRevision.current,
     });
     storeCommentOperation(operation);
@@ -2091,7 +2130,24 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 </output>
               )}
               <form onSubmit={(event) => void addComment(event)}>
-                {quote ? (
+                {replyRoot ? (
+                  <div className="quote-composer">
+                    <p>
+                      Respondendo a <strong>{replyRoot.author_name}</strong> na
+                      conversa iniciada em {dateLabel(replyRoot.created_at)}.
+                    </p>
+                    <button
+                      type="button"
+                      aria-label="Cancelar resposta"
+                      onClick={() => {
+                        setReplyRoot(null);
+                        composerRevision.current += 1;
+                      }}
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+                ) : quote ? (
                   <div className="quote-composer">
                     <blockquote className="selected-quote">{quote}</blockquote>
                     <button
@@ -2117,7 +2173,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 <textarea
                   ref={commentInput}
                   id="comment"
-                  placeholder="Escreva um comentário…"
+                  placeholder={
+                    replyRoot
+                      ? 'Escreva uma resposta…'
+                      : 'Escreva um comentário…'
+                  }
                   rows={4}
                   maxLength={5000}
                   value={comment}
@@ -2201,7 +2261,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                     ? 'Enviando…'
                     : commentOperation
                       ? 'Resolva o envio anterior'
-                      : 'Comentar'}
+                      : replyRoot
+                        ? 'Responder'
+                        : 'Comentar'}
                 </Button>
               </form>
               {hasOlderComments && !commentsHistoryError && (
@@ -2234,30 +2296,65 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 <div className="comments-empty">Nenhum comentário ainda.</div>
               ) : (
                 <div className="comments-list">
-                  {comments.map((entry) => (
-                    <section className="comment-item" key={entry.id}>
-                      <div className="comment-author">
-                        <span className="avatar">
-                          {entry.author_name.slice(0, 1).toUpperCase()}
-                        </span>
-                        <div>
-                          <strong>{entry.author_name}</strong>
-                          <time dateTime={entry.created_at}>
-                            {dateLabel(entry.created_at)}
-                          </time>
+                  {conversations.map(({ root, replies }) => (
+                    <section className="comment-thread" key={root.id}>
+                      <section className="comment-item">
+                        <div className="comment-author">
+                          <span className="avatar">
+                            {root.author_name.slice(0, 1).toUpperCase()}
+                          </span>
+                          <div>
+                            <strong>{root.author_name}</strong>
+                            <time dateTime={root.created_at}>
+                              {dateLabel(root.created_at)}
+                            </time>
+                          </div>
                         </div>
-                      </div>
-                      {entry.quote && (
+                        {root.quote && (
+                          <button
+                            type="button"
+                            className="comment-quote"
+                            onClick={() => showQuote(root)}
+                            aria-label="Ver trecho no documento"
+                          >
+                            {root.quote}
+                          </button>
+                        )}
+                        <p>{root.body}</p>
                         <button
                           type="button"
-                          className="comment-quote"
-                          onClick={() => showQuote(entry)}
-                          aria-label="Ver trecho no documento"
+                          className="comment-reply"
+                          disabled={!!busy || !!commentOperation}
+                          onClick={() => {
+                            setReplyRoot(root);
+                            setQuote('');
+                            setSourceStart(null);
+                            composerRevision.current += 1;
+                            commentInput.current?.focus();
+                          }}
                         >
-                          {entry.quote}
+                          Responder
                         </button>
-                      )}
-                      <p>{entry.body}</p>
+                      </section>
+                      {replies.map((entry) => (
+                        <section
+                          className="comment-item comment-reply-item"
+                          key={entry.id}
+                        >
+                          <div className="comment-author">
+                            <span className="avatar">
+                              {entry.author_name.slice(0, 1).toUpperCase()}
+                            </span>
+                            <div>
+                              <strong>{entry.author_name}</strong>
+                              <time dateTime={entry.created_at}>
+                                {dateLabel(entry.created_at)}
+                              </time>
+                            </div>
+                          </div>
+                          <p>{entry.body}</p>
+                        </section>
+                      ))}
                     </section>
                   ))}
                 </div>

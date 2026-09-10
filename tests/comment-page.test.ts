@@ -5,6 +5,7 @@ import { commentPageFromResponse, mergeComments } from '../lib/comment-page.ts';
 const cursor = 'eyJ2IjoxLCJkIjoiZCIsImsiOiJhZnRlciIsInMiOjB9';
 const comment = {
   id: '00000000-0000-4000-8000-000000000001',
+  root_id: '00000000-0000-4000-8000-000000000001',
   body: 'Comentário',
   quote: '',
   source_start: null,
@@ -16,6 +17,7 @@ const comment = {
 void test('página só libera cursor depois de validar todos os comentários', () => {
   const valid = commentPageFromResponse({
     comments: [comment],
+    roots: [],
     pagination: { olderCursor: null, nextCursor: cursor, hasMore: false },
   });
   assert.deepEqual(valid.comments, [comment]);
@@ -35,6 +37,7 @@ void test('página só libera cursor depois de validar todos os comentários', (
     assert.throws(() => {
       const page = commentPageFromResponse({
         comments,
+        roots: [],
         pagination: { olderCursor: null, nextCursor: cursor, hasMore: false },
       });
       watermark = page.pagination.nextCursor;
@@ -43,6 +46,7 @@ void test('página só libera cursor depois de validar todos os comentários', (
   assert.throws(() =>
     commentPageFromResponse({
       comments: [],
+      roots: [],
       pagination: { olderCursor: null, nextCursor: cursor, hasMore: true },
     }),
   );

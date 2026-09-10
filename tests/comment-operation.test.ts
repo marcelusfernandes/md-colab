@@ -32,11 +32,45 @@ void test('retry preserva a mesma identidade e o payload normalizado da tentativ
   assert.equal(operationRequest(retry).authorId, 'viewer-a');
 });
 
+void test('operação de resposta congela a conversa e rejeita confirmação de outra raiz', () => {
+  const rootId = '00000000-0000-4000-8000-000000000099';
+  const reply = createCommentOperation({
+    documentId: 'document-a',
+    viewerId: 'viewer-a',
+    body: 'Resposta',
+    quote: '',
+    sourceStart: null,
+    rootId,
+    composerRevision: 1,
+  });
+  assert.equal(operationRequest(reply).rootId, rootId);
+  assert.throws(
+    () =>
+      commentFromResponse(
+        {
+          comment: {
+            id: reply.id,
+            root_id: reply.id,
+            author_id: reply.viewerId,
+            author_name: 'Pessoa',
+            body: reply.body,
+            quote: reply.quote,
+            source_start: null,
+            created_at: '2026-09-10T12:00:00.000Z',
+          },
+        },
+        reply,
+      ),
+    /não confirmou este comentário/,
+  );
+});
+
 void test('resposta confirma somente a operação e não consome uma revisão posterior do composer', () => {
   const pending = operation();
   const response = {
     comment: {
       id: pending.id,
+      root_id: pending.id,
       author_id: pending.viewerId,
       author_name: 'Pessoa',
       body: pending.body,
@@ -70,6 +104,7 @@ void test('documento, identidade e resposta divergentes não reconciliam a tenta
         {
           comment: {
             id: pending.id,
+            root_id: pending.id,
             author_id: pending.viewerId,
             author_name: 'Pessoa',
             body: 'Outro conteúdo.',

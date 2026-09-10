@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 5);
+  assert.equal(first.applied.length, 6);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    5,
+    6,
   );
   restarted.sqlite.close();
 
@@ -145,13 +145,13 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
   seedBeforeCommentsMigration(success);
   migrateNodeDatabase(success, migrations);
   const ordered = success
-    .prepare('SELECT id,sequence FROM comments ORDER BY sequence')
-    .all() as { id: string; sequence: number }[];
+    .prepare('SELECT id,root_id,sequence FROM comments ORDER BY sequence')
+    .all() as { id: string; root_id: string; sequence: number }[];
   assert.deepEqual(
-    ordered.map((row) => [row.id, row.sequence]),
+    ordered.map((row) => [row.id, row.root_id, row.sequence]),
     [
-      ['comment-a', 1],
-      ['comment-b', 2],
+      ['comment-a', 'comment-a', 1],
+      ['comment-b', 'comment-b', 2],
     ],
   );
   success.close();
@@ -287,7 +287,10 @@ void test('a verified pre-upgrade backup restores separately and requires explic
   const backup = await backupNodeDatabase(activePath, backupPath, {
     allowPending: true,
   });
-  assert.deepEqual(backup.pending, ['0004_polite_mandrill']);
+  assert.deepEqual(backup.pending, [
+    '0004_polite_mandrill',
+    '0005_first_apocalypse',
+  ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
   upgraded.sqlite.close();
@@ -301,7 +304,10 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0002_link_test_mode',
     '0003_pink_blazing_skull',
   ]);
-  assert.deepEqual(result.pending, ['0004_polite_mandrill']);
+  assert.deepEqual(result.pending, [
+    '0004_polite_mandrill',
+    '0005_first_apocalypse',
+  ]);
   assert.throws(
     () => openPersistentD1(restorePath),
     /complete known migration history/,

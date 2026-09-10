@@ -38,7 +38,7 @@ npm run db:migrate:local -- --persist-to .wrangler/state
 npm run dev
 ```
 
-O Wrangler aplica `drizzle/0000..0004` na ordem e registra o ledger no banco;
+O Wrangler aplica `drizzle/0000..0005` na ordem e registra o ledger no banco;
 repetir o comando não reaplica DDL. Use sempre um `--persist-to` explícito e não
 reutilize a persistência de outra sessão. Se `status` encontrar schema sem ledger,
 `migrate` recusa a escrita: siga o [runbook de D1](docs/d1-recovery.md) para
@@ -121,6 +121,22 @@ fica em cookie HttpOnly, SameSite=Lax e Secure em HTTPS, com validade de sete di
 As permissões por documento são verificadas no servidor a cada leitura ou escrita.
 Remover um convidado invalida convites antigos e bloqueia leitura e comentários,
 mesmo com uma sessão aberta; comentários anteriores são preservados.
+
+### Conversas de comentários
+
+Cada comentário sem `rootId` inicia uma conversa e recebe um `root_id` igual ao
+seu próprio UUID. Uma resposta envia o UUID dessa raiz em `rootId`; o servidor
+deriva a autoria da sessão, verifica novamente o acesso ao plano na escrita e
+aceita somente uma raiz do mesmo plano. Respostas não recebem uma nova citação ou
+offset: elas preservam o contexto publicado pela raiz. Não há aninhamento além
+desse nível.
+
+O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
+conversa idênticos. A listagem continua paginada pela sequência persistida; quando
+uma página contém resposta cuja raiz ficou fora dela, a resposta JSON inclui essa
+raiz em `roots`, sem avançar cursor nem aumentar o limite lógico de `comments`.
+Enquanto a página permanece aberta, reenvio incerto mantém a conversa escolhida e
+o texto; mudar de documento ou de sessão descarta esse vínculo local.
 
 ### Cotas totais do piloto
 
