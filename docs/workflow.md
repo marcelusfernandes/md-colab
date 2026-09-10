@@ -102,13 +102,39 @@ O implementador lê código, escreve e executa a validação relevante. O reviso
 recebe spec, decisões, diff e evidências em uma sessão independente, sem o histórico
 de raciocínio do autor. Retorne achados verificáveis; não corrija silenciosamente
 durante a revisão. Outra sessão/modelo não equivale a uma identidade de aprovação
-separada no GitHub: siga os requisitos do plugin para integração.
+separada no GitHub. Para integração, aplique a política deste repositório abaixo.
 
 Planeje incrementalmente. Obtenha crítica independente quando o risco justificar,
 especialmente em acesso, contratos públicos, dados e migrações. Registre divergências
 e decisões; não convoque trio ou votação automaticamente. Fatos atuais exigem fontes.
 Se nova evidência invalidar a spec, interrompa somente o trabalho dependente e trate
 a decisão pelo fluxo do plugin. Escolhas locais e reparos rotineiros permanecem autônomos.
+
+## Política de integração deste repositório
+
+A [decisão do autor](https://github.com/marcelusfernandes/md-colab/issues/15#issuecomment-5612144109)
+autoriza, somente neste projeto, revisão independente de agentes em contexto
+separado e CI obrigatória no HEAD exato como critérios de revisão e validação para
+merge. Permissões e demais condições do objetivo continuam sendo verificadas.
+Não é necessária uma segunda identidade GitHub nem a configuração das regras de
+aprovação que o comando `land` exige. O plugin global permanece inalterado.
+
+Antes de integrar, confirme a PR não-draft, a branch de destino do objetivo, o HEAD
+remoto e a ausência de decisões humanas pendentes. Registre na PR a revisão
+independente, os deltas revisados e o SHA final; não apresente essa evidência como
+um review `APPROVED` do GitHub. Exija o job `validate` aprovado com instalação,
+check, lint, testes e build realmente executados para o mesmo HEAD. Novos commits
+exigem revisão do delta e nova CI antes de integrar.
+
+Nesta exceção, quando `land` não aceitar apenas a ausência da segunda identidade
+ou das regras de aprovação dispensadas, o coordenador pode integrar pela CLI do
+GitHub com `--match-head-commit` fixado no SHA revisado e validado. Verifique também
+as políticas atuais do servidor; não use `--admin`, force push, bypass nem altere
+proteções para viabilizar o merge. Outras recusas precisam ser diagnosticadas e
+resolvidas antes de continuar. Reconcile o estado e as evidências após a integração.
+
+Essa política não autoriza deploy público, envio real de e-mails ou ampliação do
+escopo de produto. As demais instruções do fluxo instalado continuam aplicáveis.
 
 ## Memória operacional
 
