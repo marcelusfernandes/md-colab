@@ -620,3 +620,53 @@ void test('modo de teste não emite, gerencia nem usa credenciais de publicaçã
   f.values.ACCESS_MODE = 'email';
   assert.equal((await f.publish(syntheticToken, 'test-identity')).status, 401);
 });
+
+void test('autor aberto verificado cria credencial e publica sem expor o plano a outro autor', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  f.values.APP_AUTHOR_MODE = 'open';
+
+  assert.equal(
+    (await f.call('publishing-tokens', 'POST', { name: 'Sem sessão' })).status,
+    401,
+  );
+  const cookie = await f.login('novo-autor@example.com');
+  const credential = await f.createCredential(cookie, 'CLI pessoal');
+  const published = await f.publish(credential.token, 'open-author-cli', {
+    markdown: '# Publicação privada',
+    filename: 'privado.md',
+  });
+  assert.equal(published.status, 201);
+  const result = await body<PublicationResult>(published);
+  const stored = f.sqlite
+    .prepare(
+      `SELECT d.owner_id,u.email FROM documents d
+       JOIN users u ON u.id=d.owner_id WHERE d.id=?`,
+    )
+    .get(result.documentId) as { owner_id: string; email: string };
+  assert.equal(stored.email, 'novo-autor@example.com');
+
+  const otherCookie = await f.login('outro-autor@example.com');
+  assert.equal(
+    (
+      await f.call(
+        'documents/' + result.documentId,
+        'GET',
+        undefined,
+        otherCookie,
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await f.call(
+        'publishing-tokens/' + credential.credential.id,
+        'DELETE',
+        {},
+        otherCookie,
+      )
+    ).status,
+    404,
+  );
+});

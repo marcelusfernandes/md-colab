@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import type { AccessEmail, Mailer } from '../lib/mailer.ts';
+import { createNodeD1 } from '../lib/node-d1.ts';
 import { HttpError } from '../lib/document-service.ts';
 
 export function database() {
@@ -11,41 +12,7 @@ export function database() {
     .filter((file) => file.endsWith('.sql'))
     .sort())
     sqlite.exec(readFileSync(new URL(file, directory), 'utf8'));
-  function prepare(sql: string, values: (string | number | null)[] = []) {
-    const execute = () => ({ results: sqlite.prepare(sql).all(...values) });
-    return {
-      bind(...bound: (string | number | null)[]) {
-        return prepare(sql, bound);
-      },
-      async first() {
-        return sqlite.prepare(sql).get(...values) ?? null;
-      },
-      async all() {
-        return execute();
-      },
-      async run() {
-        return sqlite.prepare(sql).run(...values);
-      },
-      execute,
-    };
-  }
-  const db = {
-    prepare,
-    async batch(statements: ReturnType<typeof prepare>[]) {
-      sqlite.exec('BEGIN');
-      try {
-        // D1 executes a batch sequentially as one transaction. Keep the test
-        // adapter synchronous inside BEGIN/COMMIT so concurrent requests cannot
-        // interleave and manufacture a nested transaction failure.
-        const results = statements.map((statement) => statement.execute());
-        sqlite.exec('COMMIT');
-        return results;
-      } catch (error) {
-        sqlite.exec('ROLLBACK');
-        throw error;
-      }
-    },
-  } as unknown as D1Database;
+  const db = createNodeD1(sqlite);
   return { sqlite, db };
 }
 

@@ -5,9 +5,11 @@ import { Button } from '@/components/ui/button';
 import { api, errorText } from '@/lib/client-api';
 
 export function EmailLogin({
+  authorMode = 'allowlist',
   documentId,
   mode = 'email',
 }: {
+  authorMode?: 'allowlist' | 'open';
   documentId?: string;
   mode?: 'email' | 'test';
 }) {
@@ -47,14 +49,18 @@ export function EmailLogin({
       <h1>
         {mode === 'test'
           ? 'Entre para testar.'
-          : 'Seus documentos, com acesso restrito.'}
+          : !documentId && authorMode === 'open'
+            ? 'Crie e acesse seus planos com e-mail confirmado.'
+            : 'Seus documentos, com acesso restrito.'}
       </h1>
       <p>
         {mode === 'test'
           ? 'Informe qualquer e-mail para identificar seus comentários. A entrada é imediata, sem senha e sem confirmação por e-mail.'
           : documentId
             ? 'Informe o e-mail convidado para este documento. Você receberá um link para entrar, sem senha.'
-            : 'Informe seu e-mail para acessar seus planos e os compartilhados com você. Você receberá um link para entrar, sem senha.'}
+            : authorMode === 'open'
+              ? 'Informe seu e-mail. Depois de confirmar o link, você poderá criar planos privados e acessar os compartilhados com você.'
+              : 'Informe seu e-mail para acessar seus planos e os compartilhados com você. Você receberá um link para entrar, sem senha.'}
       </p>
       <form className="login-form" onSubmit={(event) => void submit(event)}>
         <label htmlFor="login-email">Seu e-mail</label>

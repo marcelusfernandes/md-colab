@@ -2,6 +2,7 @@ import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
+import { resolve } from 'node:path';
 import hostingConfig from './.openai/hosting.json';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
@@ -35,6 +36,28 @@ const localBindingConfig = {
 };
 
 export default defineConfig(async () => {
+  const nodeRuntime = process.env.MD_COLAB_RUNTIME === 'node';
+  const runtimeBindings = {
+    name: 'md-colab-runtime-bindings',
+    enforce: 'pre' as const,
+    resolveId(id: string) {
+      if (id === 'virtual:md-colab-runtime-bindings')
+        return resolve(
+          process.cwd(),
+          nodeRuntime
+            ? 'lib/runtime-bindings.node.ts'
+            : 'lib/runtime-bindings.ts',
+        );
+    },
+  };
+
+  if (nodeRuntime) {
+    return {
+      css: { postcss: { plugins: [tailwindcss()] } },
+      plugins: [runtimeBindings, vinext()],
+    };
+  }
+
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= 'false';
@@ -50,6 +73,7 @@ export default defineConfig(async () => {
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
+      runtimeBindings,
       vinext(),
       sites(),
       cloudflare({

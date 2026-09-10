@@ -476,6 +476,15 @@ void test('configuração normaliza e deduplica autores sem desabilitar o dono l
     'autora@example.com',
     'autor@example.com',
   ]);
+  assert.equal(configured.authorMode, 'allowlist');
+
+  const open = authConfig({
+    APP_ORIGIN: config.origin,
+    APP_AUTHOR_MODE: ' open ',
+    APP_AUTHOR_EMAILS: '',
+  });
+  assert.equal(open.authorMode, 'open');
+  assert.deepEqual(open.authorEmails, []);
 
   const legacy = authConfig({
     APP_ORIGIN: config.origin,
@@ -493,6 +502,13 @@ void test('configuração normaliza e deduplica autores sem desabilitar o dono l
     }),
   );
   assert.deepEqual(authConfig({ APP_ORIGIN: config.origin }).authorEmails, []);
+  assert.equal(
+    authConfig({ APP_ORIGIN: config.origin, APP_AUTHOR_MODE: '' }).authorMode,
+    'allowlist',
+  );
+  assert.throws(() =>
+    authConfig({ APP_ORIGIN: config.origin, APP_AUTHOR_MODE: 'public' }),
+  );
 });
 
 void test('dois autores entram sem convite, recuperam identidade e ficam isolados por plano via HTTP', async (t) => {
@@ -777,10 +793,11 @@ void test('revogação é seletiva entre planos e invalida somente o convite pen
   );
 });
 
-void test('registros legados de teste não concedem link nem nome a uma conta verificada', async (t) => {
+void test('autoria aberta não converte identidade nem dados legados de teste', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());
-  f.values.APP_AUTHOR_EMAILS = 'autora@example.com';
+  f.values.APP_AUTHOR_MODE = 'open';
+  f.values.APP_AUTHOR_EMAILS = '';
   const testOwner = crypto.randomUUID();
   const testDocument = crypto.randomUUID();
   f.sqlite
@@ -842,12 +859,38 @@ void test('registros legados de teste não concedem link nem nome a uma conta ve
     email: 'autora@example.com',
     documentId: testDocument,
   });
+  assert.equal(f.mailbox.messages.length, messages);
   await f.call('auth/request', 'POST', { email: 'estranha@example.com' });
+  assert.equal(f.mailbox.messages.length, messages + 1);
+  const strangerToken = f.mailbox.lastToken();
   await f.call('auth/request', 'POST', {
     email: 'estranha@example.com',
     documentId: testDocument,
   });
-  assert.equal(f.mailbox.messages.length, messages);
+  assert.equal(f.mailbox.messages.length, messages + 1);
+
+  const strangerLogin = await f.call('auth/verify', 'POST', {
+    token: strangerToken,
+  });
+  assert.equal(strangerLogin.status, 200);
+  const strangerCookie = strangerLogin.headers.get('set-cookie')!.split(';')[0];
+  const stranger = await data(
+    await f.call('session', 'GET', undefined, strangerCookie),
+  );
+  assert.equal(stranger.viewer.name, 'estranha@example.com');
+  assert.notEqual(stranger.viewer.id, testOwner);
+  assert.equal(stranger.canCreate, true);
+  assert.equal(
+    (
+      await f.call(
+        'documents/' + testDocument,
+        'GET',
+        undefined,
+        strangerCookie,
+      )
+    ).status,
+    404,
+  );
 });
 
 void test('API rejeita identidade forjada e solicitações de outra origem sem criar acesso', async (t) => {
@@ -1040,5 +1083,159 @@ void test('adaptador de e-mail usa o provedor configurado, limita espera e rejei
     new ResendMailer('test-key', 'access@example.com', async () =>
       Response.json({}),
     ).send(email),
+  );
+});
+
+void test('autoria aberta exige e-mail confirmado e mantém cada plano privado por convite', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  f.values.APP_AUTHOR_MODE = 'open';
+
+  const access = (await f.call('access', 'GET')) as Response;
+  assert.deepEqual(await access.json(), {
+    mode: 'email',
+    authorMode: 'open',
+  });
+
+  const requested = await f.call('auth/request', 'POST', {
+    email: 'nova@example.com',
+  });
+  assert.equal(requested.status, 200);
+  assert.equal(f.mailbox.messages.at(-1)?.to, 'nova@example.com');
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM users').get()?.n, 0);
+  assert.equal(
+    (
+      await f.call('documents', 'POST', {
+        id: crypto.randomUUID(),
+        authorId: crypto.randomUUID(),
+        markdown: '# Sem confirmação',
+        filename: 'sem-confirmacao.md',
+      })
+    ).status,
+    401,
+  );
+  assert.equal(
+    (await f.call('auth/verify', 'POST', { token: '0'.repeat(64) })).status,
+    401,
+  );
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM users').get()?.n, 0);
+
+  async function verifyLast() {
+    const response = await f.call('auth/verify', 'POST', {
+      token: f.mailbox.lastToken(),
+    });
+    assert.equal(response.status, 200);
+    const cookie = response.headers.get('set-cookie')!.split(';')[0];
+    const session = await data(
+      await f.call('session', 'GET', undefined, cookie),
+    );
+    assert.equal(session.canCreate, true);
+    return { cookie, viewer: session.viewer };
+  }
+
+  const first = await verifyLast();
+  const createdFirst = await f.call(
+    'documents',
+    'POST',
+    {
+      id: crypto.randomUUID(),
+      authorId: first.viewer.id,
+      markdown: '# Plano privado A',
+      filename: 'a.md',
+    },
+    first.cookie,
+  );
+  assert.equal(createdFirst.status, 201);
+  const firstId = (await data(createdFirst)).document.id;
+
+  await f.call('auth/request', 'POST', { email: 'outra@example.com' });
+  const second = await verifyLast();
+  const createdSecond = await f.call(
+    'documents',
+    'POST',
+    {
+      id: crypto.randomUUID(),
+      authorId: second.viewer.id,
+      markdown: '# Plano privado B',
+      filename: 'b.md',
+    },
+    second.cookie,
+  );
+  assert.equal(createdSecond.status, 201);
+  const secondId = (await data(createdSecond)).document.id;
+
+  assert.equal(
+    (await f.call('documents/' + secondId, 'GET', undefined, first.cookie))
+      .status,
+    404,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `documents/${secondId}/comments`,
+        'POST',
+        {
+          id: crypto.randomUUID(),
+          authorId: first.viewer.id,
+          body: 'Autor sem convite continua estranho.',
+        },
+        first.cookie,
+      )
+    ).status,
+    404,
+  );
+  const firstPrivateList = (await (
+    await f.call('documents', 'GET', undefined, first.cookie)
+  ).json()) as { documents: { id: string }[] };
+  assert.deepEqual(
+    firstPrivateList.documents.map((document) => document.id),
+    [firstId],
+  );
+
+  const shared = await f.call(
+    `documents/${secondId}/shares`,
+    'POST',
+    { email: 'nova@example.com', name: 'Nova autora' },
+    second.cookie,
+  );
+  assert.equal(shared.status, 200);
+  const pendingInvitation = f.mailbox.lastToken();
+  const sharedList = (await (
+    await f.call('documents', 'GET', undefined, first.cookie)
+  ).json()) as { documents: { id: string }[] };
+  assert.deepEqual(
+    new Set(sharedList.documents.map((document) => document.id)),
+    new Set([firstId, secondId]),
+  );
+  assert.equal(
+    (await f.call('documents/' + secondId, 'GET', undefined, first.cookie))
+      .status,
+    200,
+  );
+
+  assert.equal(
+    (
+      await f.call(
+        `documents/${secondId}/shares`,
+        'DELETE',
+        { email: 'nova@example.com' },
+        second.cookie,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await f.call('documents/' + secondId, 'GET', undefined, first.cookie))
+      .status,
+    404,
+  );
+  assert.equal(
+    (await f.call('auth/verify', 'POST', { token: pendingInvitation })).status,
+    401,
+  );
+  assert.equal(
+    (await data(await f.call('session', 'GET', undefined, first.cookie)))
+      .canCreate,
+    true,
   );
 });

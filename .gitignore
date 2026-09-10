@@ -120,6 +120,13 @@ dist
 .firebase/
 
 # TernJS port file
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.backup
+*.bak
+
 .tern-port
 
 # Stores VSCode versions used for testing VSCode extensions

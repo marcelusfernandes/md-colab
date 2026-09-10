@@ -11,12 +11,14 @@ export type AuthConfig = {
   ownerEmail?: string;
   ownerName?: string;
   authorEmails?: readonly string[];
+  authorMode?: 'allowlist' | 'open';
   testMode?: boolean;
 };
 
 export function authConfig(values: {
   ACCESS_MODE?: string;
   APP_ORIGIN?: string;
+  APP_AUTHOR_MODE?: string;
   APP_AUTHOR_EMAILS?: string;
   APP_OWNER_EMAIL?: string;
   APP_OWNER_NAME?: string;
@@ -39,6 +41,8 @@ export function authConfig(values: {
     const ownerEmail = values.APP_OWNER_EMAIL?.trim()
       ? validEmail(values.APP_OWNER_EMAIL)
       : undefined;
+    const authorMode = values.APP_AUTHOR_MODE?.trim() || 'allowlist';
+    if (authorMode !== 'allowlist' && authorMode !== 'open') throw new Error();
     const authorEmails = Array.from(
       new Set(
         (values.APP_AUTHOR_EMAILS ?? '')
@@ -53,6 +57,7 @@ export function authConfig(values: {
       ownerEmail,
       ownerName: values.APP_OWNER_NAME,
       authorEmails,
+      authorMode,
       testMode: values.ACCESS_MODE === 'test',
     };
   } catch {
@@ -97,7 +102,9 @@ export class AuthService {
   }
 
   private isAuthor(email: string) {
-    return this.authorEmails().includes(email);
+    return (
+      this.config.authorMode === 'open' || this.authorEmails().includes(email)
+    );
   }
 
   async enterTest(input: Record<string, unknown>, request: Request) {
@@ -260,9 +267,14 @@ export class AuthService {
       throw invalid();
     const now = this.now();
     const authorEmails = this.authorEmails();
-    const authorCondition = authorEmails.length
-      ? `email IN (${authorEmails.map(() => '?').join(',')})`
-      : '0';
+    const authorCondition =
+      this.config.authorMode === 'open'
+        ? '1'
+        : authorEmails.length
+          ? `email IN (${authorEmails.map(() => '?').join(',')})`
+          : '0';
+    const authorParameters =
+      this.config.authorMode === 'open' ? [] : authorEmails;
     // Consume and authorize in one atomic statement, including current grants.
     const link = await this.db
       .prepare(`UPDATE magic_links SET used_at=?
@@ -276,7 +288,7 @@ export class AuthService {
           WHERE d.id=magic_links.document_id AND d.is_test=0 AND u.test_email IS NULL
           AND (u.email=magic_links.email OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=magic_links.email)))
       ) RETURNING email,document_id`)
-      .bind(now, await hashToken(value), now, ...authorEmails)
+      .bind(now, await hashToken(value), now, ...authorParameters)
       .first<{ email: string; document_id: string | null }>();
     if (!link) throw invalid();
     const invited = await this.db
