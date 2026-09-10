@@ -6,6 +6,11 @@ import {
   requiredText,
   type Viewer,
 } from './document-service.ts';
+import {
+  ownedDocumentLimit,
+  quotaExceeded,
+  type WriteQuotaEnvironment,
+} from './write-quotas.ts';
 
 export const PUBLISHING_TOKEN_SECONDS = 90 * 24 * 60 * 60;
 export const MAX_ACTIVE_PUBLISHING_TOKENS = 10;
@@ -69,6 +74,7 @@ export class PublicationService {
     private db: D1Database,
     private config: AuthConfig,
     private now = () => Math.floor(Date.now() / 1000),
+    private quotaEnvironment: WriteQuotaEnvironment = {},
   ) {}
 
   async createCredential(viewer: Viewer, input: Record<string, unknown>) {
@@ -206,6 +212,7 @@ export class PublicationService {
         );
       return this.result(previous);
     }
+    const limit = ownedDocumentLimit(this.quotaEnvironment);
 
     const documentId = crypto.randomUUID();
     const publicationId = crypto.randomUUID();
@@ -214,7 +221,9 @@ export class PublicationService {
       await this.db.batch([
         this.db
           .prepare(
-            'INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test) VALUES(?,?,?,?,?,?,0)',
+            `INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test)
+             SELECT ?,?,?,?,?,?,0 WHERE
+             (SELECT count(*) FROM documents WHERE owner_id=? AND is_test=0)<?`,
           )
           .bind(
             documentId,
@@ -223,11 +232,15 @@ export class PublicationService {
             parsed.filename,
             parsed.markdown,
             createdAt,
+            viewer.id,
+            limit,
           ),
         this.db
           .prepare(`INSERT INTO publications(
             id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at
-          ) VALUES(?,?,?,?,?,?,?)`)
+          ) SELECT ?,?,?,?,?,?,? WHERE EXISTS(
+            SELECT 1 FROM documents WHERE id=? AND owner_id=? AND is_test=0
+          )`)
           .bind(
             publicationId,
             documentId,
@@ -236,13 +249,30 @@ export class PublicationService {
             keyHash,
             payloadDigest,
             createdAt,
+            documentId,
+            viewer.id,
           ),
       ]);
-      return this.result({
-        id: publicationId,
-        document_id: documentId,
-        payload_digest: payloadDigest,
-      });
+      const persisted = await this.previous(viewer.id, keyHash);
+      if (persisted) {
+        if (persisted.payload_digest !== payloadDigest)
+          throw new HttpError(
+            409,
+            'Idempotency-Key já foi usada com outro conteúdo.',
+          );
+        return this.result(persisted);
+      }
+      const count = await this.db
+        .prepare(
+          'SELECT count(*) AS count FROM documents WHERE owner_id=? AND is_test=0',
+        )
+        .bind(viewer.id)
+        .first<{ count: number }>();
+      if ((count?.count ?? 0) >= limit)
+        throw quotaExceeded(
+          'Você atingiu o limite total de planos próprios. Peça ao operador para ampliar a configuração.',
+        );
+      throw new Error('Publication batch completed without a receipt.');
     } catch (error) {
       if (!isIdempotencyConflict(error)) throw error;
       const winner = await this.previous(viewer.id, keyHash);

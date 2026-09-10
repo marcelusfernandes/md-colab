@@ -75,6 +75,10 @@ segredos para o artefato. A configuração local, por si só, não envia e-mails
 - `APP_OWNER_EMAIL`: configuração legada opcional. O e-mail continua autorizado
   a importar documentos mesmo quando não aparece em `APP_AUTHOR_EMAILS`.
 - `APP_OWNER_NAME`: nome exibido nos comentários do dono legado, opcional.
+- `MAX_OWNED_DOCUMENTS`: total de planos próprios por autor; padrão `100`.
+- `MAX_COMMENTS_PER_DOCUMENT`: total de comentários por plano; padrão `500`.
+- `MAX_ACTIVE_SHARES_PER_DOCUMENT`: total de convidados ativos por plano;
+  padrão `100`.
 - `RESEND_API_KEY`: chave do serviço de envio.
 - `MAIL_FROM`: endereço remetente em domínio verificado no serviço.
 
@@ -96,6 +100,27 @@ fica em cookie HttpOnly, SameSite=Lax e Secure em HTTPS, com validade de sete di
 As permissões por documento são verificadas no servidor a cada leitura ou escrita.
 Remover um convidado invalida convites antigos e bloqueia leitura e comentários,
 mesmo com uma sessão aberta; comentários anteriores são preservados.
+
+### Cotas totais do piloto
+
+As três cotas são tetos totais, não limites por intervalo de tempo. Importações
+manuais e publicações por API ou CLI contam juntas em `MAX_OWNED_DOCUMENTS`.
+Quando o teto é alcançado, uma nova escrita retorna `409` com o código estável
+`quota_exceeded`; não há `Retry-After`, repetição automática nem liberação por
+espera. Revogar um convidado libera essa vaga. Planos e comentários não são
+apagados para liberar vagas.
+
+O operador pode ampliar os tetos alterando as variáveis para inteiros decimais
+positivos até `Number.MAX_SAFE_INTEGER`. Reduzir um teto não remove nem oculta os
+dados que já o excedem: planos, comentários e convidados existentes continuam
+legíveis pelas mesmas páginas, e convidados ainda podem ser revogados. Uma
+configuração ausente usa o padrão acima. Valor vazio, zero, negativo, fracionário,
+com espaços, zero à esquerda ou acima do inteiro seguro é inválido.
+
+Configuração inválida bloqueia somente uma nova escrita que dependa daquela cota.
+Leituras e replays idempotentes com identidade, conteúdo, contexto e autorização
+ainda válidos continuam recuperáveis. Corrija ou amplie a variável na configuração
+de execução; não apague dados nem reaplique migrações.
 
 A importação manual usa o cookie da sessão e envia `POST /api/documents` com
 `id` (UUID gerado antes da tentativa), `authorId` igual à identidade da sessão,
@@ -136,6 +161,14 @@ Repetir a mesma chave e o mesmo conteúdo retorna os mesmos identificadores e UR
 usar a chave com conteúdo diferente retorna `409` sem alterar o documento. A
 operação cria somente um documento e seu registro de publicação: não importa
 arquivos referenciados pelo Markdown, não envia convites e não atualiza planos.
+
+Falhas da API incluem um `requestId` aleatório no JSON para correlação. Os eventos
+`api_failure` emitidos pela aplicação registram somente esse identificador e
+método, rota lógica, categoria e status de conjuntos controlados. Eles não incluem
+URL, query, cursor, identificadores recebidos, e-mail, conteúdo, token, nem nome ou
+mensagem livre de exceção; rotas desconhecidas usam a categoria fixa
+`unknown_route`. Essa garantia se limita aos eventos da aplicação. Logs de acesso
+do Wrangler ou da plataforma seguem a configuração própria desses ambientes.
 
 ### CLI local recuperável
 

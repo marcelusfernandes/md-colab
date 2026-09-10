@@ -2,6 +2,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
+    public requestId?: string,
   ) {
     super(message);
   }
@@ -30,11 +32,13 @@ export async function api<T>(
     const response = await fetch('/api/' + path, options);
     const data = (await response.json().catch(() => ({
       error: 'Não foi possível concluir a solicitação.',
-    }))) as T & { error?: string };
+    }))) as T & { error?: string; code?: string; requestId?: string };
     if (!response.ok)
       throw new ApiError(
         response.status,
         data.error ?? 'Não foi possível concluir a solicitação.',
+        typeof data.code === 'string' ? data.code : undefined,
+        typeof data.requestId === 'string' ? data.requestId : undefined,
       );
     return data;
   };

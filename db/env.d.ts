@@ -8,5 +8,8 @@ declare namespace Cloudflare {
     APP_OWNER_NAME?: string;
     RESEND_API_KEY?: string;
     MAIL_FROM?: string;
+    MAX_OWNED_DOCUMENTS?: string;
+    MAX_COMMENTS_PER_DOCUMENT?: string;
+    MAX_ACTIVE_SHARES_PER_DOCUMENT?: string;
   }
 }

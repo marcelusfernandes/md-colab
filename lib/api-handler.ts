@@ -7,6 +7,117 @@ import {
 } from './document-service.ts';
 import { ResendMailer, type Mailer } from './mailer.ts';
 import { PublicationService } from './publication-service.ts';
+import { WriteQuotaError } from './write-quotas.ts';
+
+type DiagnosticMethod = 'GET' | 'POST' | 'DELETE' | 'OTHER';
+type DiagnosticRoute =
+  | 'access'
+  | 'auth'
+  | 'publications'
+  | 'publishing_tokens'
+  | 'session'
+  | 'documents'
+  | 'document'
+  | 'comments'
+  | 'shares'
+  | 'unknown';
+type DiagnosticCategory =
+  | 'unknown_route'
+  | 'invalid_request'
+  | 'authentication'
+  | 'authorization'
+  | 'not_found'
+  | 'method_not_allowed'
+  | 'conflict'
+  | 'quota'
+  | 'rate_limit'
+  | 'configuration'
+  | 'unavailable'
+  | 'internal';
+type DiagnosticStatus =
+  | 400
+  | 401
+  | 403
+  | 404
+  | 405
+  | 409
+  | 413
+  | 415
+  | 429
+  | 500
+  | 503;
+
+function diagnosticMethod(method: string): DiagnosticMethod {
+  return method === 'GET' || method === 'POST' || method === 'DELETE'
+    ? method
+    : 'OTHER';
+}
+
+function diagnosticRoute(request: Request): DiagnosticRoute {
+  try {
+    const parts = new URL(request.url).pathname.split('/').filter(Boolean);
+    if (parts[0] !== 'api') return 'unknown';
+    if (parts.length === 2 && parts[1] === 'access') return 'access';
+    if (
+      parts.length === 3 &&
+      parts[1] === 'auth' &&
+      ['test', 'request', 'verify', 'logout'].includes(parts[2])
+    )
+      return 'auth';
+    if (parts.length === 2 && parts[1] === 'publications')
+      return 'publications';
+    if (
+      parts[1] === 'publishing-tokens' &&
+      (parts.length === 2 || parts.length === 3)
+    )
+      return 'publishing_tokens';
+    if (parts.length === 2 && parts[1] === 'session') return 'session';
+    if (parts[1] !== 'documents') return 'unknown';
+    if (parts.length === 2) return 'documents';
+    if (parts.length === 3) return 'document';
+    if (
+      parts[3] === 'comments' &&
+      (parts.length === 4 || parts.length === 5)
+    )
+      return 'comments';
+    if (parts[3] === 'shares' && parts.length === 4) return 'shares';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function diagnosticStatus(error: unknown): DiagnosticStatus {
+  const status =
+    error instanceof HttpError || error instanceof WriteQuotaError
+      ? error.status
+      : 500;
+  return [400, 401, 403, 404, 405, 409, 413, 415, 429, 500, 503].includes(
+    status,
+  )
+    ? (status as DiagnosticStatus)
+    : 500;
+}
+
+function diagnosticCategory(
+  error: unknown,
+  route: DiagnosticRoute,
+  status: DiagnosticStatus,
+): DiagnosticCategory {
+  if (route === 'unknown') return 'unknown_route';
+  if (error instanceof WriteQuotaError)
+    return error.code === 'quota_exceeded' ? 'quota' : 'configuration';
+  if (status === 400 || status === 413 || status === 415)
+    return 'invalid_request';
+  if (status === 401) return 'authentication';
+  if (status === 403) return 'authorization';
+  if (status === 404) return 'not_found';
+  if (status === 405) return 'method_not_allowed';
+  if (status === 409) return 'conflict';
+  if (status === 429) return 'rate_limit';
+  if (status === 503) return 'unavailable';
+  return 'internal';
+}
 
 export function json(
   value: unknown,
@@ -92,6 +203,7 @@ export async function handleApi(
   values: Cloudflare.Env,
   mailer?: Mailer,
 ) {
+  const route = diagnosticRoute(request);
   try {
     const config = authConfig(values);
     const configuredMailer =
@@ -99,7 +211,7 @@ export async function handleApi(
     const auth = new AuthService(values.DB, config, configuredMailer);
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\//, '').split('/');
-    const publishing = new PublicationService(values.DB, config);
+    const publishing = new PublicationService(values.DB, config, undefined, values);
     if (path[0] === 'access' && path.length === 1 && request.method === 'GET')
       return json({ mode: config.testMode ? 'test' : 'email' });
     if (request.method !== 'GET') {
@@ -177,7 +289,7 @@ export async function handleApi(
         401,
         'Entre com seu e-mail para acessar os documentos.',
       );
-    const service = new DocumentService(values.DB, viewer);
+    const service = new DocumentService(values.DB, viewer, values);
     if (path[0] === 'session' && path.length === 1 && request.method === 'GET')
       return json({ viewer, canCreate: auth.canCreate(viewer) });
     if (path[0] === 'publishing-tokens' && path.length <= 2) {
@@ -311,12 +423,33 @@ export async function handleApi(
       return json({ revokedEmail: await service.revoke(id, input.email) });
     throw new HttpError(405, 'Ação indisponível.');
   } catch (error) {
-    if (error instanceof HttpError)
-      return json({ error: error.message }, error.status);
+    const requestId = crypto.randomUUID();
+    const status = diagnosticStatus(error);
     console.error(
-      'Falha ao acessar os documentos:',
-      error instanceof Error ? error.name : 'UnknownError',
+      'api_failure',
+      JSON.stringify({
+        requestId,
+        method: diagnosticMethod(request.method),
+        route,
+        category: diagnosticCategory(error, route, status),
+        status,
+      }),
     );
-    return json({ error: 'Não foi possível concluir. Tente novamente.' }, 500);
+    if (error instanceof HttpError || error instanceof WriteQuotaError)
+      return json(
+        {
+          error: error.message,
+          ...('code' in error ? { code: error.code } : {}),
+          requestId,
+        },
+        status,
+      );
+    return json(
+      {
+        error: 'Não foi possível concluir. Tente novamente.',
+        requestId,
+      },
+      500,
+    );
   }
 }

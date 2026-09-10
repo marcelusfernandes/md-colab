@@ -1,3 +1,11 @@
+import {
+  activeShareLimit,
+  commentLimit,
+  ownedDocumentLimit,
+  quotaExceeded,
+  type WriteQuotaEnvironment,
+} from './write-quotas.ts';
+
 export type Viewer = {
   id: string;
   email: string;
@@ -336,6 +344,7 @@ export class DocumentService {
   constructor(
     private db: D1Database,
     public viewer: Viewer,
+    private quotaEnvironment: WriteQuotaEnvironment = {},
   ) {
     viewer.email = normalizeEmail(viewer.email);
   }
@@ -417,9 +426,32 @@ export class DocumentService {
         'Esta importação pertence a outra sessão e não pode ser reutilizada.',
       );
     const isTest = this.viewer.isTest ? 1 : 0;
+    const existing = await this.db
+      .prepare('SELECT * FROM documents WHERE id=?')
+      .bind(id)
+      .first<DocumentRow>();
+    if (existing) {
+      if (
+        existing.owner_id !== authorId ||
+        existing.is_test !== isTest ||
+        existing.markdown !== markdown ||
+        existing.filename !== filename ||
+        existing.title !== title
+      )
+        throw new HttpError(
+          409,
+          'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
+        );
+      await this.document(id);
+      return existing;
+    }
+    const limit = ownedDocumentLimit(this.quotaEnvironment);
     await this.db
       .prepare(
-        'INSERT INTO documents (id,owner_id,title,filename,markdown,created_at,is_test) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
+        `INSERT INTO documents (id,owner_id,title,filename,markdown,created_at,is_test)
+         SELECT ?,?,?,?,?,?,? WHERE
+         NOT EXISTS(SELECT 1 FROM documents WHERE id=?) AND
+         (SELECT count(*) FROM documents WHERE owner_id=? AND is_test=?)<?`,
       )
       .bind(
         id,
@@ -429,30 +461,23 @@ export class DocumentService {
         markdown,
         new Date().toISOString(),
         isTest,
+        id,
+        authorId,
+        isTest,
+        limit,
       )
       .run();
-    const persistedContext = await this.db
-      .prepare('SELECT owner_id,is_test FROM documents WHERE id=?')
-      .bind(id)
-      .first<Pick<DocumentRow, 'owner_id' | 'is_test'>>();
-    if (!persistedContext)
-      throw new Error('Inserted document could not be read back.');
-    if (
-      persistedContext.owner_id !== authorId ||
-      persistedContext.is_test !== isTest
-    )
-      throw new HttpError(
-        409,
-        'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
-      );
     const document = await this.db
-      .prepare(
-        'SELECT * FROM documents WHERE id=? AND owner_id=? AND is_test=?',
-      )
-      .bind(id, authorId, isTest)
+      .prepare('SELECT * FROM documents WHERE id=?')
+      .bind(id)
       .first<DocumentRow>();
-    if (!document) throw new Error('Inserted document could not be read back.');
+    if (!document)
+      throw quotaExceeded(
+        'Você atingiu o limite total de planos próprios. Peça ao operador para ampliar a configuração.',
+      );
     if (
+      document.owner_id !== authorId ||
+      document.is_test !== isTest ||
       document.markdown !== markdown ||
       document.filename !== filename ||
       document.title !== title
@@ -592,9 +617,34 @@ export class DocumentService {
     const commentId = requiredText(input.id, 'Identificador do comentário', 64);
     if (!/^[0-9a-f-]{36}$/i.test(commentId))
       throw new HttpError(400, 'Identificador inválido.');
+    const existing = await this.db
+      .prepare(
+        `SELECT ${publicCommentFields},c.document_id FROM comments c JOIN users u ON u.id=c.author_id WHERE c.id=?`,
+      )
+      .bind(commentId)
+      .first<CommentRow & { document_id: string }>();
+    if (existing) {
+      if (
+        existing.author_id !== authorId ||
+        existing.document_id !== id ||
+        existing.body !== body ||
+        existing.quote !== quote ||
+        existing.source_start !== sourceStart
+      )
+        throw new HttpError(
+          409,
+          'Este comentário já foi enviado com outro conteúdo.',
+        );
+      await this.document(id);
+      return existing;
+    }
+    const limit = commentLimit(this.quotaEnvironment);
     await this.db
       .prepare(
-        'INSERT INTO comments (id,document_id,author_id,body,quote,source_start,created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
+        `INSERT INTO comments (id,document_id,author_id,body,quote,source_start,created_at)
+         SELECT ?,?,?,?,?,?,? WHERE
+         NOT EXISTS(SELECT 1 FROM comments WHERE id=?) AND
+         (SELECT count(*) FROM comments WHERE document_id=?)<?`,
       )
       .bind(
         commentId,
@@ -604,6 +654,9 @@ export class DocumentService {
         quote,
         sourceStart,
         new Date().toISOString(),
+        commentId,
+        id,
+        limit,
       )
       .run();
     // Access can be revoked while the write is in flight. Do not disclose the
@@ -615,7 +668,10 @@ export class DocumentService {
       )
       .bind(commentId)
       .first<CommentRow & { document_id: string }>();
-    if (!comment) throw new Error('Inserted comment could not be read back.');
+    if (!comment)
+      throw quotaExceeded(
+        'Este plano atingiu o limite total de comentários. Peça ao operador para ampliar a configuração.',
+      );
     if (
       comment.author_id !== authorId ||
       comment.document_id !== id ||
@@ -675,11 +731,39 @@ export class DocumentService {
       typeof input.name === 'string' && input.name.trim()
         ? requiredText(input.name, 'Nome', 120)
         : email;
+    const existing = await this.db
+      .prepare(
+        'SELECT email,name,created_at FROM shares WHERE document_id=? AND email=?',
+      )
+      .bind(id, email)
+      .first<ShareRow>();
+    if (existing) {
+      if (existing.name !== name)
+        throw new HttpError(
+          409,
+          'Este convite já existe com outro nome.',
+        );
+      await this.document(id, true);
+      return existing;
+    }
+    const limit = activeShareLimit(this.quotaEnvironment);
     await this.db
       .prepare(
-        'INSERT INTO shares (document_id,email,name,created_at) VALUES (?,?,?,?) ON CONFLICT(document_id,email) DO NOTHING',
+        `INSERT INTO shares (document_id,email,name,created_at)
+         SELECT ?,?,?,? WHERE
+         NOT EXISTS(SELECT 1 FROM shares WHERE document_id=? AND email=?) AND
+         (SELECT count(*) FROM shares WHERE document_id=?)<?`,
       )
-      .bind(id, email, name, new Date().toISOString())
+      .bind(
+        id,
+        email,
+        name,
+        new Date().toISOString(),
+        id,
+        email,
+        id,
+        limit,
+      )
       .run();
     await this.document(id, true);
     const share = await this.db
@@ -688,7 +772,12 @@ export class DocumentService {
       )
       .bind(id, email)
       .first<ShareRow>();
-    if (!share) throw new Error('Inserted share could not be read back.');
+    if (!share)
+      throw quotaExceeded(
+        'Este plano atingiu o limite total de convidados ativos. Revogue um acesso antes de convidar outra pessoa.',
+      );
+    if (share.name !== name)
+      throw new HttpError(409, 'Este convite já existe com outro nome.');
     return share;
   }
   async revoke(id: string, email: string) {

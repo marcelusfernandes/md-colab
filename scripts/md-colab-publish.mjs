@@ -398,17 +398,28 @@ function assertOperationMatches(operation, input) {
 }
 
 async function readJsonResponse(response) {
-  if (response.status !== 201)
+  const isJson =
+    response.headers.get('content-type')?.split(';')[0].trim() ===
+    'application/json';
+  if (response.status !== 201 && response.status !== 409)
     throw new CliError(
       `O serviço recusou a publicação (HTTP ${response.status}).`,
     );
-  if (
-    response.headers.get('content-type')?.split(';')[0].trim() !==
-    'application/json'
-  )
+  if (!isJson) {
+    if (response.status !== 201)
+      throw new CliError(
+        `O serviço recusou a publicação (HTTP ${response.status}).`,
+      );
     throw new CliError('O serviço retornou uma resposta inválida.');
+  }
   const reader = response.body?.getReader();
-  if (!reader) throw new CliError('O serviço retornou uma resposta inválida.');
+  if (!reader) {
+    if (response.status !== 201)
+      throw new CliError(
+        `O serviço recusou a publicação (HTTP ${response.status}).`,
+      );
+    throw new CliError('O serviço retornou uma resposta inválida.');
+  }
   const chunks = [];
   let size = 0;
   for (;;) {
@@ -422,11 +433,33 @@ async function readJsonResponse(response) {
     chunks.push(value);
   }
   const bytes = Buffer.concat(chunks, size);
+  let value;
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
+    if (response.status !== 201)
+      throw new CliError(
+        `O serviço recusou a publicação (HTTP ${response.status}).`,
+      );
     throw new CliError('O serviço retornou uma resposta inválida.');
   }
+  if (response.status !== 201) {
+    if (
+      response.status === 409 &&
+      isJson &&
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      value.code === 'quota_exceeded'
+    )
+      throw new CliError(
+        'O limite total de planos foi atingido. A operação foi preservada; peça ao operador para ampliar MAX_OWNED_DOCUMENTS e repita o mesmo comando.',
+      );
+    throw new CliError(
+      `O serviço recusou a publicação (HTTP ${response.status}).`,
+    );
+  }
+  return value;
 }
 
 function validatePublicationUrl(input, documentId, origin) {
