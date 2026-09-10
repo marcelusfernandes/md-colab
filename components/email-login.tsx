@@ -182,7 +182,7 @@ export function ConfirmAccess() {
     <div className="workspace">
       <header className="app-header">
         {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
-        <a href="/" className="wordmark">
+        <a href="/documentos" className="wordmark">
           <FileText size={21} /> Documentos
         </a>
       </header>
