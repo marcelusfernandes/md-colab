@@ -9,11 +9,12 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
-    "lint": "oxlint app db lib components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx tests",
+    "lint": "oxlint app db lib scripts components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx tests",
     "format": "oxfmt",
     "db:generate": "drizzle-kit generate",
     "test": "node --experimental-transform-types --test tests/*.test.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "publish:markdown": "node scripts/md-colab-publish.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",

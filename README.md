@@ -102,6 +102,51 @@ usar a chave com conteúdo diferente retorna `409` sem alterar o documento. A
 operação cria somente um documento e seu registro de publicação: não importa
 arquivos referenciados pelo Markdown, não envia convites e não atualiza planos.
 
+### CLI local recuperável
+
+O repositório inclui uma CLI Node 22 para publicar exatamente um arquivo Markdown.
+Escolha também um caminho novo e explícito para o arquivo de operação. Ele registra
+a chave idempotente e os metadados sem guardar a credencial ou o texto do plano:
+
+```sh
+export MD_COLAB_PUBLISH_TOKEN='mdp_substitua_pela_credencial_copiada'
+npm run --silent publish:markdown -- \
+  --file ./plano.md \
+  --origin https://seu-dominio.example \
+  --operation ./.md-colab-publicacao/plano.json
+```
+
+O diretório do arquivo de operação é criado com permissões locais restritas. A
+operação é persistida e sincronizada antes da única tentativa de rede. Preserve
+esse arquivo: se houver timeout, perda da resposta ou erro de rede, repita o mesmo
+comando com o mesmo arquivo Markdown, origem, operação e credencial. A CLI usa a
+mesma chave e o mesmo payload, inclusive quando já existe recibo, para confirmar
+o resultado no servidor. Ela não repete a requisição automaticamente.
+
+É possível acrescentar `--title 'Título para exibição'` na primeira execução. Em
+repetições, omita o argumento para reutilizar o título registrado ou forneça
+exatamente o mesmo valor. O Markdown pode ser movido e passado pelo novo caminho
+se o conteúdo continuar idêntico; o nome original enviado fica preservado na
+operação. Conteúdo, título explícito, origem ou credencial divergentes são recusados
+antes da rede. Para publicar o mesmo plano como um novo documento, escolha outro
+caminho ainda inexistente para `--operation`.
+
+A credencial é aceita somente em `MD_COLAB_PUBLISH_TOKEN`. Não a coloque em
+argumentos, URLs, Markdown ou arquivo de operação. A origem deve ser a raiz HTTPS
+do serviço; HTTP é aceito apenas em loopback local. A CLI não segue redirects,
+não abre o navegador, não lê referências ou arquivos vizinhos e não executa o
+conteúdo. Em sucesso, a saída JSON contém `documentId`, `publicationId` e `url`.
+O timeout padrão de uma tentativa é 30 segundos e pode ser reduzido localmente
+com `MD_COLAB_PUBLISH_TIMEOUT_MS`.
+
+O arquivo de operação pressupõe um filesystem local com criação exclusiva,
+hard links, rename atômico e sincronização. Preservá-lo permite recuperar respostas
+perdidas; ele não protege contra exclusão ou perda do próprio disco.
+
+A skill versionada [md-colab-publish](skills/md-colab-publish/SKILL.md) orienta
+agentes a preparar e publicar esse plano pela CLI real. Ela permanece no repositório
+e não é instalada globalmente de forma automática.
+
 Exemplo com o arquivo escolhido explicitamente:
 
 ```sh
@@ -195,4 +240,4 @@ identidades forjadas, origem da solicitação e recuperação de falha de envio.
 - `app/api/[...path]/route.ts`: integração da API com o ambiente hospedado.
 - `db/schema.ts` e `drizzle/`: schema e migrações.
 
-CLI, MCP, editor, versionamento e funcionalidades de IA ficam para outra etapa.
+MCP, editor, versionamento e funcionalidades de IA ficam para outra etapa.
