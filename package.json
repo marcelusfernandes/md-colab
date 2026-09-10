@@ -8,7 +8,10 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "build:node": "node scripts/build-node.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
+    "start:node": "node dist/standalone/server.js",
+    "start:workers": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint app db lib scripts components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx tests",
     "format": "oxfmt",
     "db:generate": "drizzle-kit generate",
@@ -16,6 +19,9 @@
     "db:migrate:local": "node scripts/d1-local.mjs migrate",
     "db:adopt-legacy:local": "node scripts/d1-local.mjs legacy",
     "db:recovery-check:local": "node scripts/d1-local-recovery-check.mjs",
+    "db:node": "node --experimental-transform-types scripts/node-db.ts",
+    "qa:node:fixture": "node --experimental-transform-types scripts/node-qa-fixture.ts",
+    "test:node:smoke": "node scripts/node-runtime-smoke.mjs",
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "publish:markdown": "node scripts/md-colab-publish.mjs"

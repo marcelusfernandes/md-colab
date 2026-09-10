@@ -13,3 +13,7 @@ declare namespace Cloudflare {
     MAX_ACTIVE_SHARES_PER_DOCUMENT?: string;
   }
 }
+
+declare module 'virtual:md-colab-runtime-bindings' {
+  export function getRuntimeBindings(): Cloudflare.Env;
+}
