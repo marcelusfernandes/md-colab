@@ -46,8 +46,24 @@ e-mail legado do dono). A chave deve permanecer nesse arquivo ignorado pelo Git;
 não a coloque no código ou em mensagens.
 
 `npm run dev` compila a fonte atual. Para exercitar o build publicado localmente,
-registre o `git rev-parse HEAD`, execute `npm run build` e só então `npm start`;
-um `dist/` anterior pode pertencer a outro HEAD.
+registre o HEAD que o gerou, faça o build e inicie o preview a partir da raiz do
+checkout:
+
+```sh
+git rev-parse HEAD
+npm run build
+npm start -- --env-file "$PWD/.env.local" --port 3000 --persist-to .wrangler/state
+```
+
+Nesse exemplo, defina `APP_ORIGIN=http://localhost:3000` em `.env.local`; a origem
+e a porta precisam corresponder. Escolha uma porta e uma persistência próprias para
+esta sessão, sem reutilizar processos, bancos ou dados de outro ambiente. Um
+`dist/` anterior pode pertencer a outro HEAD.
+
+No preview compilado, a configuração do Wrangler fica em `dist/server`; por isso,
+um `--env-file` relativo é resolvido a partir desse diretório. O caminho absoluto
+`"$PWD/.env.local"` referencia o arquivo ignorado fora de `dist`, sem copiar
+segredos para o artefato. A configuração local, por si só, não envia e-mails.
 
 ## Acesso por e-mail
 
