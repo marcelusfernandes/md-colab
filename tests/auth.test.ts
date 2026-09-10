@@ -23,6 +23,8 @@ async function data(response: Response) {
     canCreate: boolean;
     viewer: { id: string; email: string; name: string };
     document: { id: string };
+    share: { email: string; name: string; created_at: string };
+    revokedEmail: string;
     emailSubmitted: boolean;
     redirect: string;
     isOwner: boolean;
@@ -211,7 +213,10 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
     { email: 'guest@example.com', name: 'Pessoa convidada' },
     ownerCookie,
   );
-  assert.equal((await data(invited)).emailSubmitted, true);
+  const invitedData = await data(invited);
+  assert.equal(invitedData.emailSubmitted, true);
+  assert.equal(invitedData.share.email, 'guest@example.com');
+  assert.equal('shares' in invitedData, false);
   assert.equal(f.mailbox.messages.at(-1)?.to, 'guest@example.com');
   assert.equal(f.mailbox.messages.at(-1)?.invitation, true);
   const guestLogin = await f.call('auth/verify', 'POST', {
@@ -271,12 +276,15 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
     )
   ).comments;
   assert.equal(comments[0].author_name, 'Pessoa convidada');
-  await f.call(
+  const revoked = await f.call(
     `documents/${id}/shares`,
     'DELETE',
     { email: 'guest@example.com' },
     ownerCookie,
   );
+  const revokedData = await data(revoked);
+  assert.equal(revokedData.revokedEmail, 'guest@example.com');
+  assert.equal('shares' in revokedData, false);
   assert.equal(
     (await f.call('documents/' + id, 'GET', undefined, guestCookie)).status,
     404,
@@ -306,6 +314,57 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
     (await f.call('session', 'GET', undefined, guestCookie)).status,
     401,
   );
+});
+
+void test('listas HTTP aceitam somente um cursor opcional e preservam envelopes nomeados', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const created = await f.call(
+    'documents',
+    'POST',
+    {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      markdown: '# Envelope',
+      filename: 'envelope.md',
+    },
+    owner.cookie,
+  );
+  const id = (await data(created)).document.id;
+  const documents = (await f.call(
+    'documents',
+    'GET',
+    undefined,
+    owner.cookie,
+  )) as Response;
+  assert.deepEqual(Object.keys((await documents.json()) as object).sort(), [
+    'documents',
+    'nextCursor',
+  ]);
+  const shares = await f.call(
+    `documents/${id}/shares`,
+    'GET',
+    undefined,
+    owner.cookie,
+  );
+  assert.deepEqual(Object.keys((await shares.json()) as object).sort(), [
+    'nextCursor',
+    'shares',
+  ]);
+  for (const path of [
+    'documents?limit=1',
+    'documents?cursor=one&cursor=two',
+    'documents?cursor=',
+    `documents/${id}/shares?limit=1`,
+    `documents/${id}/shares?cursor=one&cursor=two`,
+    `documents/${id}/shares?cursor=`,
+  ])
+    assert.equal(
+      (await f.call(path, 'GET', undefined, owner.cookie)).status,
+      400,
+      path,
+    );
 });
 
 void test('POST documents exige UUID e autor da sessão sem fallback para outra operação', async (t) => {
@@ -905,7 +964,10 @@ void test('falha do provedor não é sucesso; reenvio manual recupera o convite 
     { email: 'guest@example.com' },
     owner.cookie,
   );
-  assert.equal((await data(failed)).emailSubmitted, false);
+  const failedData = await data(failed);
+  assert.equal(failedData.emailSubmitted, false);
+  assert.equal(failedData.share.email, 'guest@example.com');
+  assert.equal('shares' in failedData, false);
   assert.equal(
     f.sqlite
       .prepare('SELECT count(*) n FROM magic_links WHERE used_at IS NULL')
@@ -924,7 +986,9 @@ void test('falha do provedor não é sucesso; reenvio manual recupera o convite 
     { email: 'guest@example.com' },
     owner.cookie,
   );
-  assert.equal((await data(retried)).emailSubmitted, true);
+  const retriedData = await data(retried);
+  assert.equal(retriedData.emailSubmitted, true);
+  assert.deepEqual(retriedData.share, failedData.share);
   assert.equal(f.sqlite.prepare('SELECT count(*) n FROM shares').get()?.n, 1);
   assert.equal(
     (await f.auth.redeem(f.mailbox.lastToken())).viewer.email,

@@ -1,4 +1,5 @@
-import { HttpError, normalizeEmail, type Viewer } from './document-service.ts';
+import { HttpError, validEmail, type Viewer } from './document-service.ts';
+export { validEmail } from './document-service.ts';
 import type { Mailer } from './mailer.ts';
 
 export const LINK_SECONDS = 15 * 60;
@@ -12,15 +13,6 @@ export type AuthConfig = {
   authorEmails?: readonly string[];
   testMode?: boolean;
 };
-
-export function validEmail(value: unknown) {
-  if (typeof value !== 'string')
-    throw new HttpError(400, 'Informe um e-mail válido.');
-  const email = normalizeEmail(value);
-  if (email.length > 254 || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email))
-    throw new HttpError(400, 'Informe um e-mail válido.');
-  return email;
-}
 
 export function authConfig(values: {
   ACCESS_MODE?: string;

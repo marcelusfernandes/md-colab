@@ -299,7 +299,7 @@ void test('desabilitar o teste bloqueia a entrada sem confirmação e invalida s
   await auth.requestLink({ email: 'owner@example.com' }, 'test');
   const verified = await auth.redeem(f.mailbox.lastToken());
   const real = new DocumentService(f.db, verified.viewer);
-  assert.deepEqual(await real.list(), []);
+  assert.deepEqual((await real.list()).documents, []);
   await assert.rejects(real.document(created.body.document.id));
 });
 

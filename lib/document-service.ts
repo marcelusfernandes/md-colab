@@ -36,6 +36,18 @@ export type CommentPageQuery = {
   after?: string;
 };
 export type ShareRow = { email: string; name: string; created_at: string };
+export type DocumentSummary = Omit<DocumentRow, 'markdown'> & {
+  owner_name: string;
+  comment_count: number;
+};
+export type CursorPageQuery = { cursor?: string };
+export type DocumentPage = {
+  documents: DocumentSummary[];
+  nextCursor: string | null;
+};
+export type SharePage = { shares: ShareRow[]; nextCursor: string | null };
+const documentPageSize = 50;
+const sharePageSize = 100;
 const commentPageSize = 100;
 const publicCommentFields =
   'c.id,c.body,c.quote,c.source_start,c.created_at,c.author_id,u.name AS author_name';
@@ -47,6 +59,25 @@ type CommentCursor = {
   s: number;
 };
 type SequencedCommentRow = CommentRow & { transport_sequence: number };
+type DocumentCursor = {
+  v: 1;
+  type: 'documents';
+  direction: 'older';
+  viewerId: string;
+  isTest: boolean;
+  createdAt: string;
+  id: string;
+};
+type ShareCursor = {
+  v: 1;
+  type: 'shares';
+  direction: 'older';
+  documentId: string;
+  viewerId: string;
+  isTest: boolean;
+  createdAt: string;
+  email: string;
+};
 
 function cursorBase64(value: string) {
   const bytes = new TextEncoder().encode(value);
@@ -65,6 +96,83 @@ function cursorText(value: string) {
   return new TextDecoder().decode(
     Uint8Array.from(binary, (character) => character.charCodeAt(0)),
   );
+}
+
+function validCursorText(value: string) {
+  return (
+    value.length > 0 && value.length <= 4096 && /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function validCursorTimestamp(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
+}
+
+function encodeDocumentCursor(cursor: DocumentCursor) {
+  return cursorBase64(JSON.stringify(cursor));
+}
+
+function decodeDocumentCursor(value: string, viewer: Viewer) {
+  try {
+    if (!validCursorText(value)) throw new Error();
+    const cursor = JSON.parse(cursorText(value)) as Partial<DocumentCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !==
+        'createdAt,direction,id,isTest,type,v,viewerId' ||
+      cursor.v !== 1 ||
+      cursor.type !== 'documents' ||
+      cursor.direction !== 'older' ||
+      cursor.viewerId !== viewer.id ||
+      cursor.isTest !== Boolean(viewer.isTest) ||
+      !validCursorTimestamp(cursor.createdAt) ||
+      typeof cursor.id !== 'string' ||
+      cursor.id.length === 0 ||
+      encodeDocumentCursor(cursor as DocumentCursor) !== value
+    )
+      throw new Error();
+    return cursor as DocumentCursor;
+  } catch {
+    throw new HttpError(400, 'Cursor de documentos inválido.');
+  }
+}
+
+function encodeShareCursor(cursor: ShareCursor) {
+  return cursorBase64(JSON.stringify(cursor));
+}
+
+function decodeShareCursor(value: string, documentId: string, viewer: Viewer) {
+  try {
+    if (!validCursorText(value)) throw new Error();
+    const cursor = JSON.parse(cursorText(value)) as Partial<ShareCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !==
+        'createdAt,direction,documentId,email,isTest,type,v,viewerId' ||
+      cursor.v !== 1 ||
+      cursor.type !== 'shares' ||
+      cursor.direction !== 'older' ||
+      cursor.documentId !== documentId ||
+      cursor.viewerId !== viewer.id ||
+      cursor.isTest !== Boolean(viewer.isTest) ||
+      !validCursorTimestamp(cursor.createdAt) ||
+      typeof cursor.email !== 'string' ||
+      validEmail(cursor.email) !== cursor.email ||
+      encodeShareCursor(cursor as ShareCursor) !== value
+    )
+      throw new Error();
+    return cursor as ShareCursor;
+  } catch {
+    throw new HttpError(400, 'Cursor de convidados inválido.');
+  }
 }
 
 function encodeCommentCursor(
@@ -137,6 +245,14 @@ export class HttpError extends Error {
 }
 export function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
+}
+export function validEmail(value: unknown) {
+  if (typeof value !== 'string')
+    throw new HttpError(400, 'Informe um e-mail válido.');
+  const email = normalizeEmail(value);
+  if (email.length > 254 || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email))
+    throw new HttpError(400, 'Informe um e-mail válido.');
+  return email;
 }
 export function requiredText(value: unknown, label: string, max: number) {
   if (typeof value !== 'string' || !value.trim() || value.length > max)
@@ -231,21 +347,49 @@ export class DocumentService {
       .bind(this.viewer.id, this.viewer.email, this.viewer.name)
       .run();
   }
-  async list() {
-    return (
-      await this.db
-        .prepare(`SELECT d.id,d.title,d.filename,d.owner_id,d.created_at,u.name AS owner_name,
+  async list(query: CursorPageQuery = {}): Promise<DocumentPage> {
+    const cursor =
+      query.cursor === undefined
+        ? null
+        : decodeDocumentCursor(query.cursor, this.viewer);
+    const statement = this.db
+      .prepare(`SELECT d.id,d.title,d.filename,d.owner_id,d.is_test,d.created_at,u.name AS owner_name,
       (SELECT count(*) FROM comments c WHERE c.document_id=d.id) AS comment_count
       FROM documents d JOIN users u ON u.id=d.owner_id
       WHERE d.is_test=? AND (d.owner_id=? OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=?))
-      ORDER BY d.created_at DESC`)
+      ${cursor ? 'AND (d.created_at<? OR (d.created_at=? AND d.id<?))' : ''}
+      ORDER BY d.created_at DESC,d.id DESC LIMIT ?`);
+    const base = [
+      this.viewer.isTest ? 1 : 0,
+      this.viewer.id,
+      this.viewer.isTest ? '' : this.viewer.email,
+    ];
+    const rows = (
+      await statement
         .bind(
-          this.viewer.isTest ? 1 : 0,
-          this.viewer.id,
-          this.viewer.isTest ? '' : this.viewer.email,
+          ...base,
+          ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.id] : []),
+          documentPageSize + 1,
         )
-        .all()
+        .all<DocumentSummary>()
     ).results;
+    const documents = rows.slice(0, documentPageSize);
+    const last = documents.at(-1);
+    return {
+      documents,
+      nextCursor:
+        rows.length > documentPageSize && last
+          ? encodeDocumentCursor({
+              v: 1,
+              type: 'documents',
+              direction: 'older',
+              viewerId: this.viewer.id,
+              isTest: Boolean(this.viewer.isTest),
+              createdAt: last.created_at,
+              id: last.id,
+            })
+          : null,
+    };
   }
   async document(id: string, ownerOnly = false) {
     const doc = await this.db
@@ -485,23 +629,48 @@ export class DocumentService {
       );
     return comment;
   }
-  async shares(id: string) {
+  async shares(id: string, query: CursorPageQuery = {}): Promise<SharePage> {
     await this.document(id, true);
-    return (
+    const cursor =
+      query.cursor === undefined
+        ? null
+        : decodeShareCursor(query.cursor, id, this.viewer);
+    const rows = (
       await this.db
-        .prepare(
-          'SELECT email,name,created_at FROM shares WHERE document_id=? ORDER BY created_at',
+        .prepare(`SELECT email,name,created_at FROM shares WHERE document_id=?
+          ${cursor ? 'AND (created_at<? OR (created_at=? AND email<?))' : ''}
+          ORDER BY created_at DESC,email DESC LIMIT ?`)
+        .bind(
+          id,
+          ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.email] : []),
+          sharePageSize + 1,
         )
-        .bind(id)
         .all<ShareRow>()
     ).results;
+    const shares = rows.slice(0, sharePageSize);
+    const last = shares.at(-1);
+    return {
+      shares,
+      nextCursor:
+        rows.length > sharePageSize && last
+          ? encodeShareCursor({
+              v: 1,
+              type: 'shares',
+              direction: 'older',
+              documentId: id,
+              viewerId: this.viewer.id,
+              isTest: Boolean(this.viewer.isTest),
+              createdAt: last.created_at,
+              email: last.email,
+            })
+          : null,
+    };
   }
-  async share(id: string, input: Record<string, unknown>) {
+  async share(id: string, input: Record<string, unknown>): Promise<ShareRow> {
     await this.document(id, true);
-    const email = normalizeEmail(requiredText(input.email, 'E-mail', 254));
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-      throw new HttpError(400, 'Informe um e-mail válido.');
-    if (email === this.viewer.email) return this.shares(id);
+    const email = validEmail(requiredText(input.email, 'E-mail', 254));
+    if (email === this.viewer.email)
+      throw new HttpError(400, 'Você já tem acesso como dono.');
     const name =
       typeof input.name === 'string' && input.name.trim()
         ? requiredText(input.name, 'Nome', 120)
@@ -512,19 +681,28 @@ export class DocumentService {
       )
       .bind(id, email, name, new Date().toISOString())
       .run();
-    return this.shares(id);
+    await this.document(id, true);
+    const share = await this.db
+      .prepare(
+        'SELECT email,name,created_at FROM shares WHERE document_id=? AND email=?',
+      )
+      .bind(id, email)
+      .first<ShareRow>();
+    if (!share) throw new Error('Inserted share could not be read back.');
+    return share;
   }
   async revoke(id: string, email: string) {
     await this.document(id, true);
+    const normalizedEmail = normalizeEmail(email);
     await this.db
       .prepare('DELETE FROM shares WHERE document_id=? AND email=?')
-      .bind(id, normalizeEmail(email))
+      .bind(id, normalizedEmail)
       .run();
     await this.db
       .prepare('DELETE FROM magic_links WHERE document_id=? AND email=?')
-      .bind(id, normalizeEmail(email))
+      .bind(id, normalizedEmail)
       .run();
-    return this.shares(id);
+    return normalizedEmail;
   }
   async people(query: string) {
     if (query.length < 2) return [];

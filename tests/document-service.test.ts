@@ -153,7 +153,7 @@ void test('somente dono e convidados conseguem ler o documento e os comentários
       (await owner.document(doc.id)).markdown,
       '# Privado\n\n**Conteúdo** interno.',
     );
-    assert.deepEqual(await guest.list(), []);
+    assert.deepEqual((await guest.list()).documents, []);
     await assert.rejects(guest.document(doc.id), denied);
     await assert.rejects(stranger.comments(doc.id), denied);
     await owner.share(doc.id, {
@@ -161,7 +161,7 @@ void test('somente dono e convidados conseguem ler o documento e os comentários
       name: 'Convidado',
     });
     assert.equal((await guest.document(doc.id)).title, 'Privado');
-    assert.equal((await guest.list()).length, 1);
+    assert.equal((await guest.list()).documents.length, 1);
     await assert.rejects(stranger.document(doc.id), denied);
     await assert.rejects(
       stranger.addComment(doc.id, {
@@ -235,7 +235,7 @@ void test('revogar acesso bloqueia leitura e novos comentários sem apagar os ex
       }),
       denied,
     );
-    assert.deepEqual(await guest.list(), []);
+    assert.deepEqual((await guest.list()).documents, []);
     assert.equal((await owner.comments(doc.id)).comments.length, 1);
     assert.equal((await owner.document(doc.id)).owner_id, 'owner');
   } finally {
@@ -416,7 +416,7 @@ void test('entrada inválida não grava documentos, compartilhamentos ou coment�
     await assert.rejects(
       createDocument(owner, { markdown: ' ', filename: 'vazio.md' }),
     );
-    assert.deepEqual(await owner.list(), []);
+    assert.deepEqual((await owner.list()).documents, []);
     const original = '    código com indentação\n\n# Título\n';
     const doc = await createDocument(owner, {
       markdown: original,
@@ -424,7 +424,7 @@ void test('entrada inválida não grava documentos, compartilhamentos ou coment�
     });
     assert.equal(doc.markdown, original);
     await assert.rejects(owner.share(doc.id, { email: 'invalido' }));
-    assert.deepEqual(await owner.shares(doc.id), []);
+    assert.deepEqual((await owner.shares(doc.id)).shares, []);
     await assert.rejects(
       owner.addComment(doc.id, {
         id: crypto.randomUUID(),
@@ -592,6 +592,221 @@ void test('importação exige UUID e autor esperado sem gerar identificador alte
     assert.equal(
       sqlite.prepare('SELECT count(*) n FROM documents').get()?.n,
       0,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+function stableDocumentId(index: number) {
+  const value = index.toString(16);
+  return `${value.padStart(8, '0')}-0000-4000-8000-${value.padStart(12, '0')}`;
+}
+
+function replaceCursorField(cursor: string, field: string, value: unknown) {
+  const base64 = cursor.replaceAll('-', '+').replaceAll('_', '/');
+  const decoded = JSON.parse(
+    Buffer.from(base64, 'base64').toString('utf8'),
+  ) as Record<string, unknown>;
+  decoded[field] = value;
+  return Buffer.from(JSON.stringify(decoded), 'utf8')
+    .toString('base64url')
+    .replace(/=+$/, '');
+}
+
+void test('documentos usam páginas estáveis de 50, empate por id e cursor vinculado à identidade', async () => {
+  const { sqlite, db, owner, guest } = fixture();
+  try {
+    await Promise.all([owner.registerViewer(), guest.registerViewer()]);
+    const insert = sqlite.prepare(
+      `INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test)
+       VALUES(?,?,?,?,?,?,0)`,
+    );
+    for (let index = 0; index < 123; index += 1)
+      insert.run(
+        stableDocumentId(index),
+        owner.viewer.id,
+        `Plano ${index}`,
+        `plano-${index}.md`,
+        `# Conteúdo ${index}`,
+        '2026-09-10T12:00:00.000Z',
+      );
+
+    const first = await owner.list();
+    assert.equal(first.documents.length, 50);
+    assert.ok(first.nextCursor);
+    assert.deepEqual(
+      first.documents.map((entry) => entry.id),
+      Array.from({ length: 50 }, (_, offset) => stableDocumentId(122 - offset)),
+    );
+    assert.equal('markdown' in first.documents[0]!, false);
+
+    await assert.rejects(
+      guest.list({ cursor: first.nextCursor! }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    await assert.rejects(
+      owner.list({
+        cursor: replaceCursorField(first.nextCursor!, 'direction', 'newer'),
+      }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    for (const [field, value] of [
+      ['type', 'shares'],
+      ['createdAt', 'invalid-date'],
+      ['id', ''],
+      ['extra', true],
+    ] as const)
+      await assert.rejects(
+        owner.list({
+          cursor: replaceCursorField(first.nextCursor!, field, value),
+        }),
+        (error) => error instanceof HttpError && error.status === 400,
+      );
+    const testOwner = new DocumentService(db, {
+      ...owner.viewer,
+      isTest: true,
+    });
+    await assert.rejects(
+      testOwner.list({ cursor: first.nextCursor! }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+
+    const importedId = stableDocumentId(1000);
+    insert.run(
+      importedId,
+      owner.viewer.id,
+      'Importado durante a continuação',
+      'importado.md',
+      '# Novo',
+      '2026-09-10T13:00:00.000Z',
+    );
+    const collected = [...first.documents];
+    let cursor: string | null = first.nextCursor;
+    const sizes = [50];
+    while (cursor) {
+      const page = await owner.list({ cursor });
+      sizes.push(page.documents.length);
+      collected.push(...page.documents);
+      cursor = page.nextCursor;
+    }
+    assert.deepEqual(sizes, [50, 50, 23]);
+    assert.equal(new Set(collected.map((entry) => entry.id)).size, 123);
+    assert.equal(
+      collected.some((entry) => entry.id === importedId),
+      false,
+    );
+    assert.equal((await owner.list()).documents[0]?.id, importedId);
+    assert.equal((await guest.list()).nextCursor, null);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('convidados usam páginas de 100, cursor UTF-8 completo e autorização do dono por página', async () => {
+  const { sqlite, db, owner, guest } = fixture();
+  try {
+    await Promise.all([owner.registerViewer(), guest.registerViewer()]);
+    const doc = await createDocument(owner, {
+      markdown: '# Grants',
+      filename: 'grants.md',
+    });
+    const insert = sqlite.prepare(
+      'INSERT INTO shares(document_id,email,name,created_at) VALUES(?,?,?,?)',
+    );
+    for (let index = 0; index < 99; index += 1)
+      insert.run(
+        doc.id,
+        `new-${index.toString().padStart(3, '0')}@example.com`,
+        `Novo ${index}`,
+        '2026-09-10T13:00:00.000Z',
+      );
+    const longEmail = '一'.repeat(242) + '@example.com';
+    assert.equal(longEmail.length, 254);
+    insert.run(doc.id, longEmail, 'Limite UTF-8', '2026-09-10T12:00:00.000Z');
+    for (let index = 0; index < 105; index += 1)
+      insert.run(
+        doc.id,
+        `old-${index.toString().padStart(3, '0')}@example.com`,
+        `Antigo ${index}`,
+        '2026-09-10T11:00:00.000Z',
+      );
+
+    const first = await owner.shares(doc.id);
+    assert.equal(first.shares.length, 100);
+    assert.equal(first.shares.at(-1)?.email, longEmail);
+    assert.ok(first.nextCursor && first.nextCursor.length > 1024);
+    const escapedBoundary = '\u0000'.repeat(250) + '@a.b';
+    const escapedCursor = replaceCursorField(
+      first.nextCursor!,
+      'email',
+      escapedBoundary,
+    );
+    assert.equal(escapedBoundary.length, 254);
+    assert.ok(escapedCursor.length > 2048);
+    await owner.shares(doc.id, { cursor: escapedCursor });
+    const second = await owner.shares(doc.id, { cursor: first.nextCursor! });
+    assert.equal(second.shares.length, 100);
+    assert.ok(second.nextCursor);
+
+    const revoked = 'old-004@example.com';
+    assert.equal(await owner.revoke(doc.id, revoked.toUpperCase()), revoked);
+    const third = await owner.shares(doc.id, { cursor: second.nextCursor! });
+    assert.equal(third.shares.length, 4);
+    assert.equal(third.nextCursor, null);
+    assert.equal(
+      new Set(
+        [...first.shares, ...second.shares, ...third.shares].map(
+          (row) => row.email,
+        ),
+      ).size,
+      204,
+    );
+
+    await assert.rejects(
+      guest.shares(doc.id, { cursor: first.nextCursor! }),
+      denied,
+    );
+    const other = await createDocument(owner, {
+      markdown: '# Outro',
+      filename: 'outro.md',
+    });
+    await assert.rejects(
+      owner.shares(other.id, { cursor: first.nextCursor! }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    await assert.rejects(
+      owner.shares(doc.id, {
+        cursor: replaceCursorField(first.nextCursor!, 'email', 'invalid-email'),
+      }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    await assert.rejects(
+      owner.shares(doc.id, {
+        cursor: replaceCursorField(first.nextCursor!, 'email', 'a<>@b.test'),
+      }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    for (const [field, value] of [
+      ['type', 'documents'],
+      ['direction', 'newer'],
+      ['createdAt', 'invalid-date'],
+      ['extra', true],
+    ] as const)
+      await assert.rejects(
+        owner.shares(doc.id, {
+          cursor: replaceCursorField(first.nextCursor!, field, value),
+        }),
+        (error) => error instanceof HttpError && error.status === 400,
+      );
+
+    const testOwner = new DocumentService(db, {
+      ...owner.viewer,
+      isTest: true,
+    });
+    await assert.rejects(
+      testOwner.shares(doc.id, { cursor: first.nextCursor! }),
+      denied,
     );
   } finally {
     sqlite.close();

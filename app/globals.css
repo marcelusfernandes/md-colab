@@ -776,6 +776,12 @@ a:focus-visible {
   .empty-document {
     padding: 44px 20px;
   }
+  .collection-pagination {
+    align-items: stretch;
+  }
+  .collection-pagination > button {
+    width: 100%;
+  }
   .comment-operation-actions {
     display: grid;
   }
@@ -850,6 +856,23 @@ a:focus-visible {
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
+}
+.collection-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+.collection-pagination > p:first-child {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.collection-pagination > .form-error {
+  flex-basis: 100%;
+  margin: 0;
 }
 .document-row {
   display: flex;
@@ -1030,6 +1053,41 @@ a:focus-visible {
 }
 .access-role > button {
   padding: 5px;
+}
+.access-pagination {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+@media (max-width: 540px) {
+  .share-dialog .access-person {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+  }
+  .share-dialog .access-person > div:first-child {
+    width: 100%;
+  }
+  .share-dialog .access-person .access-role {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .share-dialog .access-pagination {
+    align-items: stretch;
+  }
+  .share-dialog .access-pagination > button {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 2rem;
+    padding-block: 6px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
 }
 .form-error {
   font-size: 14px;
