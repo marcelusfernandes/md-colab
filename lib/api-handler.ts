@@ -3,6 +3,7 @@ import {
   DocumentService,
   HttpError,
   type CommentPageQuery,
+  type CursorPageQuery,
 } from './document-service.ts';
 import { ResendMailer, type Mailer } from './mailer.ts';
 import { PublicationService } from './publication-service.ts';
@@ -70,6 +71,20 @@ function commentPageQuery(parameters: URLSearchParams): CommentPageQuery {
     ...(before === null ? {} : { before }),
     ...(after === null ? {} : { after }),
   };
+}
+
+function cursorPageQuery(
+  parameters: URLSearchParams,
+  collection: 'documentos' | 'convidados',
+): CursorPageQuery {
+  const keys = [...parameters.keys()];
+  if (
+    keys.some((key) => key !== 'cursor') ||
+    parameters.getAll('cursor').length > 1
+  )
+    throw new HttpError(400, `Parâmetros de ${collection} inválidos.`);
+  const cursor = parameters.get('cursor');
+  return cursor === null ? {} : { cursor };
 }
 
 export async function handleApi(
@@ -203,7 +218,10 @@ export async function handleApi(
     if (resourceId && !(request.method === 'GET' && action === 'comments'))
       throw new HttpError(404, 'Página não encontrada.');
     if (request.method === 'GET') {
-      if (!id) return json({ documents: await service.list() });
+      if (!id)
+        return json(
+          await service.list(cursorPageQuery(url.searchParams, 'documentos')),
+        );
       if (!action) {
         const document = await service.document(id);
         const commentPage = await service.comments(id);
@@ -220,7 +238,12 @@ export async function handleApi(
           await service.comments(id, commentPageQuery(url.searchParams)),
         );
       if (action === 'shares' && !resourceId)
-        return json({ shares: await service.shares(id) });
+        return json(
+          await service.shares(
+            id,
+            cursorPageQuery(url.searchParams, 'convidados'),
+          ),
+        );
       throw new HttpError(404, 'Página não encontrada.');
     }
     const input = await inputFrom(request, 2 * 1024 * 1024);
@@ -263,13 +286,13 @@ export async function handleApi(
         if (email === viewer.email)
           throw new HttpError(400, 'Você já tem acesso como dono.');
         auth.assertMailConfigured();
-        const shares = await service.share(id, input);
+        const share = await service.share(id, input);
         try {
           await auth.invite(email, id, viewer.id);
-          return json({ shares, emailSubmitted: true });
+          return json({ share, emailSubmitted: true });
         } catch (error) {
           return json({
-            shares,
+            share,
             emailSubmitted: false,
             emailError:
               error instanceof HttpError
@@ -285,7 +308,7 @@ export async function handleApi(
       action === 'shares' &&
       typeof input.email === 'string'
     )
-      return json({ shares: await service.revoke(id, input.email) });
+      return json({ revokedEmail: await service.revoke(id, input.email) });
     throw new HttpError(405, 'Ação indisponível.');
   } catch (error) {
     if (error instanceof HttpError)

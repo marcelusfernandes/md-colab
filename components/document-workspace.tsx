@@ -46,8 +46,19 @@ import type {
   DocumentRow,
   CommentRow,
   CommentPagination,
+  DocumentSummary,
   ShareRow,
 } from '@/lib/document-service';
+import {
+  collectionAttemptMatches,
+  documentPageFromResponse,
+  mergeDocumentPages,
+  mergeSharePages,
+  revokedEmailFromResponse,
+  shareMutationFromResponse,
+  sharePageFromResponse,
+  type CollectionAttempt,
+} from '@/lib/collection-page';
 import {
   attemptOwnsRequest,
   commentFromResponse,
@@ -74,11 +85,7 @@ import {
 
 const COMMENT_REQUEST_TIMEOUT_MS = 30_000;
 const IMPORT_REQUEST_TIMEOUT_MS = 30_000;
-
-type Summary = Omit<DocumentRow, 'markdown'> & {
-  owner_name: string;
-  comment_count: number;
-};
+const COLLECTION_REQUEST_TIMEOUT_MS = 30_000;
 function dateLabel(value: string) {
   return new Intl.DateTimeFormat('pt-BR', {
     day: '2-digit',
@@ -192,13 +199,25 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const importReadInProgress = useRef(false);
   const importSendRequest = useRef(0);
   const loadRequest = useRef(0);
+  const documentsGeneration = useRef(0);
+  const documentsPageRequest = useRef(0);
+  const documentsPageInProgress = useRef(false);
+  const documentsNextCursor = useRef<string | null>(null);
+  const sharesGeneration = useRef(0);
+  const sharesReadRequest = useRef(0);
+  const sharesReadInProgress = useRef(false);
+  const sharesNextCursor = useRef<string | null>(null);
+  const sharesMutationRequest = useRef(0);
   const refreshCommentsRef = useRef<(() => Promise<void>) | null>(null);
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [accessMode, setAccessMode] = useState<'email' | 'test'>('email');
   const [canCreate, setCanCreate] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [list, setList] = useState<Summary[]>([]);
+  const [list, setList] = useState<DocumentSummary[]>([]);
+  const [documentsHasMore, setDocumentsHasMore] = useState(false);
+  const [documentsLoadingMore, setDocumentsLoadingMore] = useState(false);
+  const [documentsPageError, setDocumentsPageError] = useState('');
   const [doc, setDoc] = useState<DocumentRow | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [comments, setComments] = useState<CommentRow[]>([]);
@@ -208,6 +227,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [shareOpen, setShareOpen] = useState(false);
   const [shares, setShares] = useState<ShareRow[]>([]);
   const [sharesLoading, setSharesLoading] = useState(false);
+  const [sharesHasMore, setSharesHasMore] = useState(false);
+  const [sharesLoadingMore, setSharesLoadingMore] = useState(false);
+  const [sharesPageError, setSharesPageError] = useState('');
   const [personName, setPersonName] = useState('');
   const [personEmail, setPersonEmail] = useState('');
   const [quote, setQuote] = useState('');
@@ -268,10 +290,34 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     [],
   );
   const clearCollectionContext = useCallback(() => {
+    documentsGeneration.current += 1;
+    documentsPageRequest.current += 1;
+    documentsPageInProgress.current = false;
+    documentsNextCursor.current = null;
     collectionSession.current = null;
     setList([]);
+    setDocumentsHasMore(false);
+    setDocumentsLoadingMore(false);
+    setDocumentsPageError('');
     setConfirmedImport(null);
     setNotice('');
+  }, []);
+  const clearShareContext = useCallback(() => {
+    sharesGeneration.current += 1;
+    sharesReadRequest.current += 1;
+    sharesMutationRequest.current += 1;
+    sharesReadInProgress.current = false;
+    sharesNextCursor.current = null;
+    setShares([]);
+    setSharesLoading(false);
+    setSharesHasMore(false);
+    setSharesLoadingMore(false);
+    setSharesPageError('');
+    setShareError('');
+    setShareNotice('');
+    setBusy((current) =>
+      current === 'share' || current.startsWith('revoke:') ? '' : current,
+    );
   }, []);
   const blockImportOperation = useCallback(
     (message: string) => {
@@ -307,56 +353,68 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     },
     [],
   );
-  const hideProtectedContent = useCallback((cause: ApiError) => {
-    contextGeneration.current += 1;
-    commentsRequest.current += 1;
-    commentsHistoryRequest.current += 1;
-    commentsRefreshInProgress.current = false;
-    commentsHistoryInProgress.current = false;
-    commentsNextCursor.current = null;
-    commentsOlderCursor.current = null;
-    commentSendRequest.current += 1;
-    setBusy((current) =>
-      current === 'comment' || current === 'comment-lookup' ? '' : current,
-    );
-    activeDocumentId.current = null;
-    setDoc(null);
-    setIsOwner(false);
-    setComments([]);
-    setHasOlderComments(false);
-    setCommentsUpdating(false);
-    setCommentsLoadingOlder(false);
-    setQuote('');
-    setSourceStart(null);
-    setCommentsRefreshError('');
-    setCommentsHistoryError('');
-    const operation = commentOperationRef.current;
-    if (operation) {
-      const blocked = updateCommentOperation(
-        operation,
-        'blocked',
-        'O acesso mudou antes da confirmação. Este envio não será reutilizado em outra sessão.',
+  const hideProtectedContent = useCallback(
+    (cause: ApiError) => {
+      contextGeneration.current += 1;
+      clearShareContext();
+      setShareOpen(false);
+      commentsRequest.current += 1;
+      commentsHistoryRequest.current += 1;
+      commentsRefreshInProgress.current = false;
+      commentsHistoryInProgress.current = false;
+      commentsNextCursor.current = null;
+      commentsOlderCursor.current = null;
+      commentSendRequest.current += 1;
+      setBusy((current) =>
+        current === 'comment' || current === 'comment-lookup' ? '' : current,
       );
-      commentOperationRef.current = blocked;
-      setCommentOperation(blocked);
-    }
-    setError(
-      errorText(cause) +
-        (operation || commentValue.current.trim()
-          ? ' Sua redação foi preservada nesta página e não será reenviada automaticamente.'
-          : ''),
-    );
-    if (cause.status === 401) {
-      activeViewerId.current = null;
-      activeViewerIsTest.current = null;
-      setNeedsLogin(true);
-      setViewer(null);
-      setCanCreate(false);
-    }
-  }, []);
+      activeDocumentId.current = null;
+      setDoc(null);
+      setIsOwner(false);
+      setComments([]);
+      setHasOlderComments(false);
+      setCommentsUpdating(false);
+      setCommentsLoadingOlder(false);
+      setQuote('');
+      setSourceStart(null);
+      setCommentsRefreshError('');
+      setCommentsHistoryError('');
+      const operation = commentOperationRef.current;
+      if (operation) {
+        const blocked = updateCommentOperation(
+          operation,
+          'blocked',
+          'O acesso mudou antes da confirmação. Este envio não será reutilizado em outra sessão.',
+        );
+        commentOperationRef.current = blocked;
+        setCommentOperation(blocked);
+      }
+      setError(
+        errorText(cause) +
+          (operation || commentValue.current.trim()
+            ? ' Sua redação foi preservada nesta página e não será reenviada automaticamente.'
+            : ''),
+      );
+      if (cause.status === 401) {
+        activeViewerId.current = null;
+        activeViewerIsTest.current = null;
+        setNeedsLogin(true);
+        setViewer(null);
+        setCanCreate(false);
+      }
+    },
+    [clearShareContext],
+  );
 
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
+    documentsGeneration.current += 1;
+    documentsPageRequest.current += 1;
+    documentsPageInProgress.current = false;
+    setDocumentsLoadingMore(false);
+    setDocumentsPageError('');
+    clearShareContext();
+    setShareOpen(false);
     let sessionRecognized = false;
     try {
       const access = await api<{ mode: 'email' | 'test' }>('access');
@@ -373,8 +431,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         activeViewerId.current !== null &&
         (activeViewerId.current !== user.id ||
           activeViewerIsTest.current !== userIsTest)
-      )
+      ) {
         clearCollectionContext();
+        clearShareContext();
+      }
       const previousOperation = commentOperationRef.current;
       if (previousOperation && previousOperation.viewerId !== user.id) {
         storeCommentOperation(null);
@@ -461,11 +521,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setCommentsHistoryError('');
         setIsOwner(result.isOwner);
       } else {
-        const result = await api<{ documents: Summary[] }>('documents');
+        const page = documentPageFromResponse(
+          await api<unknown>('documents', 'GET', undefined, {
+            timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS,
+          }),
+        );
         if (mounted.current && request === loadRequest.current) {
           contextGeneration.current += 1;
           activeDocumentId.current = null;
-          setList(result.documents);
+          setList(page.documents);
+          documentsNextCursor.current = page.nextCursor;
+          setDocumentsHasMore(page.nextCursor !== null);
+          setDocumentsPageError('');
           collectionSession.current = {
             viewerId: user.id,
             isTest: userIsTest,
@@ -495,6 +562,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setViewer(null);
         setCanCreate(false);
         clearCollectionContext();
+        clearShareContext();
         setDoc(null);
         setComments([]);
         setHasOlderComments(false);
@@ -536,11 +604,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           );
       }
     } finally {
-      if (mounted.current) setLoading(false);
+      if (mounted.current && request === loadRequest.current) setLoading(false);
     }
   }, [
     blockImportOperation,
     clearCollectionContext,
+    clearShareContext,
     documentId,
     hideProtectedContent,
     storeCommentOperation,
@@ -554,6 +623,146 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       mounted.current = false;
     };
   }, [load]);
+
+  async function loadMoreDocuments() {
+    const cursor = documentsNextCursor.current;
+    const session = collectionSession.current;
+    if (!cursor || !viewer || !session || documentsPageInProgress.current)
+      return;
+    const context = `${session.viewerId}:${session.isTest ? 'test' : 'email'}`;
+    const attempt: CollectionAttempt = {
+      generation: documentsGeneration.current,
+      request: ++documentsPageRequest.current,
+      context,
+    };
+    documentsPageInProgress.current = true;
+    setDocumentsLoadingMore(true);
+    setDocumentsPageError('');
+    try {
+      const parameters = new URLSearchParams({ cursor });
+      const page = documentPageFromResponse(
+        await api<unknown>(`documents?${parameters}`, 'GET', undefined, {
+          timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS,
+        }),
+      );
+      const currentSession = collectionSession.current;
+      if (
+        !mounted.current ||
+        !currentSession ||
+        !collectionAttemptMatches(
+          attempt,
+          documentsGeneration.current,
+          documentsPageRequest.current,
+          `${currentSession.viewerId}:${currentSession.isTest ? 'test' : 'email'}`,
+        ) ||
+        activeViewerId.current !== currentSession.viewerId ||
+        Boolean(activeViewerIsTest.current) !== currentSession.isTest
+      )
+        return;
+      setList((current) => mergeDocumentPages(current, page.documents));
+      documentsNextCursor.current = page.nextCursor;
+      setDocumentsHasMore(page.nextCursor !== null);
+    } catch (cause) {
+      const currentSession = collectionSession.current;
+      if (
+        !mounted.current ||
+        !currentSession ||
+        !collectionAttemptMatches(
+          attempt,
+          documentsGeneration.current,
+          documentsPageRequest.current,
+          `${currentSession.viewerId}:${currentSession.isTest ? 'test' : 'email'}`,
+        )
+      )
+        return;
+      if (cause instanceof ApiError && cause.status === 401) {
+        activeViewerId.current = null;
+        activeViewerIsTest.current = null;
+        setViewer(null);
+        setCanCreate(false);
+        setNeedsLogin(true);
+        clearCollectionContext();
+        blockImportOperation(
+          'A sessão terminou. Este arquivo não será enviado por outra identidade.',
+        );
+        setError(errorText(cause));
+      } else if (cause instanceof ApiError && cause.status === 400) {
+        try {
+          const session = importSessionFromResponse(
+            await api<unknown>('session', 'GET', undefined, {
+              timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS,
+            }),
+          );
+          const latestCollection = collectionSession.current;
+          if (
+            !latestCollection ||
+            !collectionAttemptMatches(
+              attempt,
+              documentsGeneration.current,
+              documentsPageRequest.current,
+              `${latestCollection.viewerId}:${latestCollection.isTest ? 'test' : 'email'}`,
+            )
+          )
+            return;
+          const sessionIsTest = Boolean(session.viewer.isTest);
+          if (
+            session.viewer.id !== latestCollection.viewerId ||
+            sessionIsTest !== latestCollection.isTest
+          ) {
+            clearCollectionContext();
+            clearShareContext();
+            activeViewerId.current = session.viewer.id;
+            activeViewerIsTest.current = sessionIsTest;
+            setViewer(session.viewer);
+            setCanCreate(session.canCreate);
+            setNeedsLogin(false);
+            blockImportOperation(
+              'A identidade ou o contexto mudou. Este arquivo não será enviado pela sessão atual.',
+            );
+            setLoading(true);
+            void load();
+          } else {
+            setDocumentsPageError(errorText(cause));
+          }
+        } catch (sessionCause) {
+          const latestCollection = collectionSession.current;
+          if (
+            !latestCollection ||
+            !collectionAttemptMatches(
+              attempt,
+              documentsGeneration.current,
+              documentsPageRequest.current,
+              `${latestCollection.viewerId}:${latestCollection.isTest ? 'test' : 'email'}`,
+            )
+          )
+            return;
+          if (sessionCause instanceof ApiError && sessionCause.status === 401) {
+            activeViewerId.current = null;
+            activeViewerIsTest.current = null;
+            setViewer(null);
+            setCanCreate(false);
+            setNeedsLogin(true);
+            clearCollectionContext();
+            blockImportOperation(
+              'A sessão terminou. Este arquivo não será enviado por outra identidade.',
+            );
+            setError(errorText(sessionCause));
+          } else {
+            setDocumentsPageError(
+              `${errorText(cause)} Não foi possível revalidar a sessão: ${errorText(sessionCause)}`,
+            );
+          }
+        }
+      } else {
+        setDocumentsPageError(errorText(cause));
+      }
+    } finally {
+      if (mounted.current && attempt.request === documentsPageRequest.current) {
+        documentsPageInProgress.current = false;
+        setDocumentsLoadingMore(false);
+      }
+    }
+  }
   useEffect(() => {
     if (!loadedDocumentId || !window.location.hash) return;
     const frame = window.requestAnimationFrame(() => {
@@ -809,17 +1018,21 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       collectionSession.current?.viewerId !== session.viewer.id ||
       collectionSession.current.isTest !== sessionIsTest
     ) {
+      documentsGeneration.current += 1;
+      documentsPageRequest.current += 1;
+      documentsPageInProgress.current = false;
+      setDocumentsLoadingMore(false);
       try {
-        const result = await api<{ documents: Summary[] }>(
-          'documents',
-          'GET',
-          undefined,
-          { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+        const page = documentPageFromResponse(
+          await api<unknown>('documents', 'GET', undefined, {
+            timeoutMs: IMPORT_REQUEST_TIMEOUT_MS,
+          }),
         );
         if (!importAttemptIsCurrent(operation, attempt)) return false;
-        if (!Array.isArray(result?.documents))
-          throw new Error('O servidor retornou uma lista inválida.');
-        setList(result.documents);
+        setList(page.documents);
+        documentsNextCursor.current = page.nextCursor;
+        setDocumentsHasMore(page.nextCursor !== null);
+        setDocumentsPageError('');
         collectionSession.current = {
           viewerId: session.viewer.id,
           isTest: sessionIsTest,
@@ -847,7 +1060,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     setBusy((current) => (current === 'import' ? '' : current));
     storeImportOperation(null);
     setConfirmedImport({ id: created.id, filename: created.filename });
-    const summary: Summary = {
+    const summary: DocumentSummary = {
       id: created.id,
       owner_id: created.owner_id,
       title: created.title,
@@ -858,12 +1071,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         viewer?.id === operation.viewerId ? viewer.name : operation.viewerId,
       comment_count: 0,
     };
-    setList((current) =>
-      current.some((entry) => entry.id === created.id)
-        ? current
-        : [summary, ...current],
+    setList((current) => mergeDocumentPages(current, [summary]));
+    setNotice(
+      'Importação confirmada. O plano está pronto para abrir.' +
+        (documentsNextCursor.current
+          ? ' Há mais planos antigos disponíveis para carregar.'
+          : ''),
     );
-    setNotice('Importação confirmada. O plano está pronto para abrir.');
   }
   async function handleImportFailure(
     operation: ImportOperation,
@@ -1285,22 +1499,112 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     storeCommentOperation(operation);
     await sendCommentOperation(operation);
   }
+  function currentShareContext() {
+    return doc && viewer
+      ? `${doc.id}:${viewer.id}:${viewer.isTest ? 'test' : 'email'}`
+      : '';
+  }
+  function shareAttemptIsCurrent(
+    attempt: CollectionAttempt,
+    currentRequest: number,
+  ) {
+    return (
+      mounted.current &&
+      isOwner &&
+      collectionAttemptMatches(
+        attempt,
+        sharesGeneration.current,
+        currentRequest,
+        currentShareContext(),
+      )
+    );
+  }
+  function invalidatePendingShareReads() {
+    sharesReadRequest.current += 1;
+    sharesReadInProgress.current = false;
+    setSharesLoading(false);
+    setSharesLoadingMore(false);
+  }
+  function handleKnownShareAccessLoss(cause: unknown) {
+    if (!(cause instanceof ApiError) || ![401, 403, 404].includes(cause.status))
+      return false;
+    setShareOpen(false);
+    hideProtectedContent(cause);
+    return true;
+  }
   async function openSharing() {
-    if (!doc) return;
+    if (!doc || !viewer || !isOwner) return;
+    clearShareContext();
     setShareOpen(true);
-    setShareError('');
-    setSharesLoading(true);
-    setShareNotice('');
     setCopied(false);
+    setSharesLoading(true);
+    sharesReadInProgress.current = true;
+    const attempt: CollectionAttempt = {
+      generation: sharesGeneration.current,
+      request: ++sharesReadRequest.current,
+      context: currentShareContext(),
+    };
     try {
-      setShares(
-        (await api<{ shares: ShareRow[] }>('documents/' + doc.id + '/shares'))
-          .shares,
+      const page = sharePageFromResponse(
+        await api<unknown>(
+          'documents/' + doc.id + '/shares',
+          'GET',
+          undefined,
+          {
+            timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS,
+          },
+        ),
       );
-    } catch (e) {
-      setShareError(errorText(e));
+      if (!shareAttemptIsCurrent(attempt, sharesReadRequest.current)) return;
+      setShares(page.shares);
+      sharesNextCursor.current = page.nextCursor;
+      setSharesHasMore(page.nextCursor !== null);
+    } catch (cause) {
+      if (!shareAttemptIsCurrent(attempt, sharesReadRequest.current)) return;
+      if (!handleKnownShareAccessLoss(cause))
+        setSharesPageError(errorText(cause));
     } finally {
-      setSharesLoading(false);
+      if (shareAttemptIsCurrent(attempt, sharesReadRequest.current)) {
+        sharesReadInProgress.current = false;
+        setSharesLoading(false);
+      }
+    }
+  }
+  async function loadMoreShares() {
+    const cursor = sharesNextCursor.current;
+    if (!cursor || !doc || !viewer || !isOwner || sharesReadInProgress.current)
+      return;
+    const attempt: CollectionAttempt = {
+      generation: sharesGeneration.current,
+      request: ++sharesReadRequest.current,
+      context: currentShareContext(),
+    };
+    sharesReadInProgress.current = true;
+    setSharesLoadingMore(true);
+    setSharesPageError('');
+    try {
+      const parameters = new URLSearchParams({ cursor });
+      const page = sharePageFromResponse(
+        await api<unknown>(
+          `documents/${doc.id}/shares?${parameters}`,
+          'GET',
+          undefined,
+          { timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS },
+        ),
+      );
+      if (!shareAttemptIsCurrent(attempt, sharesReadRequest.current)) return;
+      setShares((current) => mergeSharePages(current, page.shares));
+      sharesNextCursor.current = page.nextCursor;
+      setSharesHasMore(page.nextCursor !== null);
+    } catch (cause) {
+      if (!shareAttemptIsCurrent(attempt, sharesReadRequest.current)) return;
+      if (!handleKnownShareAccessLoss(cause))
+        setSharesPageError(errorText(cause));
+    } finally {
+      if (shareAttemptIsCurrent(attempt, sharesReadRequest.current)) {
+        sharesReadInProgress.current = false;
+        setSharesLoadingMore(false);
+      }
     }
   }
   async function addPerson(event: React.SyntheticEvent<HTMLFormElement>) {
@@ -1311,19 +1615,30 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
   }
   async function sendInvitation(email: string, name: string) {
-    if (!doc || busy) return;
+    if (!doc || !viewer || !isOwner || busy) return;
+    invalidatePendingShareReads();
+    const attempt: CollectionAttempt = {
+      generation: sharesGeneration.current,
+      request: ++sharesMutationRequest.current,
+      context: currentShareContext(),
+    };
     setBusy('share');
     setShareError('');
     setShareNotice('');
     try {
-      const result = await api<{
-        shares: ShareRow[];
-        emailSubmitted: boolean;
-        emailError?: string;
-      }>('documents/' + doc.id + '/shares', 'POST', { email, name });
-      setShares(result.shares);
+      const result = shareMutationFromResponse(
+        await api<unknown>(
+          'documents/' + doc.id + '/shares',
+          'POST',
+          { email, name },
+          { timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS },
+        ),
+      );
+      if (!shareAttemptIsCurrent(attempt, sharesMutationRequest.current))
+        return;
+      setShares((current) => mergeSharePages(current, [result.share]));
       if (result.emailSubmitted)
-        setShareNotice('Convite enviado para ' + email.trim() + '.');
+        setShareNotice('Convite enviado para ' + result.share.email + '.');
       else
         setShareError(
           'A pessoa tem acesso, mas o envio do convite não foi confirmado. ' +
@@ -1331,41 +1646,74 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             ' Use Reenviar convite na lista abaixo.',
         );
       return true;
-    } catch (e) {
-      setShareError(errorText(e));
+    } catch (cause) {
+      if (!shareAttemptIsCurrent(attempt, sharesMutationRequest.current))
+        return;
+      if (handleKnownShareAccessLoss(cause)) return;
+      setShareError(errorText(cause));
       // Reconcile grants after an uncertain response without resending email.
-      try {
-        setShares(
-          (await api<{ shares: ShareRow[] }>('documents/' + doc.id + '/shares'))
-            .shares,
-        );
-      } catch {
-        /* The next dialog opening can refresh the list. */
-      }
+      if (!(cause instanceof ApiError) || cause.status >= 500)
+        try {
+          const firstPage = sharePageFromResponse(
+            await api<unknown>(
+              'documents/' + doc.id + '/shares',
+              'GET',
+              undefined,
+              { timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS },
+            ),
+          );
+          if (shareAttemptIsCurrent(attempt, sharesMutationRequest.current))
+            setShares((current) => mergeSharePages(current, firstPage.shares));
+        } catch (reconciliationCause) {
+          if (shareAttemptIsCurrent(attempt, sharesMutationRequest.current))
+            handleKnownShareAccessLoss(reconciliationCause);
+          /* Keep the loaded pages and explicit mutation error for manual retry. */
+        }
     } finally {
-      setBusy('');
+      if (attempt.request === sharesMutationRequest.current)
+        setBusy((current) => (current === 'share' ? '' : current));
     }
   }
   async function revoke(email: string) {
-    if (!doc || busy) return;
-    setBusy(email);
+    if (!doc || !viewer || !isOwner || busy) return;
+    invalidatePendingShareReads();
+    const attempt: CollectionAttempt = {
+      generation: sharesGeneration.current,
+      request: ++sharesMutationRequest.current,
+      context: currentShareContext(),
+    };
+    const busyKey = 'revoke:' + email;
+    setBusy(busyKey);
     setShareError('');
     setShareNotice('');
     try {
-      setShares(
-        (
-          await api<{ shares: ShareRow[] }>(
-            'documents/' + doc.id + '/shares',
-            'DELETE',
-            { email },
-          )
-        ).shares,
+      const revokedEmail = revokedEmailFromResponse(
+        await api<unknown>(
+          'documents/' + doc.id + '/shares',
+          'DELETE',
+          { email },
+          { timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS },
+        ),
+        email,
       );
-    } catch (e) {
-      setShareError(errorText(e));
+      if (!shareAttemptIsCurrent(attempt, sharesMutationRequest.current))
+        return;
+      setShares((current) =>
+        current.filter((person) => person.email !== revokedEmail),
+      );
+    } catch (cause) {
+      if (!shareAttemptIsCurrent(attempt, sharesMutationRequest.current))
+        return;
+      if (!handleKnownShareAccessLoss(cause)) setShareError(errorText(cause));
     } finally {
-      setBusy('');
+      if (attempt.request === sharesMutationRequest.current)
+        setBusy((current) => (current === busyKey ? '' : current));
     }
+  }
+  function setSharingOpen(open: boolean) {
+    if (open) return;
+    clearShareContext();
+    setShareOpen(false);
   }
   async function copyLink() {
     if (!doc) return;
@@ -1604,31 +1952,58 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               )}
             </div>
           ) : (
-            <div className="document-list">
-              {list.map((item) => (
-                // oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export.
-                <a
-                  className="document-row"
-                  href={'/d/' + item.id}
-                  key={item.id}
-                >
-                  <FileText size={23} strokeWidth={1.5} />
-                  <div className="document-row-title">
-                    <h2>{item.title}</h2>
-                    <span>
-                      {item.owner_id === viewer?.id
-                        ? 'Seu documento'
-                        : 'Compartilhado por ' + item.owner_name}{' '}
-                      · {dateLabel(item.created_at)}
+            <>
+              <div className="document-list">
+                {list.map((item) => (
+                  // oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export.
+                  <a
+                    className="document-row"
+                    href={'/d/' + item.id}
+                    key={item.id}
+                  >
+                    <FileText size={23} strokeWidth={1.5} />
+                    <div className="document-row-title">
+                      <h2>{item.title}</h2>
+                      <span>
+                        {item.owner_id === viewer?.id
+                          ? 'Seu documento'
+                          : 'Compartilhado por ' + item.owner_name}{' '}
+                        · {dateLabel(item.created_at)}
+                      </span>
+                    </div>
+                    <span className="document-row-comments">
+                      <MessageSquare size={16} />
+                      {item.comment_count}
                     </span>
-                  </div>
-                  <span className="document-row-comments">
-                    <MessageSquare size={16} />
-                    {item.comment_count}
-                  </span>
-                </a>
-              ))}
-            </div>
+                  </a>
+                ))}
+              </div>
+              <div className="collection-pagination">
+                <p aria-live="polite">
+                  {list.length}{' '}
+                  {list.length === 1 ? 'plano carregado' : 'planos carregados'}
+                  {documentsHasMore ? '. Há planos mais antigos.' : '.'}
+                </p>
+                {documentsPageError && (
+                  <p role="alert" className="form-error">
+                    {documentsPageError} Os planos já carregados foram mantidos.
+                  </p>
+                )}
+                {documentsHasMore && (
+                  <Button
+                    variant="outline"
+                    disabled={documentsLoadingMore}
+                    onClick={() => void loadMoreDocuments()}
+                  >
+                    {documentsLoadingMore
+                      ? 'Carregando planos…'
+                      : documentsPageError
+                        ? 'Tentar carregar novamente'
+                        : 'Carregar planos mais antigos'}
+                  </Button>
+                )}
+              </div>
+            </>
           )}
         </main>
       ) : doc ? (
@@ -1910,7 +2285,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             )}
         </aside>
       )}
-      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+      <Dialog open={shareOpen} onOpenChange={setSharingOpen}>
         <DialogContent className="share-dialog">
           <DialogTitle>Compartilhar documento</DialogTitle>
           <DialogDescription>
@@ -1941,6 +2316,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   value={personName}
                   onChange={(e) => setPersonName(e.target.value)}
                   maxLength={120}
+                  disabled={
+                    sharesLoading || (!!sharesPageError && !shares.length)
+                  }
                 />
                 <label htmlFor="person-email">E-mail</label>
                 <input
@@ -1951,8 +2329,19 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   onChange={(e) => setPersonEmail(e.target.value)}
                   required
                   maxLength={254}
+                  disabled={
+                    sharesLoading || (!!sharesPageError && !shares.length)
+                  }
                 />
-                <Button type="submit" disabled={!!busy || !personEmail.trim()}>
+                <Button
+                  type="submit"
+                  disabled={
+                    !!busy ||
+                    sharesLoading ||
+                    (!!sharesPageError && !shares.length) ||
+                    !personEmail.trim()
+                  }
+                >
                   {busy === 'share' ? 'Enviando…' : 'Enviar convite'}
                 </Button>
               </form>
@@ -1997,6 +2386,41 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                       </div>
                     </div>
                   ))
+                )}
+                {!sharesLoading && (
+                  <div className="collection-pagination access-pagination">
+                    <p aria-live="polite">
+                      {shares.length}{' '}
+                      {shares.length === 1
+                        ? 'convidado carregado'
+                        : 'convidados carregados'}
+                      {sharesHasMore ? '. Há convidados mais antigos.' : '.'}
+                    </p>
+                    {sharesPageError && (
+                      <p role="alert" className="form-error">
+                        {sharesPageError} Os convidados já carregados foram
+                        mantidos.
+                      </p>
+                    )}
+                    {(sharesHasMore || sharesPageError) && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={sharesLoadingMore || !!busy}
+                        onClick={() =>
+                          void (sharesHasMore
+                            ? loadMoreShares()
+                            : openSharing())
+                        }
+                      >
+                        {sharesLoadingMore
+                          ? 'Carregando convidados…'
+                          : sharesPageError
+                            ? 'Tentar carregar novamente'
+                            : 'Carregar convidados mais antigos'}
+                      </Button>
+                    )}
+                  </div>
                 )}
               </div>
             </>
