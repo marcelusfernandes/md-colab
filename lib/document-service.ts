@@ -22,7 +22,111 @@ export type CommentRow = {
   author_id: string;
   author_name: string;
 };
+export type CommentPagination = {
+  olderCursor: string | null;
+  nextCursor: string;
+  hasMore: boolean;
+};
+export type CommentPage = {
+  comments: CommentRow[];
+  pagination: CommentPagination;
+};
+export type CommentPageQuery = {
+  before?: string;
+  after?: string;
+};
 export type ShareRow = { email: string; name: string; created_at: string };
+const commentPageSize = 100;
+const publicCommentFields =
+  'c.id,c.body,c.quote,c.source_start,c.created_at,c.author_id,u.name AS author_name';
+type CommentCursorKind = 'before' | 'after';
+type CommentCursor = {
+  v: 1;
+  d: string;
+  k: CommentCursorKind;
+  s: number;
+};
+type SequencedCommentRow = CommentRow & { transport_sequence: number };
+
+function cursorBase64(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '');
+}
+
+function cursorText(value: string) {
+  const base64 = value.replaceAll('-', '+').replaceAll('_', '/');
+  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(padded);
+  return new TextDecoder().decode(
+    Uint8Array.from(binary, (character) => character.charCodeAt(0)),
+  );
+}
+
+function encodeCommentCursor(
+  documentId: string,
+  kind: CommentCursorKind,
+  sequence: number,
+) {
+  if (!Number.isSafeInteger(sequence) || sequence < 0)
+    throw new Error('Comment sequence is outside the safe cursor range.');
+  return cursorBase64(
+    JSON.stringify({ v: 1, d: documentId, k: kind, s: sequence }),
+  );
+}
+
+function decodeCommentCursor(
+  value: string,
+  documentId: string,
+  kind: CommentCursorKind,
+) {
+  try {
+    if (
+      value.length === 0 ||
+      value.length > 512 ||
+      !/^[A-Za-z0-9_-]+$/.test(value)
+    )
+      throw new Error();
+    const cursor = JSON.parse(cursorText(value)) as Partial<CommentCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !== 'd,k,s,v' ||
+      cursor.v !== 1 ||
+      cursor.d !== documentId ||
+      cursor.k !== kind ||
+      !Number.isSafeInteger(cursor.s) ||
+      (kind === 'before' ? cursor.s! < 1 : cursor.s! < 0) ||
+      encodeCommentCursor(cursor.d, cursor.k, cursor.s!) !== value
+    )
+      throw new Error();
+    return cursor.s!;
+  } catch {
+    throw new HttpError(400, 'Cursor de comentários inválido.');
+  }
+}
+
+function publicComments(rows: SequencedCommentRow[]) {
+  return rows
+    .map(({ transport_sequence: _sequence, ...comment }) => comment)
+    .sort(
+      (left, right) =>
+        left.created_at.localeCompare(right.created_at) ||
+        left.id.localeCompare(right.id),
+    );
+}
+
+function sequenceOf(row: SequencedCommentRow | undefined) {
+  const sequence = row?.transport_sequence ?? 0;
+  if (!Number.isSafeInteger(sequence) || sequence < 0)
+    throw new Error('Comment sequence is outside the safe cursor range.');
+  return sequence;
+}
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -215,16 +319,103 @@ export class DocumentService {
       );
     return document;
   }
-  async comments(id: string) {
+  async comments(
+    id: string,
+    query: CommentPageQuery = {},
+  ): Promise<CommentPage> {
     await this.document(id);
-    return (
+    if (query.before !== undefined && query.after !== undefined)
+      throw new HttpError(400, 'Use apenas um cursor de comentários.');
+    if (query.before !== undefined) {
+      const boundary = decodeCommentCursor(query.before, id, 'before');
+      const rows = (
+        await this.db
+          .prepare(
+            `SELECT ${publicCommentFields},c.sequence AS transport_sequence
+             FROM comments c JOIN users u ON u.id=c.author_id
+             WHERE c.document_id=? AND c.sequence<?
+             ORDER BY c.sequence DESC LIMIT ?`,
+          )
+          .bind(id, boundary, commentPageSize + 1)
+          .all<SequencedCommentRow>()
+      ).results;
+      const page = rows.slice(0, commentPageSize);
+      const hasOlder = rows.length > commentPageSize;
+      return {
+        comments: publicComments(page),
+        pagination: {
+          olderCursor:
+            hasOlder && page.length > 0
+              ? encodeCommentCursor(id, 'before', sequenceOf(page.at(-1)))
+              : null,
+          nextCursor: encodeCommentCursor(id, 'after', sequenceOf(page[0])),
+          hasMore: false,
+        },
+      };
+    }
+    if (query.after !== undefined) {
+      const boundary = decodeCommentCursor(query.after, id, 'after');
+      const rows = (
+        await this.db
+          .prepare(
+            `SELECT ${publicCommentFields},c.sequence AS transport_sequence
+             FROM comments c JOIN users u ON u.id=c.author_id
+             WHERE c.document_id=? AND c.sequence>?
+             ORDER BY c.sequence LIMIT ?`,
+          )
+          .bind(id, boundary, commentPageSize + 1)
+          .all<SequencedCommentRow>()
+      ).results;
+      const page = rows.slice(0, commentPageSize);
+      return {
+        comments: publicComments(page),
+        pagination: {
+          olderCursor: null,
+          nextCursor: encodeCommentCursor(
+            id,
+            'after',
+            page.length > 0 ? sequenceOf(page.at(-1)) : boundary,
+          ),
+          hasMore: rows.length > commentPageSize,
+        },
+      };
+    }
+    const rows = (
       await this.db
         .prepare(
-          `SELECT c.*,u.name AS author_name FROM comments c JOIN users u ON u.id=c.author_id WHERE c.document_id=? ORDER BY c.created_at,c.id`,
+          `SELECT ${publicCommentFields},c.sequence AS transport_sequence
+           FROM comments c JOIN users u ON u.id=c.author_id
+           WHERE c.document_id=? ORDER BY c.sequence DESC LIMIT ?`,
         )
-        .bind(id)
-        .all<CommentRow>()
+        .bind(id, commentPageSize + 1)
+        .all<SequencedCommentRow>()
     ).results;
+    const page = rows.slice(0, commentPageSize);
+    const hasOlder = rows.length > commentPageSize;
+    return {
+      comments: publicComments(page),
+      pagination: {
+        olderCursor:
+          hasOlder && page.length > 0
+            ? encodeCommentCursor(id, 'before', sequenceOf(page.at(-1)))
+            : null,
+        nextCursor: encodeCommentCursor(id, 'after', sequenceOf(page[0])),
+        hasMore: false,
+      },
+    };
+  }
+
+  async comment(id: string, commentId: string) {
+    await this.document(id);
+    if (!/^[0-9a-f-]{36}$/i.test(commentId))
+      throw new HttpError(400, 'Identificador inválido.');
+    return this.db
+      .prepare(
+        `SELECT ${publicCommentFields} FROM comments c JOIN users u ON u.id=c.author_id
+         WHERE c.document_id=? AND c.id=?`,
+      )
+      .bind(id, commentId)
+      .first<CommentRow>();
   }
   async addComment(id: string, input: Record<string, unknown>) {
     const doc = await this.document(id);
@@ -276,7 +467,7 @@ export class DocumentService {
     await this.document(id);
     const comment = await this.db
       .prepare(
-        'SELECT c.*,u.name AS author_name FROM comments c JOIN users u ON u.id=c.author_id WHERE c.id=?',
+        `SELECT ${publicCommentFields},c.document_id FROM comments c JOIN users u ON u.id=c.author_id WHERE c.id=?`,
       )
       .bind(commentId)
       .first<CommentRow & { document_id: string }>();

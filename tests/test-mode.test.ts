@@ -20,7 +20,7 @@ type Body = {
   mode: string;
   redirect: string;
   comments: CommentRow[];
-  comment: CommentRow;
+  comment: CommentRow | null;
 };
 function setup() {
   const { db, sqlite } = database();
@@ -131,6 +131,37 @@ void test('link permite comentar com outro e-mail; somente a sessão criadora ad
     sourceStart: 9,
   });
   assert.equal(comment.status, 201);
+  assert.equal('sequence' in comment.body.comment!, false);
+  const commentId = comment.body.comment!.id;
+  const lookup = await guest.call(`documents/${id}/comments/${commentId}`);
+  assert.equal(lookup.status, 200);
+  assert.equal(lookup.body.comment?.id, commentId);
+  const missing = await guest.call(
+    `documents/${id}/comments/${crypto.randomUUID()}`,
+  );
+  assert.equal(missing.status, 200);
+  assert.equal(missing.body.comment, null);
+  assert.equal(
+    (await guest.call(`documents/${id}/comments/not-found`, 'POST', {})).status,
+    404,
+  );
+  assert.equal(
+    (await guest.call(`documents/${id}/shares/not-found`)).status,
+    404,
+  );
+  assert.equal(
+    (await guest.call(`documents/${id}/comments?after=invalid`)).status,
+    400,
+  );
+  assert.equal(
+    (await guest.call(`documents/${id}/comments?after=invalid&after=duplicate`))
+      .status,
+    400,
+  );
+  assert.equal(
+    (await guest.call(`documents/${id}/comments?unknown=value`)).status,
+    400,
+  );
   assert.equal(
     (await owner.call(`documents/${id}/comments`)).body.comments[0].author_name,
     'qualquer@gmail.com',

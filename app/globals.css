@@ -533,6 +533,30 @@ a:focus-visible {
 .comments-refresh-error {
   margin-bottom: 16px;
 }
+.comments-progress,
+.comments-pagination {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.comments-progress {
+  margin: -12px 0 16px;
+}
+.comments-pagination {
+  margin-top: 24px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+}
+.comments-pagination button {
+  margin-top: 6px;
+  min-height: 36px;
+  color: var(--foreground);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .comment-operation {
   margin-top: 10px;
 }

@@ -45,6 +45,7 @@ import type {
   Viewer,
   DocumentRow,
   CommentRow,
+  CommentPagination,
   ShareRow,
 } from '@/lib/document-service';
 import {
@@ -58,6 +59,7 @@ import {
   updateCommentOperation,
   type CommentOperation,
 } from '@/lib/comment-operation';
+import { commentPageFromResponse, mergeComments } from '@/lib/comment-page';
 import {
   createImportOperation,
   documentFromImportResponse,
@@ -84,16 +86,6 @@ function dateLabel(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value));
-}
-function mergeComments(current: CommentRow[], incoming: CommentRow[]) {
-  return [
-    ...new Map(
-      [...current, ...incoming].map((entry) => [entry.id, entry]),
-    ).values(),
-  ].sort(
-    (a, b) =>
-      a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
-  );
 }
 const block = (tag: string) =>
   function SourceBlock({
@@ -189,8 +181,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     viewerId: string;
     isTest: boolean;
   } | null>(null);
-  const commentsRevision = useRef(0);
   const commentsRequest = useRef(0);
+  const commentsHistoryRequest = useRef(0);
+  const commentsRefreshInProgress = useRef(false);
+  const commentsHistoryInProgress = useRef(false);
+  const commentsNextCursor = useRef<string | null>(null);
+  const commentsOlderCursor = useRef<string | null>(null);
   const commentSendRequest = useRef(0);
   const importReadRequest = useRef(0);
   const importReadInProgress = useRef(false);
@@ -206,6 +202,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [doc, setDoc] = useState<DocumentRow | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [comments, setComments] = useState<CommentRow[]>([]);
+  const [hasOlderComments, setHasOlderComments] = useState(false);
+  const [commentsUpdating, setCommentsUpdating] = useState(false);
+  const [commentsLoadingOlder, setCommentsLoadingOlder] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [shares, setShares] = useState<ShareRow[]>([]);
   const [sharesLoading, setSharesLoading] = useState(false);
@@ -222,7 +221,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     DocumentRow,
     'id' | 'filename'
   > | null>(null);
-  const [commentsError, setCommentsError] = useState('');
+  const [commentsRefreshError, setCommentsRefreshError] = useState('');
+  const [commentsHistoryError, setCommentsHistoryError] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [shareError, setShareError] = useState('');
@@ -289,10 +289,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const confirmCommentOperation = useCallback(
     (operation: CommentOperation, confirmed: CommentRow) => {
       if (commentOperationRef.current?.id !== operation.id) return;
-      commentsRevision.current += 1;
-      commentsRequest.current += 1;
       commentSendRequest.current += 1;
-      setBusy((current) => (current === 'comment' ? '' : current));
+      setBusy((current) =>
+        current === 'comment' || current === 'comment-lookup' ? '' : current,
+      );
       setComments((current) => mergeComments(current, [confirmed]));
       if (shouldClearComposer(operation, composerRevision.current)) {
         commentValue.current = '';
@@ -310,16 +310,26 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const hideProtectedContent = useCallback((cause: ApiError) => {
     contextGeneration.current += 1;
     commentsRequest.current += 1;
-    commentsRevision.current += 1;
+    commentsHistoryRequest.current += 1;
+    commentsRefreshInProgress.current = false;
+    commentsHistoryInProgress.current = false;
+    commentsNextCursor.current = null;
+    commentsOlderCursor.current = null;
     commentSendRequest.current += 1;
-    setBusy((current) => (current === 'comment' ? '' : current));
+    setBusy((current) =>
+      current === 'comment' || current === 'comment-lookup' ? '' : current,
+    );
     activeDocumentId.current = null;
     setDoc(null);
     setIsOwner(false);
     setComments([]);
+    setHasOlderComments(false);
+    setCommentsUpdating(false);
+    setCommentsLoadingOlder(false);
     setQuote('');
     setSourceStart(null);
-    setCommentsError('');
+    setCommentsRefreshError('');
+    setCommentsHistoryError('');
     const operation = commentOperationRef.current;
     if (operation) {
       const blocked = updateCommentOperation(
@@ -405,6 +415,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         const result = await api<{
           document: DocumentRow;
           comments: CommentRow[];
+          pagination: CommentPagination;
           isOwner: boolean;
         }>('documents/' + documentId);
         if (!mounted.current || request !== loadRequest.current) return;
@@ -433,12 +444,21 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         }
         contextGeneration.current += 1;
         commentsRequest.current += 1;
-        commentsRevision.current += 1;
+        commentsHistoryRequest.current += 1;
+        commentsRefreshInProgress.current = false;
+        commentsHistoryInProgress.current = false;
         activeDocumentId.current = result.document.id;
         activeViewerId.current = user.id;
         setDoc(result.document);
-        setComments(result.comments);
-        setCommentsError('');
+        const commentPage = commentPageFromResponse(result);
+        commentsNextCursor.current = commentPage.pagination.nextCursor;
+        commentsOlderCursor.current = commentPage.pagination.olderCursor;
+        setComments(commentPage.comments);
+        setHasOlderComments(commentPage.pagination.olderCursor !== null);
+        setCommentsUpdating(false);
+        setCommentsLoadingOlder(false);
+        setCommentsRefreshError('');
+        setCommentsHistoryError('');
         setIsOwner(result.isOwner);
       } else {
         const result = await api<{ documents: Summary[] }>('documents');
@@ -463,6 +483,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       } else if (e instanceof ApiError && e.status === 401) {
         contextGeneration.current += 1;
         commentsRequest.current += 1;
+        commentsHistoryRequest.current += 1;
+        commentsRefreshInProgress.current = false;
+        commentsHistoryInProgress.current = false;
+        commentsNextCursor.current = null;
+        commentsOlderCursor.current = null;
         activeDocumentId.current = null;
         activeViewerId.current = null;
         activeViewerIsTest.current = null;
@@ -472,16 +497,27 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         clearCollectionContext();
         setDoc(null);
         setComments([]);
+        setHasOlderComments(false);
+        setCommentsUpdating(false);
+        setCommentsLoadingOlder(false);
         blockImportOperation(
           'A sessão terminou. Este arquivo não será enviado por outra identidade.',
         );
       } else {
         contextGeneration.current += 1;
         commentsRequest.current += 1;
+        commentsHistoryRequest.current += 1;
+        commentsRefreshInProgress.current = false;
+        commentsHistoryInProgress.current = false;
+        commentsNextCursor.current = null;
+        commentsOlderCursor.current = null;
         activeDocumentId.current = null;
         setError(errorText(e));
         setDoc(null);
         setComments([]);
+        setHasOlderComments(false);
+        setCommentsUpdating(false);
+        setCommentsLoadingOlder(false);
         if (!sessionRecognized) {
           activeViewerId.current = null;
           activeViewerIsTest.current = null;
@@ -536,65 +572,98 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     let active = true;
     const generation = contextGeneration.current;
     const refresh = async () => {
-      if (document.visibilityState !== 'visible') return;
+      if (
+        document.visibilityState !== 'visible' ||
+        commentsRefreshInProgress.current
+      )
+        return;
+      const initialCursor = commentsNextCursor.current;
+      if (!initialCursor) return;
       const request = ++commentsRequest.current;
-      const revision = commentsRevision.current;
+      commentsRefreshInProgress.current = true;
+      setCommentsUpdating(true);
       try {
-        const result = await api<{ comments: CommentRow[] }>(
-          'documents/' + doc.id + '/comments',
-        );
-        if (
-          !active ||
-          generation !== contextGeneration.current ||
-          request !== commentsRequest.current ||
-          revision !== commentsRevision.current ||
-          activeDocumentId.current !== doc.id ||
-          activeViewerId.current !== viewer.id
-        )
-          return;
-        if (!Array.isArray(result?.comments))
-          throw new Error('O servidor retornou uma atualização inválida.');
-        setComments((current) => mergeComments(current, result.comments));
-        setCommentsError('');
-        const operation = commentOperationRef.current;
-        if (
-          operation &&
-          operationMatchesContext(operation, doc.id, viewer.id)
-        ) {
-          const found = result.comments.find(
-            (entry) => entry.id === operation.id,
+        let cursor = initialCursor;
+        for (;;) {
+          const value = await api<unknown>(
+            'documents/' +
+              doc.id +
+              '/comments?after=' +
+              encodeURIComponent(cursor),
+            'GET',
+            undefined,
+            { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
           );
-          if (found) {
-            try {
-              confirmCommentOperation(
-                operation,
-                commentFromResponse({ comment: found }, operation),
-              );
-            } catch (responseError) {
-              storeCommentOperation(
-                updateCommentOperation(
+          if (
+            !active ||
+            generation !== contextGeneration.current ||
+            request !== commentsRequest.current ||
+            activeDocumentId.current !== doc.id ||
+            activeViewerId.current !== viewer.id
+          )
+            return;
+          const result = commentPageFromResponse(value);
+          if (
+            result.pagination.olderCursor !== null ||
+            (result.pagination.hasMore &&
+              result.pagination.nextCursor === cursor)
+          )
+            throw new Error(
+              'O servidor retornou uma continuação de comentários inválida.',
+            );
+          setComments((current) => mergeComments(current, result.comments));
+          commentsNextCursor.current = result.pagination.nextCursor;
+          setCommentsRefreshError('');
+          const operation = commentOperationRef.current;
+          if (
+            operation &&
+            operationMatchesContext(operation, doc.id, viewer.id)
+          ) {
+            const found = result.comments.find(
+              (entry) => entry.id === operation.id,
+            );
+            if (found) {
+              try {
+                confirmCommentOperation(
                   operation,
-                  'error',
-                  errorText(responseError),
-                ),
-              );
+                  commentFromResponse({ comment: found }, operation),
+                );
+              } catch (responseError) {
+                storeCommentOperation(
+                  updateCommentOperation(
+                    operation,
+                    'error',
+                    errorText(responseError),
+                  ),
+                );
+              }
             }
           }
+          if (!result.pagination.hasMore) break;
+          cursor = result.pagination.nextCursor;
         }
       } catch (e) {
         if (
           !active ||
           generation !== contextGeneration.current ||
-          request !== commentsRequest.current ||
-          revision !== commentsRevision.current
+          request !== commentsRequest.current
         )
           return;
         if (e instanceof ApiError && [401, 403, 404].includes(e.status)) {
           hideProtectedContent(e);
         } else
-          setCommentsError(
+          setCommentsRefreshError(
             'Não foi possível atualizar os comentários. ' + errorText(e),
           );
+      } finally {
+        if (
+          active &&
+          generation === contextGeneration.current &&
+          request === commentsRequest.current
+        ) {
+          commentsRefreshInProgress.current = false;
+          setCommentsUpdating(false);
+        }
       }
     };
     refreshCommentsRef.current = refresh;
@@ -614,6 +683,71 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     storeCommentOperation,
     viewer,
   ]);
+
+  const loadOlderComments = useCallback(async () => {
+    if (!doc || !viewer || commentsHistoryInProgress.current) return;
+    const cursor = commentsOlderCursor.current;
+    if (!cursor) return;
+    const generation = contextGeneration.current;
+    const request = ++commentsHistoryRequest.current;
+    commentsHistoryInProgress.current = true;
+    setCommentsLoadingOlder(true);
+    try {
+      const result = commentPageFromResponse(
+        await api<unknown>(
+          'documents/' +
+            doc.id +
+            '/comments?before=' +
+            encodeURIComponent(cursor),
+          'GET',
+          undefined,
+          { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+        ),
+      );
+      if (
+        !mounted.current ||
+        generation !== contextGeneration.current ||
+        request !== commentsHistoryRequest.current ||
+        activeDocumentId.current !== doc.id ||
+        activeViewerId.current !== viewer.id
+      )
+        return;
+      if (
+        result.pagination.hasMore ||
+        result.pagination.olderCursor === cursor ||
+        (result.comments.length === 0 && result.pagination.olderCursor !== null)
+      )
+        throw new Error('O servidor retornou uma página histórica inválida.');
+      // Historical pages never replace the independent incremental watermark.
+      commentsOlderCursor.current = result.pagination.olderCursor;
+      setHasOlderComments(result.pagination.olderCursor !== null);
+      setComments((current) => mergeComments(current, result.comments));
+      setCommentsHistoryError('');
+    } catch (e) {
+      if (
+        !mounted.current ||
+        generation !== contextGeneration.current ||
+        request !== commentsHistoryRequest.current
+      )
+        return;
+      if (e instanceof ApiError && [401, 403, 404].includes(e.status))
+        hideProtectedContent(e);
+      else
+        setCommentsHistoryError(
+          'Não foi possível carregar os comentários anteriores. ' +
+            errorText(e),
+        );
+    } finally {
+      if (
+        mounted.current &&
+        generation === contextGeneration.current &&
+        request === commentsHistoryRequest.current
+      ) {
+        commentsHistoryInProgress.current = false;
+        setCommentsLoadingOlder(false);
+      }
+    }
+  }, [doc, hideProtectedContent, viewer]);
 
   function importAttemptIsCurrent(
     operation: ImportOperation,
@@ -962,6 +1096,101 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       node.removeEventListener('keyup', captureSelection);
     };
   }, [captureSelection, doc]);
+  async function verifyCommentOperation(operation: CommentOperation) {
+    if (
+      busy ||
+      !operationMatchesContext(
+        operation,
+        activeDocumentId.current,
+        activeViewerId.current,
+      )
+    )
+      return;
+    const attempt = {
+      generation: contextGeneration.current,
+      request: ++commentSendRequest.current,
+    };
+    setBusy('comment-lookup');
+    setError('');
+    setNotice('');
+    storeCommentOperation(
+      updateCommentOperation(
+        operation,
+        'uncertain',
+        'Verificando esta tentativa no servidor…',
+      ),
+    );
+    try {
+      const result = await api<{ comment?: unknown }>(
+        'documents/' +
+          operation.documentId +
+          '/comments/' +
+          encodeURIComponent(operation.id),
+        'GET',
+        undefined,
+        { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+      );
+      if (
+        !mounted.current ||
+        commentOperationRef.current?.id !== operation.id ||
+        !operationAttemptMatches(
+          operation,
+          activeDocumentId.current,
+          activeViewerId.current,
+          attempt,
+          contextGeneration.current,
+          commentSendRequest.current,
+        )
+      )
+        return;
+      if (result?.comment === null) {
+        storeCommentOperation(
+          updateCommentOperation(
+            operation,
+            'uncertain',
+            'A tentativa ainda não foi encontrada. Você pode verificar novamente ou reenviar exatamente o mesmo comentário.',
+          ),
+        );
+        return;
+      }
+      confirmCommentOperation(
+        operation,
+        commentFromResponse(result, operation),
+      );
+    } catch (e) {
+      if (
+        !mounted.current ||
+        commentOperationRef.current?.id !== operation.id ||
+        !operationAttemptMatches(
+          operation,
+          activeDocumentId.current,
+          activeViewerId.current,
+          attempt,
+          contextGeneration.current,
+          commentSendRequest.current,
+        )
+      )
+        return;
+      if (e instanceof ApiError && [401, 403, 404].includes(e.status)) {
+        hideProtectedContent(e);
+        return;
+      }
+      storeCommentOperation(
+        updateCommentOperation(
+          operation,
+          'uncertain',
+          errorText(e) +
+            ' O resultado continua incerto; verifique novamente ou reenvie a mesma tentativa.',
+        ),
+      );
+    } finally {
+      if (
+        mounted.current &&
+        attemptOwnsRequest(attempt, commentSendRequest.current)
+      )
+        setBusy((current) => (current === 'comment-lookup' ? '' : current));
+    }
+  }
   async function sendCommentOperation(operation: CommentOperation) {
     if (
       busy ||
@@ -1451,19 +1680,29 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             <aside className="comments-panel" aria-label="Comentários">
               <h2>
                 <MessageSquare size={18} /> Comentários{' '}
-                <span className="comment-count">{comments.length}</span>
+                <span
+                  className="comment-count"
+                  aria-label={`${comments.length} comentários carregados`}
+                >
+                  {comments.length} carregados
+                </span>
               </h2>
-              {commentsError && (
+              {commentsRefreshError && (
                 <div className="comments-refresh-error" role="alert">
-                  <p>{commentsError}</p>
+                  <p>{commentsRefreshError}</p>
                   <button
                     type="button"
-                    disabled={!!busy}
+                    disabled={!!busy || commentsUpdating}
                     onClick={() => void refreshCommentsRef.current?.()}
                   >
                     Atualizar comentários
                   </button>
                 </div>
+              )}
+              {commentsUpdating && (
+                <output className="comments-progress">
+                  Buscando novos comentários…
+                </output>
               )}
               <form onSubmit={(event) => void addComment(event)}>
                 {quote ? (
@@ -1537,7 +1776,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         <button
                           type="button"
                           disabled={!!busy}
-                          onClick={() => void refreshCommentsRef.current?.()}
+                          onClick={() =>
+                            void verifyCommentOperation(commentOperation)
+                          }
                         >
                           Verificar agora
                         </button>
@@ -1577,6 +1818,32 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                       : 'Comentar'}
                 </Button>
               </form>
+              {hasOlderComments && !commentsHistoryError && (
+                <div className="comments-pagination">
+                  <p>Há comentários anteriores além dos carregados.</p>
+                  <button
+                    type="button"
+                    disabled={!!busy || commentsLoadingOlder}
+                    onClick={() => void loadOlderComments()}
+                  >
+                    {commentsLoadingOlder
+                      ? 'Carregando anteriores…'
+                      : 'Carregar comentários anteriores'}
+                  </button>
+                </div>
+              )}
+              {commentsHistoryError && (
+                <div className="comments-refresh-error" role="alert">
+                  <p>{commentsHistoryError}</p>
+                  <button
+                    type="button"
+                    disabled={!!busy || commentsLoadingOlder}
+                    onClick={() => void loadOlderComments()}
+                  >
+                    Tentar carregar anteriores novamente
+                  </button>
+                </div>
+              )}
               {comments.length === 0 ? (
                 <div className="comments-empty">Nenhum comentário ainda.</div>
               ) : (

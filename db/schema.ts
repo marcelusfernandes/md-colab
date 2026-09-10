@@ -46,7 +46,8 @@ export const shares = sqliteTable(
 export const comments = sqliteTable(
   'comments',
   {
-    id: text('id').primaryKey(),
+    sequence: integer('sequence').primaryKey({ autoIncrement: true }),
+    id: text('id').notNull().unique(),
     documentId: text('document_id')
       .notNull()
       .references(() => documents.id),
@@ -60,6 +61,7 @@ export const comments = sqliteTable(
   },
   (table) => [
     index('comments_document_created').on(table.documentId, table.createdAt),
+    index('comments_document_sequence').on(table.documentId, table.sequence),
   ],
 );
 

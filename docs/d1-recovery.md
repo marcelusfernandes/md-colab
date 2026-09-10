@@ -43,9 +43,9 @@ cria esse backup operacional.
 npm run db:migrate:local -- --persist-to "$STATE"
 ```
 
-`wrangler.local.json` aponta `migrations_dir` para `drizzle`. Os SQLs e os
-snapshots/journal `0000..0003` já aplicados são históricos imutáveis. Uma nova
-mudança de schema deve acrescentar outra migração.
+`wrangler.local.json` aponta `migrations_dir` para `drizzle`. Os SQLs, snapshots
+e entradas do journal de migrações já aplicadas são históricos imutáveis. Uma
+nova mudança de schema deve acrescentar outra migração.
 
 ## Legado local conhecido até 0002
 
@@ -125,8 +125,17 @@ O ensaio sintético reproduzível faz esse roundtrip sem tocar dados existentes:
 
 ```sh
 npm run db:recovery-check:local -- \
-  --output-dir outputs/qa-task22/run-AAAAMMDD-HHMMSS
+  --output-dir outputs/d1-recovery/run-AAAAMMDD-HHMMSS
 ```
+
+O snapshot do helper omite objetos reservados `sqlite_*`, e o export de dados
+usa somente a allowlist de tabelas de aplicação. Por isso o ensaio não compara
+`sqlite_sequence` como parte do schema público. Um replay legítimo com conflito
+pode avançar esse contador sem criar linha; o restore volta a derivá-lo da maior
+sequência persistida. O ensaio preserva os exports completos brutos, compara os
+hashes dos reexports nativos de todas as tabelas allowlisted, restaura os valores
+explícitos de `comments.sequence` e comprova que uma nova inserção recebe uma
+sequência maior que todas as restauradas.
 
 ## Recuperação e produção
 
@@ -135,6 +144,11 @@ precisa de decisão operacional própria. Um backup antigo pode ressuscitar sess
 encerradas, magic links já consumidos e credenciais revogadas depois do snapshot.
 Mantenha o destino restaurado offline até reconciliar eventos posteriores e
 invalidar artefatos de autenticação afetados.
+
+Depois de restore, manutenção da tabela de comentários ou troca do banco ativo,
+recarregue as sessões do app e descarte os cursores de comentários abertos. Um
+cursor é vinculado ao documento e à sequência do banco que o emitiu; ele não é
+um marcador transportável entre snapshots.
 
 Na hospedagem Sites, migrações Drizzle são aplicadas e registradas antes do upload
 do Worker; uma publicação falha pode já ter aplicado DDL. A lista de tabelas de
