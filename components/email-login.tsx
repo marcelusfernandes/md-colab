@@ -1,6 +1,5 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
 import { FileText, LockKeyhole, Mail, LoaderCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { api, errorText } from '@/lib/client-api';
@@ -176,9 +175,10 @@ export function ConfirmAccess() {
   return (
     <div className="workspace">
       <header className="app-header">
-        <Link href="/" className="wordmark">
+        {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
+        <a href="/" className="wordmark">
           <FileText size={21} /> Documentos
-        </Link>
+        </a>
       </header>
       <main className="login-state">
         <Mail size={28} />
@@ -193,7 +193,8 @@ export function ConfirmAccess() {
             {error}
           </p>
         )}
-        <Link href="/">Solicitar um novo link por e-mail</Link>
+        {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
+        <a href="/">Solicitar um novo link por e-mail</a>
       </main>
     </div>
   );

@@ -8,7 +8,6 @@ import {
   useState,
 } from 'react';
 import type { HTMLAttributes } from 'react';
-import Link from 'next/link';
 import { EmailLogin } from '@/components/email-login';
 import { PublishingTokens } from '@/components/publishing-tokens';
 import { api, ApiError, errorText } from '@/lib/client-api';
@@ -203,6 +202,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [shareNotice, setShareNotice] = useState('');
   const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState('');
+  const hasUnconfirmedComment =
+    Boolean(comment.trim()) || Boolean(commentOperation?.body.trim());
   const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
     () =>
       doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] },
@@ -214,6 +215,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       markdownComponents(markdownAnalysis.headingIds as Record<number, string>),
     [markdownAnalysis.headingIds],
   );
+
+  useEffect(() => {
+    if (!hasUnconfirmedComment) return;
+    function preventUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+    }
+    window.addEventListener('beforeunload', preventUnload);
+    return () => window.removeEventListener('beforeunload', preventUnload);
+  }, [hasUnconfirmedComment]);
 
   const storeCommentOperation = useCallback(
     (operation: CommentOperation | null) => {
@@ -771,9 +781,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   return (
     <div className="workspace">
       <header className="app-header">
-        <Link href="/" className="wordmark">
+        {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
+        <a href="/" className="wordmark">
           <FileText size={21} /> Documentos
-        </Link>
+        </a>
         <div className="header-actions">
           {doc && isOwner && (
             <Button onClick={() => void openSharing()}>
@@ -880,8 +891,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           ) : (
             <div className="document-list">
               {list.map((item) => (
-                <Link
-                  prefetch={false}
+                // oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export.
+                <a
                   className="document-row"
                   href={'/d/' + item.id}
                   key={item.id}
@@ -900,7 +911,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                     <MessageSquare size={16} />
                     {item.comment_count}
                   </span>
-                </Link>
+                </a>
               ))}
             </div>
           )}
@@ -908,9 +919,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       ) : doc ? (
         <main className="document-page">
           <div className="document-meta">
-            <Link href="/">
+            {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
+            <a href="/">
               <ArrowLeft size={16} /> Documentos
-            </Link>
+            </a>
             <span>
               <LockKeyhole size={14} />{' '}
               {viewer?.isTest
@@ -1119,7 +1131,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           <LockKeyhole size={28} />
           <h1>Documento indisponível</h1>
           <p>Confira se esta é a conta que recebeu acesso.</p>
-          <Link href="/">Voltar aos documentos</Link>
+          {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
+          <a href="/">Voltar aos documentos</a>
         </main>
       )}
       {!doc && documentId && (commentOperation || comment.trim()) && (
