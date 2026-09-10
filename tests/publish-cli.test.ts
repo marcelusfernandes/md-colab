@@ -173,6 +173,71 @@ async function startIdempotentServer() {
   });
 }
 
+void test('quota 409 usa orientação fixa e preserva operação sem confiar no corpo', async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markdown = join(directory, 'plan.md');
+  const operation = join(directory, 'operation.json');
+  await writeFile(markdown, '# Plano no teto\n');
+  const server = await startServer((_request, response) =>
+    sendJson(response, 409, {
+      code: 'quota_exceeded',
+      error: 'server-secret que não pode aparecer',
+      requestId: '33333333-3333-4333-8333-333333333333',
+    }),
+  );
+  t.after(server.close);
+
+  const result = await runCli({ file: markdown, operation, origin: server.origin });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /limite total de planos/i);
+  assert.match(result.stderr, /operação foi preservada/i);
+  assert.equal(result.stderr.includes('server-secret'), false);
+  assert.equal(result.stdout, '');
+  const state = JSON.parse(await readFile(operation, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(Object.hasOwn(state, 'receipt'), false);
+});
+
+void test('código incorreto e erro não JSON não exibem corpo nem aguardam o stream', async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markdown = join(directory, 'plan.md');
+  await writeFile(markdown, '# Falha controlada\n');
+  const wrongCode = await startServer((_request, response) =>
+    sendJson(response, 409, {
+      code: 'conflict',
+      error: 'malicious-conflict-message',
+    }),
+  );
+  t.after(wrongCode.close);
+  const wrongResult = await runCli({
+    file: markdown,
+    operation: join(directory, 'wrong-code.json'),
+    origin: wrongCode.origin,
+  });
+  assert.equal(wrongResult.code, 1);
+  assert.match(wrongResult.stderr, /HTTP 409/);
+  assert.equal(wrongResult.stderr.includes('malicious-conflict-message'), false);
+
+  const hanging = await startServer((_request, response) => {
+    response.writeHead(500, { 'content-type': 'text/plain' });
+    response.write('malicious-hanging-message');
+  });
+  t.after(hanging.close);
+  const started = Date.now();
+  const hangingResult = await runCli({
+    file: markdown,
+    operation: join(directory, 'hanging.json'),
+    origin: hanging.origin,
+    timeout: '800',
+  });
+  assert.equal(hangingResult.code, 1);
+  assert.match(hangingResult.stderr, /HTTP 500/);
+  assert.equal(hangingResult.stderr.includes('malicious-hanging-message'), false);
+  assert.ok(Date.now() - started < 700, 'status não JSON deve falhar sem ler o corpo');
+});
+
 void test('success, replay and moving the Markdown preserve one operation and original payload', async (t) => {
   const directory = await temporaryDirectory(t);
   const markdown = join(directory, 'plano.md');

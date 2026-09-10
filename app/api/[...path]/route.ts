@@ -12,6 +12,13 @@ function handle(request: Request) {
     APP_OWNER_NAME: env.APP_OWNER_NAME ?? process.env.APP_OWNER_NAME,
     RESEND_API_KEY: env.RESEND_API_KEY ?? process.env.RESEND_API_KEY,
     MAIL_FROM: env.MAIL_FROM ?? process.env.MAIL_FROM,
+    MAX_OWNED_DOCUMENTS:
+      env.MAX_OWNED_DOCUMENTS ?? process.env.MAX_OWNED_DOCUMENTS,
+    MAX_COMMENTS_PER_DOCUMENT:
+      env.MAX_COMMENTS_PER_DOCUMENT ?? process.env.MAX_COMMENTS_PER_DOCUMENT,
+    MAX_ACTIVE_SHARES_PER_DOCUMENT:
+      env.MAX_ACTIVE_SHARES_PER_DOCUMENT ??
+      process.env.MAX_ACTIVE_SHARES_PER_DOCUMENT,
   });
 }
 export const GET = handle;

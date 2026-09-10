@@ -305,6 +305,49 @@ void test('reenvio do mesmo comentário não duplica e não pode sobrescrever ou
   }
 });
 
+void test('replay de comentário revalida acesso após localizar a linha existente', async (t) => {
+  const { sqlite, db, owner, guest } = fixture();
+  t.after(() => sqlite.close());
+  await owner.registerViewer();
+  await guest.registerViewer();
+  const doc = await createDocument(owner, {
+    markdown: '# Replay protegido',
+    filename: 'replay.md',
+  });
+  await owner.share(doc.id, { email: guest.viewer.email });
+  const payload = {
+    id: crypto.randomUUID(),
+    authorId: guest.viewer.id,
+    body: 'Comentário existente.',
+  };
+  await guest.addComment(doc.id, payload);
+  let revoked = false;
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.includes('FROM comments c JOIN users u') || !sql.includes('c.id=?'))
+      return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async first() {
+            const row = await bound.first();
+            if (!revoked) {
+              revoked = true;
+              await owner.revoke(doc.id, guest.viewer.email);
+            }
+            return row;
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  const replayingGuest = new DocumentService(controlled, { ...guest.viewer });
+  await assert.rejects(replayingGuest.addComment(doc.id, payload), denied);
+  assert.equal(revoked, true);
+});
+
 void test('duas chamadas pausadas antes do INSERT convergem na mesma contribuição', async () => {
   const { sqlite, db, owner, guest } = fixture();
   try {
