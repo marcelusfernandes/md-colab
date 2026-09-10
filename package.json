@@ -12,6 +12,10 @@
     "lint": "oxlint app db lib scripts components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx tests",
     "format": "oxfmt",
     "db:generate": "drizzle-kit generate",
+    "db:status:local": "node scripts/d1-local.mjs status",
+    "db:migrate:local": "node scripts/d1-local.mjs migrate",
+    "db:adopt-legacy:local": "node scripts/d1-local.mjs legacy",
+    "db:recovery-check:local": "node scripts/d1-local-recovery-check.mjs",
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "publish:markdown": "node scripts/md-colab-publish.mjs"

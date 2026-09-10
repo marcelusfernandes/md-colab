@@ -22,22 +22,32 @@ são aceitos no fluxo autenticado. Não há conversão automática entre os modo
 
 ## Executar localmente
 
-Requer Node.js 22.22 ou mais recente e npm.
+Para reproduzir a validação, use Node.js 22.22.3 e npm 10.9.8. O mínimo técnico
+declarado em `package.json` é Node 22.13.0; a versão exercitada neste procedimento
+e na CI é 22.22.3. Wrangler 4.92.0 vem do lockfile.
 
 ```sh
-npm install
+npm ci
 cp .env.example .env.local
-npx wrangler d1 execute DB --local --file drizzle/0000_mute_microchip.sql --config wrangler.local.json
-npx wrangler d1 execute DB --local --file drizzle/0001_email_access.sql --config wrangler.local.json
-npx wrangler d1 execute DB --local --file drizzle/0002_link_test_mode.sql --config wrangler.local.json
-npx wrangler d1 execute DB --local --file drizzle/0003_pink_blazing_skull.sql --config wrangler.local.json
+npm run db:status:local -- --persist-to .wrangler/state
+npm run db:migrate:local -- --persist-to .wrangler/state
 npm run dev
 ```
 
-Aplique cada migração uma única vez no banco local. Preencha `.env.local` com a
-origem exata do servidor e a lista de autores (ou o e-mail legado do dono). A
-chave deve permanecer nesse arquivo ignorado pelo Git; não a coloque no código
-ou em mensagens.
+O Wrangler aplica `drizzle/0000..0003` na ordem e registra o ledger no banco;
+repetir o comando não reaplica DDL. Use sempre um `--persist-to` explícito e não
+reutilize a persistência de outra sessão. Se `status` encontrar schema sem ledger,
+`migrate` recusa a escrita: siga o [runbook de D1](docs/d1-recovery.md) para
+diagnosticar um legado conhecido, fazer backup e adotar o histórico de forma
+explícita. Não execute novamente os SQLs históricos à mão.
+
+Preencha `.env.local` com a origem exata do servidor e a lista de autores (ou o
+e-mail legado do dono). A chave deve permanecer nesse arquivo ignorado pelo Git;
+não a coloque no código ou em mensagens.
+
+`npm run dev` compila a fonte atual. Para exercitar o build publicado localmente,
+registre o `git rev-parse HEAD`, execute `npm run build` e só então `npm start`;
+um `dist/` anterior pode pertencer a outro HEAD.
 
 ## Acesso por e-mail
 
