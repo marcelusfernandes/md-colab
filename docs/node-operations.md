@@ -41,11 +41,12 @@ npm run build:node
 MD_COLAB_DB_PATH=/data/md-colab.sqlite npm run start:node
 ```
 
-Dentro da imagem, use a CLI empacotada. Substitua `IMAGE` pelo digest ou pela tag
-imutável revisada:
+Dentro da imagem, use a CLI empacotada. Substitua `IMAGE` pelo digest da imagem
+revisada. Uma tag `sha-REVISAO` identifica a referência ao commit, mas pode mudar;
+o digest identifica o conteúdo usado na implantação:
 
 ```sh
-IMAGE=ghcr.io/marcelusfernandes/md-colab:sha-REVISAO
+IMAGE=ghcr.io/marcelusfernandes/md-colab@sha256:DIGEST_DA_IMAGEM_REVISADA
 docker run --rm --user 1001:1001 \
   --volume /caminho/privado/dados:/data \
   --entrypoint node "$IMAGE" \
@@ -101,8 +102,10 @@ para conservar referências de publicações. Documentos, comentários, contas e
 publicações são preservados.
 
 Um snapshot em um prefixo conhecido anterior também pode ser restaurado: o
-resultado lista `pending`, permanece recusado pelo launcher e deve receber
-`migrate --database <destino-restaurado>` explicitamente antes da partida. Schema,
+resultado lista `pending`, permanece recusado pelo launcher e deve receber uma
+migração explícita antes da partida. Use `migrate --database <destino-restaurado>`
+com `--backup-output <novo-backup.sqlite>` apontando para outro arquivo ainda
+inexistente, pois o prefixo rastreado também exige backup pré-migração. Schema,
 ledger e checksums do prefixo ainda precisam coincidir exatamente; isso não adota
 legado desconhecido.
 
