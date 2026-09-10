@@ -229,6 +229,25 @@ void test('success, replay and moving the Markdown preserve one operation and or
   assert.equal(server.records[2].key, server.records[0].key);
 });
 
+void test('reference warnings stay on stderr and do not alter the JSON payload or stdout', async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markdown = join(directory, 'references.md');
+  const operation = join(directory, 'operation.json');
+  const source = '[local](./guide.md)\n![image](file:///Users/author/image.png)\n[entity](<line&#x0a;break.md>)\n';
+  await writeFile(markdown, source);
+  const server = await startIdempotentServer();
+  t.after(server.close);
+
+  const result = await runCli({ file: markdown, operation, origin: server.origin });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), publication(server.origin));
+  assert.match(result.stderr, /Aviso \(linha 1\): link referência relativa/);
+  assert.match(result.stderr, /Aviso \(linha 2\): imagem URL file:\/\/ local/);
+  assert.match(result.stderr, /line\\u000abreak\.md/);
+  assert(!result.stderr.includes('line\nbreak.md'));
+  assert.equal(server.records[0].body.markdown, source);
+});
+
 void test('two processes starting together share the same idempotency key', async (t) => {
   const directory = await temporaryDirectory(t);
   const markdown = join(directory, 'plan.md');

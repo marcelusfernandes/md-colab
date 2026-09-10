@@ -1,5 +1,5 @@
 'use client';
-import { createElement, useCallback, useEffect, useRef, useState } from 'react';
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HTMLAttributes } from 'react';
 import Link from 'next/link';
 import { EmailLogin } from '@/components/email-login';
@@ -7,6 +7,12 @@ import { PublishingTokens } from '@/components/publishing-tokens';
 import { api, ApiError, errorText } from '@/lib/client-api';
 import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import {
+  analyzeMarkdown,
+  classifyMarkdownUrl,
+  isNavigableMarkdownUrl,
+  warningMessage,
+} from '@/lib/markdown-analysis.mjs';
 import {
   FileText,
   Upload,
@@ -68,32 +74,46 @@ const block = (tag: string) =>
       'data-source-start': node?.position?.start.offset,
     });
   };
-const markdownComponents: Components = {
+function markdownComponents(headingIds: Record<number, string>): Components {
+  const components: Components = {
   p: block('p'),
-  h1: block('h1'),
-  h2: block('h2'),
-  h3: block('h3'),
-  h4: block('h4'),
-  h5: block('h5'),
-  h6: block('h6'),
   li: block('li'),
   pre: block('pre'),
   blockquote: block('blockquote'),
-};
-markdownComponents.a = ({ node: _, children, ...props }) => (
-  <a {...props} target="_blank" rel="noopener noreferrer">
-    {children}
-  </a>
-);
-markdownComponents.img = ({ node: _, ...props }) => (
-  // oxlint-disable-next-line next/no-img-element -- Markdown image sizes and remote origins are user supplied.
-  <img
-    {...props}
-    alt={props.alt ?? ''}
-    referrerPolicy="no-referrer"
-    loading="lazy"
-  />
-);
+  };
+  const heading = (tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') =>
+    function Heading({ node, ...props }: HTMLAttributes<HTMLElement> & ExtraProps) {
+      return createElement(tag, {
+        ...props,
+        id: headingIds[node?.position?.start.offset ?? -1],
+        'data-source-start': node?.position?.start.offset,
+      });
+    };
+  components.h1 = heading('h1');
+  components.h2 = heading('h2');
+  components.h3 = heading('h3');
+  components.h4 = heading('h4');
+  components.h5 = heading('h5');
+  components.h6 = heading('h6');
+  components.a = ({ node: _, children, href, ...props }) => {
+    const kind = classifyMarkdownUrl(href ?? '');
+    if (!isNavigableMarkdownUrl(kind))
+      return <span {...props} className="markdown-unavailable-reference">{children}</span>;
+    if (kind === 'fragment') return <a {...props} href={href}>{children}</a>;
+    return <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+  };
+  components.img = ({ node: _, src, alt, ...props }) => {
+    const source = typeof src === 'string' ? src : '';
+    const kind = classifyMarkdownUrl(source);
+    if (kind !== 'web')
+      return <span className="markdown-image-placeholder">Imagem não publicada: {alt || source}</span>;
+    return (
+      // oxlint-disable-next-line next/no-img-element -- Markdown image sizes and remote origins are user supplied.
+      <img {...props} src={source} alt={alt ?? ''} referrerPolicy="no-referrer" loading="lazy" />
+    );
+  };
+  return components;
+}
 
 export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const input = useRef<HTMLInputElement>(null);
@@ -124,6 +144,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [shareNotice, setShareNotice] = useState('');
   const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState('');
+  const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
+    () => (doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] }),
+    [doc],
+  );
+  const loadedDocumentId = doc?.id;
+  const renderedMarkdownComponents = useMemo(
+    () => markdownComponents(markdownAnalysis.headingIds as Record<number, string>),
+    [markdownAnalysis.headingIds],
+  );
 
   const load = useCallback(async () => {
     try {
@@ -173,6 +202,19 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       mounted.current = false;
     };
   }, [load]);
+  useEffect(() => {
+    if (!loadedDocumentId || !window.location.hash) return;
+    const frame = window.requestAnimationFrame(() => {
+      let id = window.location.hash.slice(1);
+      try {
+        id = decodeURIComponent(id);
+      } catch {
+        return;
+      }
+      document.getElementById(id)?.scrollIntoView();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadedDocumentId]);
   useEffect(() => {
     if (!doc) return;
     let active = true;
@@ -576,9 +618,22 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           </div>
           <div className="reading-layout">
             <article ref={article} className="markdown-document">
+              {markdownAnalysis.references.length > 0 && (
+                <aside className="markdown-reference-warning" aria-label="Referências não publicadas">
+                  <strong>Algumas referências não acompanham este Markdown.</strong>
+                  <p>Inclua o conteúdo no plano ou use uma URL web explícita.</p>
+                  <ul>
+                    {markdownAnalysis.references.map((reference) => (
+                      <li key={`${reference.offset}-${reference.url}`}>
+                        Linha {reference.line}: {warningMessage(reference)}
+                      </li>
+                    ))}
+                  </ul>
+                </aside>
+              )}
               <Markdown
                 remarkPlugins={[remarkGfm]}
-                components={markdownComponents}
+                components={renderedMarkdownComponents}
                 skipHtml
               >
                 {doc.markdown}
