@@ -3,6 +3,10 @@
 Importe um Markdown, compartilhe com e-mails específicos e receba comentários.
 O dono importa e compartilha o link; quem recebe pode ler e comentar.
 
+A rota `/` apresenta o produto sem consultar documentos ou exigir uma sessão.
+A entrada e a lista privada ficam em `/documentos`; links de convite continuam
+abrindo somente o plano correspondente em `/d/:id`.
+
 ## Modo de teste atual
 
 Com `ACCESS_MODE=test`, qualquer pessoa com o link informa um e-mail e entra
@@ -100,7 +104,8 @@ Para enviar a convidados, configure um remetente autorizado no serviço. As
 variáveis da hospedagem são independentes de `.env.local` e precisam ser
 configuradas como valores de execução; a chave deve ser um segredo.
 
-Na página inicial, `APP_AUTHOR_MODE=open` permite que qualquer pessoa solicite seu
+Na entrada em `/documentos`, `APP_AUTHOR_MODE=open` permite que qualquer
+pessoa solicite seu
 primeiro link; ela só cria planos depois de confirmar a posse do e-mail. Em
 `allowlist`, o primeiro link sem convite continua restrito aos e-mails configurados.
 A confirmação cria a conta; logins seguintes recuperam a mesma identidade e os

@@ -13,9 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Documentos — Markdown compartilhado',
-  description: 'Documentos Markdown com acesso por convite e comentários.',
-  robots: { index: false, follow: false },
+  title: 'md-colab',
+  description: 'Planos Markdown com espaço para crítica humana.',
 };
 
 export default function RootLayout({
