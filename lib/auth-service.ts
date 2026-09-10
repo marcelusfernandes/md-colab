@@ -140,7 +140,10 @@ export class AuthService {
       .bind(await hashToken(session), id, this.now() + SESSION_SECONDS)
       .run();
     await this.logout(request);
-    return { session, redirect: documentId ? '/d/' + documentId : '/' };
+    return {
+      session,
+      redirect: documentId ? '/d/' + documentId : '/documentos',
+    };
   }
   assertMailConfigured() {
     this.mailer.assertConfigured();
@@ -327,7 +330,7 @@ export class AuthService {
     return {
       viewer,
       session,
-      redirect: link.document_id ? '/d/' + link.document_id : '/',
+      redirect: link.document_id ? '/d/' + link.document_id : '/documentos',
     };
   }
 

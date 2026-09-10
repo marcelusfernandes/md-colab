@@ -73,11 +73,11 @@ void test('modo de teste entra com qualquer e-mail sem credenciais de envio ou c
   const user = f.client();
   assert.equal((await user.call('access')).body.mode, 'test');
   assert.equal((await user.call('session')).status, 401);
-  assert.equal(
-    (await user.call('auth/test', 'POST', { email: 'inventado@example.com' }))
-      .status,
-    200,
-  );
+  const entered = await user.call('auth/test', 'POST', {
+    email: 'inventado@example.com',
+  });
+  assert.equal(entered.status, 200);
+  assert.equal(entered.body.redirect, '/documentos');
   const session = await user.call('session');
   assert.equal(session.body.viewer.email, 'inventado@example.com');
   assert.equal(session.body.viewer.isTest, true);

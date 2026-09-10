@@ -132,6 +132,13 @@ try {
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: 'ok' });
 
+  const landing = await fetch(origin + '/');
+  assert.equal(landing.status, 200);
+  assert.match(await landing.text(), /Criar um plano/);
+
+  const workspace = await fetch(origin + '/documentos');
+  assert.equal(workspace.status, 200);
+
   const access = await fetch(origin + '/api/access');
   assert.equal(access.status, 200);
   assert.deepEqual(await access.json(), {
@@ -159,6 +166,7 @@ try {
     body: JSON.stringify({ email: 'smoke@example.test' }),
   });
   assert.equal(login.status, 200);
+  assert.equal((await login.clone().json()).redirect, '/documentos');
   const cookie = login.headers.get('set-cookie')?.split(';')[0];
   assert.ok(cookie);
 
@@ -203,6 +211,9 @@ try {
   console.log(
     JSON.stringify({
       health: 'ok',
+      landing: 'ok',
+      workspace: 'ok',
+      loginRedirect: '/documentos',
       openAuthorBinding: true,
       readiness: 'ready',
       chunkedOversizeStatus: oversized.status,

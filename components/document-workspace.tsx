@@ -1764,7 +1764,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     <div className="workspace">
       <header className="app-header">
         {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
-        <a href="/" className="wordmark">
+        <a href="/documentos" className="wordmark">
           <FileText size={21} /> Documentos
         </a>
         <div className="header-actions">
@@ -2021,7 +2021,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         <main className="document-page">
           <div className="document-meta">
             {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
-            <a href="/">
+            <a href="/documentos">
               <ArrowLeft size={16} /> Documentos
             </a>
             <span>
@@ -2271,7 +2271,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           <h1>Documento indisponível</h1>
           <p>Confira se esta é a conta que recebeu acesso.</p>
           {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
-          <a href="/">Voltar aos documentos</a>
+          <a href="/documentos">Voltar aos documentos</a>
         </main>
       )}
       {!doc && documentId && (commentOperation || comment.trim()) && (

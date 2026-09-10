@@ -71,6 +71,7 @@ function fixture() {
   async function login(email = config.ownerEmail) {
     await auth.requestLink({ email }, 'test');
     const result = await auth.redeem(mailbox.lastToken());
+    assert.equal(result.redirect, '/documentos');
     return { ...result, cookie: auth.cookie(result.session).split(';')[0] };
   }
   return {
@@ -189,6 +190,7 @@ void test('fluxo HTTP: dono importa e convida; convidado entra, comenta e perde 
   assert.equal(scanner.status, 401);
   const ownerLogin = await f.call('auth/verify', 'POST', { token: proof });
   assert.equal(ownerLogin.status, 200);
+  assert.equal((await data(ownerLogin.clone())).redirect, '/documentos');
   const ownerCookie = ownerLogin.headers.get('set-cookie')!.split(';')[0];
   const ownerSession = await data(
     await f.call('session', 'GET', undefined, ownerCookie),

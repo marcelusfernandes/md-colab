@@ -12,7 +12,7 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "start:node": "node --experimental-transform-types scripts/start-node.ts",
     "start:workers": "wrangler dev --config dist/server/wrangler.json",
-    "lint": "oxlint app db lib scripts components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx tests",
+    "lint": "oxlint app db lib scripts components/document-workspace.tsx components/email-login.tsx components/publishing-tokens.tsx components/landing-page.tsx tests",
     "format": "oxfmt",
     "db:generate": "drizzle-kit generate",
     "db:status:local": "node scripts/d1-local.mjs status",

@@ -200,7 +200,7 @@ export function ConfirmAccess() {
           </p>
         )}
         {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation avoids the unavailable vinext client navigation export. */}
-        <a href="/">Solicitar um novo link por e-mail</a>
+        <a href="/documentos">Solicitar um novo link por e-mail</a>
       </main>
     </div>
   );
