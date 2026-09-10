@@ -1,6 +1,7 @@
 import { AuthService, authConfig, validEmail } from './auth-service.ts';
 import { DocumentService, HttpError } from './document-service.ts';
 import { ResendMailer, type Mailer } from './mailer.ts';
+import { PublicationService } from './publication-service.ts';
 
 export function json(
   value: unknown,
@@ -63,6 +64,7 @@ export async function handleApi(
     );
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\//, '').split('/');
+    const publishing = new PublicationService(values.DB, config);
     if (path[0] === 'access' && path.length === 1 && request.method === 'GET')
       return json({ mode: config.testMode ? 'test' : 'email' });
     if (request.method !== 'GET') {
@@ -110,6 +112,30 @@ export async function handleApi(
       }
       throw new HttpError(404, 'Página não encontrada.');
     }
+    if (
+      path[0] === 'publications' &&
+      path.length === 1 &&
+      request.method === 'POST'
+    ) {
+      if (config.testMode)
+        throw new HttpError(404, 'Publicação por API indisponível.');
+      const credential = await publishing.authenticate(request);
+      if (!auth.canCreate(credential.viewer))
+        throw new HttpError(
+          403,
+          'Sua conta não está habilitada para publicar documentos.',
+        );
+      const input = await inputFrom(request, 2 * 1024 * 1024);
+      return json(
+        await publishing.publish(
+          credential.viewer,
+          credential.credentialId,
+          input,
+          request.headers.get('idempotency-key'),
+        ),
+        201,
+      );
+    }
     const viewer = await auth.viewer(request);
     if (!viewer)
       throw new HttpError(
@@ -119,6 +145,38 @@ export async function handleApi(
     const service = new DocumentService(values.DB, viewer);
     if (path[0] === 'session' && path.length === 1 && request.method === 'GET')
       return json({ viewer, canCreate: auth.canCreate(viewer) });
+    if (path[0] === 'publishing-tokens' && path.length <= 2) {
+      if (config.testMode || viewer.isTest)
+        throw new HttpError(404, 'Credenciais de publicação indisponíveis.');
+      const [, id] = path;
+      if (request.method === 'GET' && !id)
+        return json({ credentials: await publishing.credentials(viewer) });
+      if (request.method === 'POST' && !id) {
+        if (!auth.canCreate(viewer))
+          throw new HttpError(
+            403,
+            'Sua conta não está habilitada para criar credenciais.',
+          );
+        await auth.limit(
+          'publishing-token-create',
+          viewer.id,
+          20,
+          24 * 60 * 60,
+        );
+        return json(
+          await publishing.createCredential(
+            viewer,
+            await inputFrom(request, 4096),
+          ),
+          201,
+        );
+      }
+      if (request.method === 'DELETE' && id)
+        return json({
+          credential: await publishing.revokeCredential(viewer, id),
+        });
+      throw new HttpError(405, 'Ação indisponível.');
+    }
     if (path[0] !== 'documents' || path.length > 3)
       throw new HttpError(404, 'Página não encontrada.');
     const [, id, action] = path;

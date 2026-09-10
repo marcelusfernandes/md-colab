@@ -30,6 +30,7 @@ cp .env.example .env.local
 npx wrangler d1 execute DB --local --file drizzle/0000_mute_microchip.sql --config wrangler.local.json
 npx wrangler d1 execute DB --local --file drizzle/0001_email_access.sql --config wrangler.local.json
 npx wrangler d1 execute DB --local --file drizzle/0002_link_test_mode.sql --config wrangler.local.json
+npx wrangler d1 execute DB --local --file drizzle/0003_pink_blazing_skull.sql --config wrangler.local.json
 npm run dev
 ```
 
@@ -69,6 +70,62 @@ fica em cookie HttpOnly, SameSite=Lax e Secure em HTTPS, com validade de sete di
 As permissões por documento são verificadas no servidor a cada leitura ou escrita.
 Remover um convidado invalida convites antigos e bloqueia leitura e comentários,
 mesmo com uma sessão aberta; comentários anteriores são preservados.
+
+## Publicação por API
+
+Uma pessoa autenticada por e-mail e atualmente habilitada como autora pode abrir
+**API** no cabeçalho, dar um nome à credencial e copiá-la. O segredo começa com
+`mdp_`, contém 256 bits aleatórios e aparece somente nessa criação. O banco guarda
+apenas seu hash. Cada credencial expira 90 dias depois da emissão; podem existir
+até 10 credenciais ativas por pessoa, com nomes de até 80 caracteres. A listagem
+mostra somente metadados da própria conta. A pessoa pode revogar suas credenciais
+mesmo se deixar de estar habilitada para criar planos. A emissão aceita até 20
+tentativas por pessoa a cada 24 horas.
+
+A gestão usa o cookie da sessão verificada:
+
+- `GET /api/publishing-tokens` lista as credenciais próprias sem segredo ou hash;
+- `POST /api/publishing-tokens` recebe `{ "name": "Notebook pessoal" }` e
+  retorna `{ "token", "credential" }`, com o segredo somente nessa resposta;
+- `DELETE /api/publishing-tokens/:id` revoga uma credencial própria.
+
+O segredo autentica exclusivamente `POST /api/publications`. Ele não substitui
+o cookie na gestão de credenciais, leitura, comentários ou compartilhamento. A
+publicação também confere novamente a lista atual de autores e fica indisponível
+em `ACCESS_MODE=test`. Credenciais expiradas ou revogadas são recusadas.
+
+A requisição aceita JSON com `markdown`, `filename` e `title` opcional. O Markdown
+continua limitado a 1 MB e é preservado como recebido. `Idempotency-Key` é
+obrigatório, aceita de 1 a 128 caracteres ASCII visíveis e fica isolado por autor.
+Repetir a mesma chave e o mesmo conteúdo retorna os mesmos identificadores e URL;
+usar a chave com conteúdo diferente retorna `409` sem alterar o documento. A
+operação cria somente um documento e seu registro de publicação: não importa
+arquivos referenciados pelo Markdown, não envia convites e não atualiza planos.
+
+Exemplo com o arquivo escolhido explicitamente:
+
+```sh
+PLAN_FILE=./plano.md
+PUBLISHING_TOKEN='mdp_substitua_pela_credencial_copiada'
+jq -n --rawfile markdown "$PLAN_FILE" --arg filename "$(basename "$PLAN_FILE")" \
+  '{markdown: $markdown, filename: $filename}' |
+  curl --fail-with-body https://seu-dominio.example/api/publications \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --header "Authorization: Bearer $PUBLISHING_TOKEN" \
+    --header 'Idempotency-Key: exemplo-plano-001' \
+    --data-binary @-
+```
+
+Uma resposta criada ou repetida mantém este formato:
+
+```json
+{
+  "documentId": "26e0cb70-9a3e-49d7-9ac0-5a11f4ca46e3",
+  "publicationId": "94071e70-ef49-4c17-b7d0-825257271261",
+  "url": "https://seu-dominio.example/d/26e0cb70-9a3e-49d7-9ac0-5a11f4ca46e3"
+}
+```
 
 A habilitação para criar é conferida no servidor em cada importação. Remover um
 e-mail da configuração de autores — incluindo `APP_OWNER_EMAIL`, se usado —

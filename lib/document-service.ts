@@ -34,10 +34,50 @@ export class HttpError extends Error {
 export function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
-function requiredText(value: unknown, label: string, max: number) {
+export function requiredText(value: unknown, label: string, max: number) {
   if (typeof value !== 'string' || !value.trim() || value.length > max)
     throw new HttpError(400, label + ' inválido.');
   return value.trim();
+}
+export type DocumentInput = {
+  markdown: string;
+  filename: string;
+  title: string;
+  requestedTitle: string | null;
+};
+export function documentInput(
+  input: Record<string, unknown>,
+  exact = false,
+): DocumentInput {
+  if (
+    exact &&
+    Object.keys(input).some(
+      (key) => !['markdown', 'filename', 'title'].includes(key),
+    )
+  )
+    throw new HttpError(
+      400,
+      'A publicação aceita somente Markdown, nome e título.',
+    );
+  requiredText(input.markdown, 'Markdown', 1024 * 1024);
+  const markdown = input.markdown as string;
+  if (new TextEncoder().encode(markdown).length > 1024 * 1024)
+    throw new HttpError(413, 'O arquivo deve ter no máximo 1 MB.');
+  const filename = requiredText(input.filename, 'Nome do arquivo', 255);
+  const requestedTitle = exact
+    ? input.title === undefined
+      ? null
+      : requiredText(input.title, 'Título', 240)
+    : typeof input.title === 'string' && input.title.trim()
+      ? requiredText(input.title, 'Título', 240)
+      : null;
+  const title =
+    requestedTitle ??
+    (
+      markdown.match(/^#\s+(.+)$/m)?.[1] ??
+      filename.replace(/\.(md|markdown)$/i, '')
+    ).slice(0, 240);
+  return { markdown, filename, title, requestedTitle };
 }
 export class DocumentService {
   constructor(
@@ -88,18 +128,7 @@ export class DocumentService {
     return doc;
   }
   async create(input: Record<string, unknown>) {
-    requiredText(input.markdown, 'Markdown', 1024 * 1024);
-    const markdown = input.markdown as string;
-    if (new TextEncoder().encode(markdown).length > 1024 * 1024)
-      throw new HttpError(413, 'O arquivo deve ter no máximo 1 MB.');
-    const filename = requiredText(input.filename, 'Nome do arquivo', 255);
-    const title =
-      typeof input.title === 'string' && input.title.trim()
-        ? requiredText(input.title, 'Título', 240)
-        : (
-            markdown.match(/^#\s+(.+)$/m)?.[1] ??
-            filename.replace(/\.(md|markdown)$/i, '')
-          ).slice(0, 240);
+    const { markdown, filename, title } = documentInput(input);
     const id = crypto.randomUUID();
     await this.db
       .prepare(
