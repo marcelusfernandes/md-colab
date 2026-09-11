@@ -212,25 +212,39 @@ plano na lista antes de iniciar uma nova importação.
 ## Publicação por API
 
 Uma pessoa autenticada por e-mail e atualmente habilitada como autora pode abrir
-**API** no cabeçalho, dar um nome à credencial e copiá-la. O segredo começa com
-`mdp_`, contém 256 bits aleatórios e aparece somente nessa criação. O banco guarda
-apenas seu hash. Cada credencial expira 90 dias depois da emissão; podem existir
-até 10 credenciais ativas por pessoa, com nomes de até 80 caracteres. A listagem
-mostra somente metadados da própria conta. A pessoa pode revogar suas credenciais
-mesmo se deixar de estar habilitada para criar planos. A emissão aceita até 20
-tentativas por pessoa a cada 24 horas.
+**API** no cabeçalho, escolher a finalidade, dar um nome à credencial e copiá-la.
+**Publicação inicial** cria planos sem ler feedback. **Leitura de feedback** fica
+vinculada a um único plano próprio, escolhido por ID ou link do mesmo serviço, e
+não publica planos ou revisões. O servidor confirma o vínculo e a propriedade; o
+texto digitado na interface não concede acesso por si só. Credenciais existentes
+continuam sendo apenas de publicação inicial e não são convertidas.
+
+O segredo começa com `mdp_`, contém 256 bits aleatórios e aparece somente nessa
+criação. O banco guarda apenas seu hash. Cada credencial expira 90 dias depois da
+emissão; podem existir até 10 credenciais ativas por pessoa, com nomes de até 80
+caracteres. A listagem mostra finalidade e, quando aplicável, o plano vinculado,
+sempre somente da própria conta. A pessoa pode revogar suas credenciais mesmo se
+deixar de estar habilitada para criar planos. A emissão aceita até 20 tentativas
+por pessoa a cada 24 horas.
 
 A gestão usa o cookie da sessão verificada:
 
-- `GET /api/publishing-tokens` lista as credenciais próprias sem segredo ou hash;
+- `GET /api/publishing-tokens` retorna `{ "viewerId", "credentials" }`, sem
+  segredo ou hash;
 - `POST /api/publishing-tokens` recebe `{ "name": "Notebook pessoal" }` e
-  retorna `{ "token", "credential" }`, com o segredo somente nessa resposta;
-- `DELETE /api/publishing-tokens/:id` revoga uma credencial própria.
+  retorna `{ "viewerId", "token", "credential" }`, com o segredo somente nessa
+  resposta;
+- para leitura, o mesmo `POST` recebe
+  `{ "name": "Agente de revisão", "scope": "plan_read", "documentId": "…" }`;
+- `DELETE /api/publishing-tokens/:id` retorna `{ "viewerId", "credential" }` e
+  revoga uma credencial própria.
 
-O segredo autentica exclusivamente `POST /api/publications`. Ele não substitui
-o cookie na gestão de credenciais, leitura, comentários ou compartilhamento. A
-publicação também confere novamente a política atual de autoria e fica indisponível
-em `ACCESS_MODE=test`. Credenciais expiradas ou revogadas são recusadas.
+Uma credencial `publish` autentica exclusivamente `POST /api/publications`. Uma
+credencial `plan_read` autentica exclusivamente a API de feedback do plano ao qual
+foi vinculada. Nenhuma substitui o cookie na gestão de credenciais, na interface
+de leitura, em comentários ou em compartilhamento. A publicação também confere
+novamente a política atual de autoria e fica indisponível em `ACCESS_MODE=test`.
+Credenciais expiradas ou revogadas são recusadas.
 
 A requisição aceita JSON com `markdown`, `filename` e `title` opcional. O Markdown
 continua limitado a 1 MB e é preservado como recebido. `Idempotency-Key` é
@@ -247,6 +261,59 @@ URL, query, cursor, identificadores recebidos, e-mail, conteúdo, token, nem nom
 mensagem livre de exceção; rotas desconhecidas usam a categoria fixa
 `unknown_route`. Essa garantia se limita aos eventos da aplicação. Logs de acesso
 do Wrangler ou da plataforma seguem a configuração própria desses ambientes.
+
+### Leitura de feedback por API
+
+A superfície de agente aceita somente `Authorization: Bearer <credencial>` com
+uma credencial `plan_read` do plano exato. Ela não usa a sessão do navegador como
+fallback e fica indisponível em `ACCESS_MODE=test`. As rotas são somente `GET`:
+
+- `/api/agent/documents/:id/feedback` cria o manifesto ou, com `?stamp=…`, faz a
+  validação final da mesma observação;
+- `/api/agent/documents/:id/feedback/comments?stamp=…&cursor=…` pagina comentários;
+- `/api/agent/documents/:id/feedback/events?stamp=…&cursor=…` pagina eventos;
+- `/api/agent/documents/:id/revisions/:revisionId?stamp=…` lê um snapshot exato.
+
+O manifesto tem este formato:
+
+```json
+{
+  "contract_version": 1,
+  "document": {
+    "id": "26e0cb70-9a3e-49d7-9ac0-5a11f4ca46e3",
+    "title": "Plano",
+    "filename": "plano.md",
+    "current_revision_id": "35e0cb70-9a3e-49d7-9ac0-5a11f4ca46e4",
+    "current_revision_ordinal": 2
+  },
+  "counts": { "comments": 72, "events": 4, "revisions": 2 },
+  "stamp": "…"
+}
+```
+
+Cada página contém até 50 itens, `next_cursor` (`null` na última página) e o
+mesmo `stamp`. Comentários expõem `id`, `root_id`, `author_id`, `author_name`,
+`body`, `quote`, `source_start`, `source_revision_id`, `created_at` e `is_root`.
+Somente raízes incluem `conversation` com `state`, `version`, `decision`,
+`decision_reason` e `reply_count`; em respostas, `conversation` é `null`. O
+`source_start` é a âncora do bloco do renderizador, não um byte offset nem a
+posição garantida de uma frase.
+
+Eventos expõem `id`, `root_id`, `actor_id`, `actor_name`, `base_version`,
+`version`, `action`, `state`, `decision`, `decision_reason`, `reason` e
+`created_at`. O snapshot retorna `{ "revision", "stamp" }`; `revision` contém
+`id`, `document_id`, `ordinal`, autor/nome público, título, nome de arquivo,
+Markdown original, `base_revision_id`, resumo, `considered_comment_ids` e data.
+O Markdown permanece dado e não é renderizado ou executado pela API.
+
+`stamp` e `cursor` são metadados operacionais opacos, vinculados à credencial,
+ao plano e à observação. Cursores de comentários e eventos são independentes.
+Depois de consumir as páginas e os snapshots necessários, repita o manifesto com
+o mesmo `stamp`. Uma crítica, decisão ou revisão concorrente retorna `409` com
+`code: "feedback_changed"`; reinicie a coleta com um manifesto sem selo. Essa
+validação confirma completude naquele instante, sem prometer atualidade contínua.
+`counts.revisions` informa o total observado, mas esta API não lista todo o
+histórico. CLI e exportação segura dessa leitura ficam para o próximo recorte.
 
 ### CLI local recuperável
 
