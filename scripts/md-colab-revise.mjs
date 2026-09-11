@@ -609,10 +609,16 @@ function effectiveMetadata(markdown, file, titleInput, summaryInput) {
       throw new CliError('O título deve ter entre 1 e 240 caracteres.');
   } else {
     const heading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
-    title = (heading || filename.replace(/\.(md|markdown)$/i, '')).slice(
-      0,
-      240,
-    );
+    const candidate = heading || filename.replace(/\.(md|markdown)$/i, '');
+    let end = Math.min(candidate.length, 240);
+    if (
+      end < candidate.length &&
+      end > 0 &&
+      /[\uD800-\uDBFF]/.test(candidate[end - 1]) &&
+      /[\uDC00-\uDFFF]/.test(candidate[end])
+    )
+      end -= 1;
+    title = candidate.slice(0, end).trim();
     if (!title) throw new CliError('O título derivado é inválido.');
   }
   const summary = summaryInput?.trim() || null;
@@ -684,7 +690,7 @@ export function createOperation({
     createdAt,
   };
   operation.payloadSha256 = operationPayloadDigest(operation);
-  return operation;
+  return validateOperation(operation);
 }
 
 function validateReceipt(receipt) {
@@ -981,17 +987,22 @@ function requestFailure(status, action) {
     return new CliError(
       'O recibo não foi observado (HTTP 404). Outra requisição ainda pode estar em andamento; preserve a operação e consulte novamente depois.',
     );
-  if (status === 409)
-    return new CliError(
-      'O serviço recusou a revisão por conflito (HTTP 409). Preserve a operação; uma nova base ou conteúdo exige outra operação.',
-    );
-  if (status === 403)
-    return new CliError(
-      'A conta não está habilitada para publicar esta revisão (HTTP 403). O recibo ainda pode ser consultado com --action lookup.',
-    );
-  if (status === 401)
-    return new CliError('A credencial plan_revise foi recusada (HTTP 401).');
-  return new CliError(`O serviço recusou a ação (HTTP ${status}).`);
+  if (action === 'lookup') {
+    if (status === 401)
+      return new CliError('A credencial plan_revise foi recusada (HTTP 401).');
+    return new CliError(`O serviço recusou a consulta (HTTP ${status}).`);
+  }
+  const detail =
+    status === 409
+      ? 'O serviço informou conflito (HTTP 409).'
+      : status === 403
+        ? 'A conta não estava habilitada para escrever (HTTP 403).'
+        : status === 401
+          ? 'A credencial plan_revise foi recusada (HTTP 401).'
+          : `O serviço respondeu HTTP ${status}.`;
+  return new UncertainResultError(
+    `${detail} Como o POST foi iniciado sem um recibo confiável, preserve a operação e use --action lookup antes de decidir o próximo passo.`,
+  );
 }
 
 async function responseJson(response, action) {
@@ -1133,9 +1144,12 @@ async function writeStdout(value) {
     const onError = (error) => rejectWrite(error);
     process.stdout.once('error', onError);
     process.stdout.write(`${JSON.stringify(value)}\n`, (error) => {
+      if (error) {
+        rejectWrite(error);
+        return;
+      }
       process.stdout.off('error', onError);
-      if (error) rejectWrite(error);
-      else resolveWrite();
+      resolveWrite();
     });
   });
 }

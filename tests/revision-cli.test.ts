@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import {
   appendFile,
   chmod,
@@ -21,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { createServer } from 'node:http';
 import {
   CliError,
   createOperation,
@@ -138,16 +140,18 @@ function receipt(operation: ReturnType<typeof createOperation>) {
       base_revision_id: operation.payload.baseRevisionId,
       summary: operation.payload.summary,
       considered_comment_ids: operation.payload.consideredCommentIds,
-      considered_comments: operation.payload.consideredCommentIds.map((id) => ({
-        id,
-        root_id: id,
-        source_revision_id: baseRevisionId,
-        author_id: authorId,
-        author_name: 'Pessoa observada',
-        body: 'Conteúdo tratado como dado',
-        quote: '',
-        created_at: '2026-09-11T01:00:00.000Z',
-      })),
+      considered_comments: operation.payload.consideredCommentIds.map(
+        (id: string) => ({
+          id,
+          root_id: id,
+          source_revision_id: baseRevisionId,
+          author_id: authorId,
+          author_name: 'Pessoa observada',
+          body: 'Conteúdo tratado como dado',
+          quote: '',
+          created_at: '2026-09-11T01:00:00.000Z',
+        }),
+      ),
       created_at: '2026-09-11T04:00:00.000Z',
     },
   };
@@ -604,6 +608,32 @@ void test('BOM, CRLF e Unicode são preservados no payload congelado', async (t)
   assert.equal(observedMarkdown, markdown);
 });
 
+void test('título derivado é truncado, aparado e nunca corta um par surrogate', () => {
+  const repeated = 'a'.repeat(239);
+  for (const [heading, expected] of [
+    [`${repeated} tail`, repeated],
+    [`${repeated}😀`, repeated],
+  ]) {
+    const markdown = `# ${heading}\n`;
+    const bytes = Buffer.from(markdown);
+    const operation = createOperation({
+      origin,
+      documentId,
+      context: context(),
+      markdown,
+      bytes,
+      file: 'proposta.md',
+      title: undefined,
+      summary: undefined,
+      consideredCommentIds: [],
+    });
+    assert.equal(operation.payload.title, expected);
+    assert.equal(operation.payload.title.length, 239);
+    assert.equal(operation.payload.title.endsWith(' '), false);
+    validateOperation(operation);
+  }
+});
+
 void test('404 de lookup e recibo divergente preservam a operação sem requisição implícita', async (t) => {
   const directory = await temporary(t);
   const bytes = Buffer.from('# Proposta\n');
@@ -679,6 +709,24 @@ void test('confirmação 2xx inválida, falha de persistência e falha de stdout
     ),
   );
   assert.equal(Object.hasOwn(invalidOperation, 'receipt'), false);
+  const retryArgs = [
+    '--action',
+    'retry',
+    '--origin',
+    origin,
+    '--document',
+    documentId,
+    '--operation',
+    join(invalidDirectory, 'operation.json'),
+  ];
+  for (const status of [401, 503])
+    await assert.rejects(
+      run(retryArgs, environment(), {
+        fetchImpl: async () => json({}, status),
+        stdout: async () => {},
+      }),
+      /POST foi iniciado sem um recibo confiável.*lookup/,
+    );
 
   const persistenceDirectory = await temporary(t);
   await writeFile(
@@ -747,3 +795,73 @@ void test('confirmação 2xx inválida, falha de persistência e falha de stdout
   );
   assert.equal(complete.receipt.ordinal, 3);
 });
+
+void test(
+  'EPIPE real depois do recibo salvo termina com mensagem sanitizada',
+  { timeout: 5_000 },
+  async (t) => {
+    const directory = await temporary(t);
+    const server = createServer();
+    await new Promise<void>((resolveListen) =>
+      server.listen(0, '127.0.0.1', resolveListen),
+    );
+    t.after(
+      () =>
+        new Promise<void>((resolveClose) => server.close(() => resolveClose())),
+    );
+    const address = server.address();
+    assert(address && typeof address === 'object');
+    const localOrigin = `http://127.0.0.1:${address.port}`;
+    const bytes = Buffer.from('# EPIPE\n');
+    const operation = createOperation({
+      origin: localOrigin,
+      documentId,
+      context: context(),
+      markdown: bytes.toString(),
+      bytes,
+      file: 'epipe.md',
+      title: undefined,
+      summary: undefined,
+      consideredCommentIds: [],
+    });
+    const operationPath = join(directory, 'operation.json');
+    await writeFile(operationPath, JSON.stringify(operation));
+    server.on('request', (_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(receipt(operation)));
+    });
+    const child = spawn(
+      process.execPath,
+      [
+        resolve('scripts/md-colab-revise.mjs'),
+        '--action',
+        'lookup',
+        '--origin',
+        localOrigin,
+        '--document',
+        documentId,
+        '--operation',
+        operationPath,
+      ],
+      {
+        cwd: resolve('.'),
+        env: environment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    child.stdout.destroy();
+    child.stderr.setEncoding('utf8');
+    let stderr = '';
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    assert.match(stderr, /revisão foi confirmada e o recibo foi salvo/);
+    assert.doesNotMatch(stderr, /EPIPE|Unhandled|node:events/);
+    const stored = validateOperation(
+      JSON.parse(await readFile(operationPath, 'utf8')),
+    );
+    assert.equal(stored.receipt.ordinal, 3);
+  },
+);
