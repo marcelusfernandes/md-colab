@@ -33,6 +33,8 @@ import {
   LoaderCircle,
   LogOut,
   Mail,
+  Copy,
+  RefreshCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -53,6 +55,7 @@ import type {
   ConversationEventAction,
   ConversationEventRow,
   DirectedCommentContext,
+  DocumentRevisionReceipt,
 } from '@/lib/document-service';
 import {
   collectionAttemptMatches,
@@ -124,10 +127,37 @@ import {
   type ImportAttempt,
   type ImportOperation,
 } from '@/lib/import-operation';
+import {
+  createRevisionOperation,
+  documentFromInitialRevisionResponse,
+  revisionAttemptMatches,
+  revisionFromOperationResponse,
+  revisionFromResponse,
+  revisionDraftMatchesOperation,
+  revisionOperationMatchesAccess,
+  revisionOperationMatchesContext,
+  revisionOperationMatchesIdentity,
+  revisionOperationRequest,
+  revisionOperationWithBase,
+  updateRevisionOperation,
+  type RevisionAttempt,
+  type RevisionOperation,
+} from '@/lib/revision-operation';
 
 const COMMENT_REQUEST_TIMEOUT_MS = 30_000;
 const IMPORT_REQUEST_TIMEOUT_MS = 30_000;
 const COLLECTION_REQUEST_TIMEOUT_MS = 30_000;
+const compareText = (left: string, right: string) =>
+  left < right ? -1 : left > right ? 1 : 0;
+async function markdownFileText(file: File) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      await file.arrayBuffer(),
+    );
+  } catch {
+    throw new Error('O arquivo precisa usar texto UTF-8 válido.');
+  }
+}
 function dateLabel(value: string) {
   return new Intl.DateTimeFormat('pt-BR', {
     day: '2-digit',
@@ -215,11 +245,15 @@ function markdownComponents(headingIds: Record<number, string>): Components {
 
 export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const input = useRef<HTMLInputElement>(null);
+  const revisionInput = useRef<HTMLInputElement>(null);
   const article = useRef<HTMLElement>(null);
   const commentInput = useRef<HTMLTextAreaElement>(null);
   const mounted = useRef(true);
   const commentOperationRef = useRef<CommentOperation | null>(null);
   const importOperationRef = useRef<ImportOperation | null>(null);
+  const revisionOperationRef = useRef<RevisionOperation | null>(null);
+  const revisionSummaryRef = useRef('');
+  const consideredCommentIdsRef = useRef<string[]>([]);
   const commentValue = useRef('');
   const draftSourceRevisionId = useRef<string | null>(null);
   const draftReplyRootId = useRef<string | null>(null);
@@ -242,6 +276,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const importReadRequest = useRef(0);
   const importReadInProgress = useRef(false);
   const importSendRequest = useRef(0);
+  const revisionReadRequest = useRef(0);
+  const revisionReadInProgress = useRef(false);
+  const revisionSendRequest = useRef(0);
+  const originRevisionRequest = useRef(0);
   const loadRequest = useRef(0);
   const documentsGeneration = useRef(0);
   const documentsPageRequest = useRef(0);
@@ -313,10 +351,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     useState<CommentOperation | null>(null);
   const [importOperation, setImportOperation] =
     useState<ImportOperation | null>(null);
+  const [revisionOperation, setRevisionOperation] =
+    useState<RevisionOperation | null>(null);
+  const [revisionSummary, setRevisionSummary] = useState('');
+  const [consideredCommentIds, setConsideredCommentIds] = useState<string[]>([]);
+  const [confirmedRevision, setConfirmedRevision] =
+    useState<DocumentRevisionReceipt | null>(null);
+  const [originRevision, setOriginRevision] =
+    useState<DocumentRevisionReceipt | null>(null);
+  const [originRevisionLoading, setOriginRevisionLoading] = useState(false);
+  const [originRevisionError, setOriginRevisionError] = useState('');
   const [confirmedImport, setConfirmedImport] = useState<Pick<
     DocumentRow,
     'id' | 'filename'
-  > | null>(null);
+  > & { collectionNotice?: string } | null>(null);
   const [commentsRefreshError, setCommentsRefreshError] = useState('');
   const [, setCommentsHistoryError] = useState('');
   const [conversationRows, setConversationRows] = useState<ConversationRow[]>(
@@ -366,7 +414,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const hasUnconfirmedWork =
     hasUnconfirmedComment ||
     Boolean(importOperation) ||
-    Boolean(conversationOperation);
+    Boolean(conversationOperation) ||
+    Boolean(revisionOperation) ||
+    Boolean(revisionSummary.trim()) ||
+    consideredCommentIds.length > 0;
   const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
     () =>
       doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] },
@@ -378,6 +429,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       markdownComponents(markdownAnalysis.headingIds as Record<number, string>),
     [markdownAnalysis.headingIds],
   );
+  const originMarkdownComponents = useMemo(() => markdownComponents({}), []);
   const pendingReplyRoot = useMemo(
     () =>
       commentOperation?.rootId
@@ -478,6 +530,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     },
     [],
   );
+  const storeRevisionOperation = useCallback(
+    (operation: RevisionOperation | null) => {
+      revisionOperationRef.current = operation;
+      setRevisionOperation(operation);
+    },
+    [],
+  );
   const storeConversationOperation = useCallback(
     (operation: ConversationOperation | null) => {
       conversationOperationRef.current = operation;
@@ -527,6 +586,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       );
     },
     [storeImportOperation],
+  );
+  const blockRevisionOperation = useCallback(
+    (message: string) => {
+      const operation = revisionOperationRef.current;
+      if (!operation) return;
+      revisionSendRequest.current += 1;
+      setBusy((current) =>
+        current === 'revision' || current === 'revision-lookup' ? '' : current,
+      );
+      storeRevisionOperation(
+        updateRevisionOperation(operation, 'blocked', message),
+      );
+    },
+    [storeRevisionOperation],
   );
   const confirmCommentOperation = useCallback(
     (operation: CommentOperation, confirmed: CommentRow) => {
@@ -596,6 +669,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       directedRecentWindowRef.current = null;
       collectionReplyRequest.current += 1;
       directedReplyRequest.current += 1;
+      originRevisionRequest.current += 1;
+      setOriginRevision(null);
+      setOriginRevisionLoading(false);
+      setOriginRevisionError('');
       setDirectedCommentContext(null);
       setDirectedCommentLoading(false);
       commentSendRequest.current += 1;
@@ -645,6 +722,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         commentOperationRef.current = blocked;
         setCommentOperation(blocked);
       }
+      blockRevisionOperation(
+        'O acesso ou a sessão mudou. O arquivo e a base foram preservados, mas esta revisão não será reenviada automaticamente.',
+      );
       setError(
         errorText(cause) +
           (operation || commentValue.current.trim()
@@ -659,7 +739,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setCanCreate(false);
       }
     },
-    [clearShareContext, storeConversationOperation],
+    [blockRevisionOperation, clearShareContext, storeConversationOperation],
   );
 
   const load = useCallback(async () => {
@@ -747,6 +827,19 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             'uncertain',
             'A mesma sessão foi restaurada. Verifique o resultado antes de reenviar.',
           ),
+        );
+      const previousRevision = revisionOperationRef.current;
+      if (
+        previousRevision &&
+        !revisionOperationMatchesContext(
+          previousRevision,
+          documentId,
+          user,
+          allowed,
+        )
+      )
+        blockRevisionOperation(
+          'A identidade, o plano ou a permissão mudou. Esta revisão não será enviada pela sessão atual.',
         );
       activeViewerId.current = user.id;
       activeViewerIsTest.current = userIsTest;
@@ -951,6 +1044,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
   }, [
     blockImportOperation,
+    blockRevisionOperation,
     clearCollectionContext,
     clearShareContext,
     documentId,
@@ -1107,6 +1201,46 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       }
     }
   }
+  const openOriginRevision = useCallback(
+    async (revisionId: string) => {
+      if (!doc) return;
+      const request = ++originRevisionRequest.current;
+      const expectedDocumentId = doc.id;
+      setOriginRevisionLoading(true);
+      setOriginRevisionError('');
+      try {
+        const revision = revisionFromResponse(
+          await api<unknown>(
+            `documents/${expectedDocumentId}/revisions/${revisionId}`,
+            'GET',
+            undefined,
+            { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+          ),
+        );
+        if (
+          !mounted.current ||
+          request !== originRevisionRequest.current ||
+          activeDocumentId.current !== expectedDocumentId
+        )
+          return;
+        setOriginRevision(revision);
+      } catch (cause) {
+        if (
+          !mounted.current ||
+          request !== originRevisionRequest.current ||
+          activeDocumentId.current !== expectedDocumentId
+        )
+          return;
+        if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
+          hideProtectedContent(cause);
+        else setOriginRevisionError(errorText(cause));
+      } finally {
+        if (mounted.current && request === originRevisionRequest.current)
+          setOriginRevisionLoading(false);
+      }
+    },
+    [doc, hideProtectedContent],
+  );
   const loadConversationPage = useCallback(
     async (filter: ConversationFilter, append = false) => {
       if (!doc || !viewer) return false;
@@ -1244,6 +1378,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         );
       }
       setDirectedCommentContext(reconciled.context);
+      if (
+        reconciled.context.conversation.root.source_revision_id !==
+        doc.current_revision_id
+      )
+        void openOriginRevision(
+          reconciled.context.conversation.root.source_revision_id,
+        );
       if (reconciled.reset)
         setNotice(
           'Muitas respostas novas chegaram. A lista voltou às respostas recentes; carregue as anteriores novamente.',
@@ -1291,7 +1432,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     } finally {
       if (isCurrent()) setDirectedCommentLoading(false);
     }
-  }, [doc, hideProtectedContent, viewer]);
+  }, [doc, hideProtectedContent, openOriginRevision, viewer]);
 
   useEffect(() => {
     if (!doc || !viewer || !directedCommentId) {
@@ -1740,33 +1881,104 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
     return true;
   }
-  function confirmImportOperation(
+  async function refreshCollectionAfterConfirmedImport(
     operation: ImportOperation,
-    created: DocumentRow,
   ) {
+    const session = collectionSession.current;
+    if (
+      !session ||
+      session.viewerId !== operation.viewerId ||
+      session.isTest !== operation.isTest
+    )
+      return;
+    const loadedHeadId = list[0]?.id;
+    const previousCursor = documentsNextCursor.current;
+    const attempt: CollectionAttempt = {
+      generation: documentsGeneration.current,
+      request: ++documentsPageRequest.current,
+      context: `${operation.viewerId}:${operation.isTest ? 'test' : 'email'}`,
+    };
+    documentsPageInProgress.current = true;
+    setDocumentsLoadingMore(true);
+    try {
+      const page = documentPageFromResponse(
+        await api<unknown>('documents', 'GET', undefined, {
+          timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS,
+        }),
+      );
+      const currentSession = collectionSession.current;
+      if (
+        !mounted.current ||
+        !currentSession ||
+        !collectionAttemptMatches(
+          attempt,
+          documentsGeneration.current,
+          documentsPageRequest.current,
+          `${currentSession.viewerId}:${currentSession.isTest ? 'test' : 'email'}`,
+        ) ||
+        activeViewerId.current !== operation.viewerId ||
+        Boolean(activeViewerIsTest.current) !== operation.isTest
+      )
+        return;
+      const hasContinuousWindow =
+        loadedHeadId !== undefined &&
+        page.documents.some((entry) => entry.id === loadedHeadId);
+      setList((current) =>
+        hasContinuousWindow
+          ? mergeDocumentPages(current, page.documents)
+          : page.documents,
+      );
+      documentsNextCursor.current = hasContinuousWindow
+        ? previousCursor
+        : page.nextCursor;
+      setDocumentsHasMore(documentsNextCursor.current !== null);
+      setDocumentsPageError('');
+      setConfirmedImport((current) =>
+        current
+          ? {
+              ...current,
+              collectionNotice:
+                loadedHeadId !== undefined && !hasContinuousWindow
+                  ? 'A lista mudou durante a confirmação. Voltamos à primeira página para que nenhum plano intermediário seja ignorado.'
+                  : undefined,
+            }
+          : current,
+      );
+    } catch (cause) {
+      const currentSession = collectionSession.current;
+      if (
+        !mounted.current ||
+        !currentSession ||
+        !collectionAttemptMatches(
+          attempt,
+          documentsGeneration.current,
+          documentsPageRequest.current,
+          `${currentSession.viewerId}:${currentSession.isTest ? 'test' : 'email'}`,
+        ) ||
+        activeViewerId.current !== operation.viewerId ||
+        Boolean(activeViewerIsTest.current) !== operation.isTest
+      )
+        return;
+      setDocumentsPageError(
+        `A importação inicial foi confirmada, mas não foi possível atualizar a lista atual: ${errorText(cause)}`,
+      );
+    } finally {
+      if (attempt.request === documentsPageRequest.current) {
+        documentsPageInProgress.current = false;
+        setDocumentsLoadingMore(false);
+      }
+    }
+  }
+  function confirmImportOperation(operation: ImportOperation, receipt: DocumentRow) {
     if (importOperationRef.current?.id !== operation.id) return;
     importSendRequest.current += 1;
     setBusy((current) => (current === 'import' ? '' : current));
     storeImportOperation(null);
-    setConfirmedImport({ id: created.id, filename: created.filename });
-    const summary: DocumentSummary = {
-      id: created.id,
-      owner_id: created.owner_id,
-      title: created.title,
-      filename: created.filename,
-      is_test: created.is_test,
-      created_at: created.created_at,
-      owner_name:
-        viewer?.id === operation.viewerId ? viewer.name : operation.viewerId,
-      comment_count: 0,
-    };
-    setList((current) => mergeDocumentPages(current, [summary]));
+    setConfirmedImport({ id: receipt.id, filename: receipt.filename });
     setNotice(
-      'Importação confirmada. O plano está pronto para abrir.' +
-        (documentsNextCursor.current
-          ? ' Há mais planos antigos disponíveis para carregar.'
-          : ''),
+      'Recibo da importação inicial confirmado. Atualizando a leitura corrente da lista.',
     );
+    void refreshCollectionAfterConfirmedImport(operation);
   }
   async function handleImportFailure(
     operation: ImportOperation,
@@ -1879,7 +2091,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     try {
       if (!(await revalidateImportSession(operation, attempt))) return;
       const result = await api<unknown>(
-        'documents/' + operation.id,
+        `documents/${operation.id}/revisions/${operation.id}`,
         'GET',
         undefined,
         {
@@ -1891,7 +2103,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       if (!importAttemptIsCurrent(operation, attempt)) return;
       confirmImportOperation(
         operation,
-        documentFromImportResponse(result, operation),
+        documentFromInitialRevisionResponse(result, operation),
       );
     } catch (e) {
       await handleImportFailure(operation, attempt, e);
@@ -1923,7 +2135,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         throw new Error('Escolha um arquivo .md ou .markdown.');
       if (file.size > 1024 * 1024)
         throw new Error('O arquivo deve ter no máximo 1 MB.');
-      const markdown = await file.text();
+      const markdown = await markdownFileText(file);
       if (
         !mounted.current ||
         request !== importReadRequest.current ||
@@ -1957,6 +2169,409 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       if (request === importReadRequest.current)
         importReadInProgress.current = false;
     }
+  }
+  function revisionAttemptIsCurrent(
+    operation: RevisionOperation,
+    attempt: RevisionAttempt,
+  ) {
+    return (
+      mounted.current &&
+      revisionAttemptMatches(
+        operation,
+        revisionOperationRef.current,
+        attempt,
+        contextGeneration.current,
+        revisionSendRequest.current,
+      )
+    );
+  }
+  async function revalidateRevisionSession(
+    operation: RevisionOperation,
+    attempt: RevisionAttempt,
+    requireCanCreate = true,
+  ) {
+    const session = importSessionFromResponse(
+      await api<unknown>('session', 'GET', undefined, {
+        timeoutMs: IMPORT_REQUEST_TIMEOUT_MS,
+      }),
+    );
+    if (!revisionAttemptIsCurrent(operation, attempt)) return false;
+    if (!revisionOperationMatchesIdentity(operation, session.viewer)) {
+      hideProtectedContent(
+        new ApiError(
+          403,
+          'A identidade ou o modo da sessão mudou durante a revisão.',
+        ),
+      );
+      activeViewerId.current = session.viewer.id;
+      activeViewerIsTest.current = Boolean(session.viewer.isTest);
+      setViewer(session.viewer);
+      setCanCreate(session.canCreate);
+      setNeedsLogin(false);
+      setError('');
+      setLoading(true);
+      void load();
+      return false;
+    }
+    activeViewerId.current = session.viewer.id;
+    activeViewerIsTest.current = Boolean(session.viewer.isTest);
+    setViewer(session.viewer);
+    setCanCreate(session.canCreate);
+    if (
+      !(requireCanCreate
+        ? revisionOperationMatchesContext(
+            operation,
+            activeDocumentId.current,
+            session.viewer,
+            session.canCreate,
+          )
+        : revisionOperationMatchesAccess(
+            operation,
+            activeDocumentId.current,
+            session.viewer,
+          ))
+    ) {
+      blockRevisionOperation(
+        'O plano ou a permissão mudou. Esta revisão não será enviada pela sessão atual.',
+      );
+      return false;
+    }
+    return true;
+  }
+  async function currentDocumentForRevision(
+    operation: RevisionOperation,
+    attempt: RevisionAttempt,
+  ) {
+    const response = await api<{ document: unknown }>(
+      `documents/${operation.documentId}`,
+      'GET',
+      undefined,
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
+    if (!revisionAttemptIsCurrent(operation, attempt)) return null;
+    const current = documentFromValue(response.document);
+    if (
+      current.id !== operation.documentId ||
+      current.owner_id !== operation.viewerId
+    )
+      throw new Error('O servidor retornou outro plano ao atualizar a revisão.');
+    activeDocumentId.current = current.id;
+    setDoc(current);
+    setIsOwner(true);
+    return current;
+  }
+  async function refreshDocumentAfterConfirmedRevision(
+    operation: RevisionOperation,
+    receipt: DocumentRevisionReceipt,
+    attempt: RevisionAttempt,
+  ) {
+    const response = await api<{ document: unknown }>(
+      `documents/${operation.documentId}`,
+      'GET',
+      undefined,
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
+    if (
+      !mounted.current ||
+      attempt.generation !== contextGeneration.current ||
+      attempt.request !== revisionSendRequest.current ||
+      activeDocumentId.current !== operation.documentId ||
+      activeViewerId.current !== operation.viewerId
+    )
+      return;
+    const current = documentFromValue(response.document);
+    if (
+      current.id !== operation.documentId ||
+      current.owner_id !== operation.viewerId
+    )
+      throw new Error('O servidor retornou outro plano ao atualizar a revisão.');
+    if (
+      current.revision_ordinal < receipt.ordinal ||
+      (current.revision_ordinal === receipt.ordinal &&
+        current.current_revision_id !== receipt.id)
+    )
+      throw new Error(
+        'A leitura atual ainda não alcançou a revisão confirmada. Tente atualizar novamente.',
+      );
+    setDoc(current);
+    setIsOwner(true);
+  }
+  function confirmRevisionOperation(
+    operation: RevisionOperation,
+    receipt: DocumentRevisionReceipt,
+  ) {
+    if (revisionOperationRef.current?.id !== operation.id) return;
+    storeRevisionOperation(null);
+    setConfirmedRevision(receipt);
+    if (
+      revisionDraftMatchesOperation(
+        operation,
+        revisionSummaryRef.current,
+        consideredCommentIdsRef.current,
+      )
+    ) {
+      revisionSummaryRef.current = '';
+      consideredCommentIdsRef.current = [];
+      setRevisionSummary('');
+      setConsideredCommentIds([]);
+    }
+    setNotice(`Revisão ${receipt.ordinal} confirmada.`);
+  }
+  async function handleRevisionFailure(
+    operation: RevisionOperation,
+    attempt: RevisionAttempt,
+    cause: unknown,
+  ) {
+    if (!revisionAttemptIsCurrent(operation, attempt)) return;
+    if (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) {
+      blockRevisionOperation(
+        'A sessão, a propriedade ou a permissão mudou. O arquivo foi preservado e não será reenviado automaticamente.',
+      );
+      if ([401, 403, 404].includes(cause.status)) hideProtectedContent(cause);
+      return;
+    }
+    const status =
+      cause instanceof ApiError && cause.code === 'revision_base_conflict'
+        ? 'conflict'
+        : cause instanceof ApiError && [400, 409, 413].includes(cause.status)
+          ? 'error'
+          : 'uncertain';
+    storeRevisionOperation(
+      updateRevisionOperation(
+        operation,
+        status,
+        status === 'uncertain'
+          ? `${errorText(cause)} O servidor pode ter recebido a revisão; verifique o recibo exato antes de reenviar.`
+          : errorText(cause),
+      ),
+    );
+  }
+  async function sendRevisionOperation(operation: RevisionOperation) {
+    if (
+      busy ||
+      !revisionOperationRef.current ||
+      revisionOperationRef.current.id !== operation.id
+    )
+      return;
+    const attempt = {
+      generation: contextGeneration.current,
+      request: ++revisionSendRequest.current,
+    };
+    storeRevisionOperation(updateRevisionOperation(operation, 'sending', ''));
+    setBusy('revision');
+    setError('');
+    setConfirmedRevision(null);
+    try {
+      if (!(await revalidateRevisionSession(operation, attempt))) return;
+      const result = await api<unknown>(
+        `documents/${operation.documentId}/revisions`,
+        'POST',
+        revisionOperationRequest(operation),
+        { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+      );
+      if (!revisionAttemptIsCurrent(operation, attempt)) return;
+      const receipt = revisionFromOperationResponse(result, operation);
+      if (!revisionAttemptIsCurrent(operation, attempt)) return;
+      confirmRevisionOperation(operation, receipt);
+      try {
+        await refreshDocumentAfterConfirmedRevision(operation, receipt, attempt);
+      } catch (refreshCause) {
+        if (
+          mounted.current &&
+          activeDocumentId.current === operation.documentId &&
+          activeViewerId.current === operation.viewerId
+        )
+          setNotice(
+            `A revisão ${receipt.ordinal} foi confirmada, mas não foi possível atualizar a leitura atual: ${errorText(refreshCause)}`,
+          );
+      }
+    } catch (cause) {
+      await handleRevisionFailure(operation, attempt, cause);
+    } finally {
+      if (mounted.current && attempt.request === revisionSendRequest.current)
+        setBusy((current) => (current === 'revision' ? '' : current));
+    }
+  }
+  async function verifyRevisionOperation(operation: RevisionOperation) {
+    if (
+      busy ||
+      !revisionOperationRef.current ||
+      revisionOperationRef.current.id !== operation.id
+    )
+      return;
+    const attempt = {
+      generation: contextGeneration.current,
+      request: ++revisionSendRequest.current,
+    };
+    storeRevisionOperation(
+      updateRevisionOperation(
+        operation,
+        'sending',
+        'Verificando o recibo exato desta revisão…',
+      ),
+    );
+    setBusy('revision-lookup');
+    try {
+      if (!(await revalidateRevisionSession(operation, attempt, false))) return;
+      const result = await api<unknown>(
+        `documents/${operation.documentId}/revisions/${operation.id}`,
+        'GET',
+        undefined,
+        { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+      );
+      if (!revisionAttemptIsCurrent(operation, attempt)) return;
+      const receipt = revisionFromOperationResponse(result, operation);
+      if (!revisionAttemptIsCurrent(operation, attempt)) return;
+      confirmRevisionOperation(operation, receipt);
+      try {
+        await refreshDocumentAfterConfirmedRevision(operation, receipt, attempt);
+      } catch (refreshCause) {
+        if (
+          mounted.current &&
+          activeDocumentId.current === operation.documentId &&
+          activeViewerId.current === operation.viewerId
+        )
+          setNotice(
+            `A revisão ${receipt.ordinal} foi confirmada, mas não foi possível atualizar a leitura atual: ${errorText(refreshCause)}`,
+          );
+      }
+    } catch (cause) {
+      if (
+        cause instanceof ApiError &&
+        cause.status === 404 &&
+        revisionAttemptIsCurrent(operation, attempt)
+      ) {
+        try {
+          if (!(await revalidateRevisionSession(operation, attempt, false))) return;
+          if (!(await currentDocumentForRevision(operation, attempt))) return;
+          if (!revisionAttemptIsCurrent(operation, attempt)) return;
+          storeRevisionOperation(
+            updateRevisionOperation(
+              operation,
+              'uncertain',
+              'Este recibo ainda não existe. Você pode reenviar exatamente a mesma tentativa ou verificar novamente.',
+            ),
+          );
+          return;
+        } catch (accessCause) {
+          await handleRevisionFailure(operation, attempt, accessCause);
+          return;
+        }
+      }
+      await handleRevisionFailure(operation, attempt, cause);
+    } finally {
+      if (mounted.current && attempt.request === revisionSendRequest.current)
+        setBusy((current) =>
+          current === 'revision-lookup' ? '' : current,
+        );
+    }
+  }
+  async function updateRevisionBase(operation: RevisionOperation) {
+    if (busy || revisionOperationRef.current?.id !== operation.id) return;
+    const attempt = {
+      generation: contextGeneration.current,
+      request: ++revisionSendRequest.current,
+    };
+    setBusy('revision-base');
+    try {
+      if (!(await revalidateRevisionSession(operation, attempt))) return;
+      const current = await currentDocumentForRevision(operation, attempt);
+      if (!current || !revisionAttemptIsCurrent(operation, attempt)) return;
+      const next = updateRevisionOperation(
+        revisionOperationWithBase(operation, current),
+        'error',
+        `Base atualizada para a revisão ${current.revision_ordinal}. Revise e publique a nova tentativa quando decidir.`,
+      );
+      revisionSendRequest.current += 1;
+      storeRevisionOperation(next);
+      setNotice('A base foi atualizada sem enviar outra revisão.');
+    } catch (cause) {
+      await handleRevisionFailure(operation, attempt, cause);
+    } finally {
+      if (mounted.current)
+        setBusy((current) => (current === 'revision-base' ? '' : current));
+    }
+  }
+  async function publishRevisionFile(file?: File) {
+    if (
+      !file ||
+      busy ||
+      revisionReadInProgress.current ||
+      revisionOperationRef.current
+    )
+      return;
+    const request = ++revisionReadRequest.current;
+    revisionReadInProgress.current = true;
+    const generation = contextGeneration.current;
+    const selectedDocument = doc;
+    const selectedViewer = viewer;
+    const selectedSummary = revisionSummaryRef.current;
+    const selectedComments = [...consideredCommentIdsRef.current];
+    if (revisionInput.current) revisionInput.current.value = '';
+    setConfirmedRevision(null);
+    setError('');
+    setBusy('revision');
+    try {
+      if (!selectedDocument || !selectedViewer || !isOwner || !canCreate)
+        throw new Error('Sua sessão não permite publicar revisões deste plano.');
+      if (!/\.(md|markdown)$/i.test(file.name))
+        throw new Error('Escolha um arquivo .md ou .markdown.');
+      if (file.size > 1024 * 1024)
+        throw new Error('O arquivo deve ter no máximo 1 MB.');
+      const markdown = await markdownFileText(file);
+      if (
+        !mounted.current ||
+        request !== revisionReadRequest.current ||
+        generation !== contextGeneration.current ||
+        activeDocumentId.current !== selectedDocument.id ||
+        activeViewerId.current !== selectedViewer.id
+      )
+        return;
+      if (!markdown.trim()) throw new Error('O arquivo está vazio.');
+      const operation = createRevisionOperation({
+        document: selectedDocument,
+        viewer: selectedViewer,
+        filename: file.name,
+        markdown,
+        summary: selectedSummary,
+        consideredCommentIds: selectedComments,
+      });
+      storeRevisionOperation(operation);
+      await sendRevisionOperation(operation);
+    } catch (cause) {
+      if (
+        mounted.current &&
+        request === revisionReadRequest.current &&
+        generation === contextGeneration.current
+      )
+        setError(errorText(cause));
+    } finally {
+      if (
+        mounted.current &&
+        request === revisionReadRequest.current &&
+        !revisionOperationRef.current
+      )
+        setBusy((current) => (current === 'revision' ? '' : current));
+      if (request === revisionReadRequest.current)
+        revisionReadInProgress.current = false;
+    }
+  }
+  function toggleConsideredComment(commentId: string) {
+    if (revisionOperationRef.current) return;
+    setConsideredCommentIds((current) => {
+      if (current.includes(commentId)) {
+        const next = current.filter((id) => id !== commentId);
+        consideredCommentIdsRef.current = next;
+        return next;
+      }
+      if (current.length >= 100) {
+        setNotice('Selecione no máximo 100 comentários considerados.');
+        return current;
+      }
+      const next = [...current, commentId].sort(compareText);
+      consideredCommentIdsRef.current = next;
+      return next;
+    });
   }
   const captureSelection = useCallback(() => {
     if (busy === 'comment' || composerIsReply) return;
@@ -2902,10 +3517,21 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     updateCommentDestination(true, null);
   }
   function showQuote(entry: CommentRow) {
-    if (entry.source_start === null) return;
+    if (!doc) return;
+    if (
+      entry.source_revision_id !== doc.current_revision_id ||
+      entry.source_start === null
+    ) {
+      void openOriginRevision(entry.source_revision_id);
+      return;
+    }
     const target = article.current?.querySelector(
       '[data-source-start="' + entry.source_start + '"]',
     );
+    if (!target || !target.textContent?.includes(entry.quote)) {
+      void openOriginRevision(entry.source_revision_id);
+      return;
+    }
     target?.scrollIntoView({
       behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
         ? 'instant'
@@ -2971,6 +3597,16 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         hidden
         disabled={!!busy || !!importOperation}
         onChange={(e) => void importFile(e.target.files?.[0])}
+      />
+      <input
+        ref={revisionInput}
+        type="file"
+        accept=".md,.markdown"
+        hidden
+        disabled={!!busy || !!revisionOperation}
+        onChange={(event) =>
+          void publishRevisionFile(event.target.files?.[0])
+        }
       />
       {error && (
         <div role="alert" className="error-banner">
@@ -3101,12 +3737,31 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           {confirmedImport && (
             <section className="confirmed-import" aria-live="polite">
               <div>
-                <strong>Importação confirmada</strong>
-                <p>{confirmedImport.filename}</p>
+                <strong>Importação inicial confirmada</strong>
+                <p>Recibo original: {confirmedImport.filename}</p>
               </div>
               {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation preserves the existing beforeunload protection. */}
               <a href={'/d/' + confirmedImport.id}>Abrir plano</a>
             </section>
+          )}
+          {confirmedImport?.collectionNotice && (
+            <output className="collection-refresh-note">
+              {confirmedImport.collectionNotice}
+            </output>
+          )}
+          {list.length === 0 && documentsPageError && (
+            <p role="alert" className="form-error">
+              {documentsPageError}{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setLoading(true);
+                  void load();
+                }}
+              >
+                Tentar atualizar novamente
+              </button>
+            </p>
           )}
           {list.length === 0 ? (
             <div className="empty-document">
@@ -3201,7 +3856,259 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   ? 'Acesso restrito'
                   : 'Pode comentar'}
             </span>
+            <span>Revisão {doc.revision_ordinal}</span>
           </div>
+          {isOwner && (canCreate || revisionOperation) && (
+            <section className="revision-publisher" aria-label="Publicar nova revisão">
+              <div className="revision-publisher-heading">
+                <div>
+                  <h2>Publicar nova revisão</h2>
+                  <p>
+                    Base: revisão {doc.revision_ordinal}. O arquivo escolhido será
+                    publicado como outro snapshot deste plano.
+                  </p>
+                </div>
+                {canCreate && (
+                  <Button
+                    type="button"
+                    disabled={!!busy || !!revisionOperation}
+                    onClick={() => revisionInput.current?.click()}
+                  >
+                    <Upload size={16} /> Escolher Markdown
+                  </Button>
+                )}
+              </div>
+              <label>
+                Resumo opcional
+                <textarea
+                  rows={2}
+                  maxLength={2000}
+                  value={revisionSummary}
+                  disabled={!!revisionOperation || busy === 'revision'}
+                  onChange={(event) => {
+                    revisionSummaryRef.current = event.target.value;
+                    setRevisionSummary(event.target.value);
+                  }}
+                  placeholder="O que mudou nesta revisão?"
+                />
+              </label>
+              <p>
+                {consideredCommentIds.length}{' '}
+                {consideredCommentIds.length === 1
+                  ? 'contribuição selecionada'
+                  : 'contribuições selecionadas'}{' '}
+                · máximo 100.
+              </p>
+              {revisionOperation && (
+                <div
+                  className={`revision-operation revision-operation-${revisionOperation.status}`}
+                  role={revisionOperation.status === 'sending' ? 'status' : 'alert'}
+                >
+                  <strong>
+                    {revisionOperation.status === 'sending'
+                      ? revisionOperation.message || 'Publicando revisão…'
+                      : revisionOperation.status === 'uncertain'
+                        ? 'Resultado ainda não confirmado'
+                        : revisionOperation.status === 'conflict'
+                          ? 'A base deste plano avançou'
+                          : revisionOperation.status === 'blocked'
+                            ? 'Retomada bloqueada nesta sessão'
+                            : 'Revise esta tentativa'}
+                  </strong>
+                  <p>
+                    {revisionOperation.filename} · base revisão{' '}
+                    {revisionOperation.baseOrdinal} ·{' '}
+                    {revisionOperation.consideredCommentIds.length} referências
+                  </p>
+                  {revisionOperation.message && <p>{revisionOperation.message}</p>}
+                  {revisionOperation.status === 'uncertain' && (
+                    <div className="revision-operation-actions">
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() =>
+                          void verifyRevisionOperation(revisionOperation)
+                        }
+                      >
+                        Verificar recibo exato
+                      </button>
+                      {canCreate && (
+                        <button
+                          type="button"
+                          disabled={!!busy}
+                          onClick={() =>
+                            void sendRevisionOperation(revisionOperation)
+                          }
+                        >
+                          Reenviar a mesma tentativa
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {revisionOperation.status === 'conflict' && (
+                    <div className="revision-operation-actions">
+                      {canCreate && (
+                        <button
+                          type="button"
+                          disabled={!!busy}
+                          onClick={() =>
+                            void updateRevisionBase(revisionOperation)
+                          }
+                        >
+                          <RefreshCcw size={14} /> Atualizar base
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() =>
+                          void verifyRevisionOperation(revisionOperation)
+                        }
+                      >
+                        Verificar esta tentativa
+                      </button>
+                    </div>
+                  )}
+                  {revisionOperation.status === 'error' && canCreate && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() => void sendRevisionOperation(revisionOperation)}
+                    >
+                      Publicar esta tentativa
+                    </button>
+                  )}
+                  {revisionOperation.status === 'blocked' && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() =>
+                        void verifyRevisionOperation(revisionOperation)
+                      }
+                    >
+                      Revalidar sessão e verificar
+                    </button>
+                  )}
+                  {revisionOperation.status !== 'sending' &&
+                    revisionOperation.status !== 'uncertain' && (
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() => {
+                          revisionSendRequest.current += 1;
+                          storeRevisionOperation(null);
+                          setNotice(
+                            'A tentativa foi encerrada; arquivo, resumo e referências podem ser escolhidos novamente.',
+                          );
+                        }}
+                      >
+                        Encerrar tentativa
+                      </button>
+                    )}
+                </div>
+              )}
+              {confirmedRevision && (
+                <div className="confirmed-revision" aria-live="polite">
+                  <strong>Revisão {confirmedRevision.ordinal} confirmada</strong>
+                  <p>{confirmedRevision.filename}</p>
+                  {confirmedRevision.summary && <p>{confirmedRevision.summary}</p>}
+                  {confirmedRevision.considered_comments.length > 0 && (
+                    <ul>
+                      {confirmedRevision.considered_comments.map((entry) => (
+                        <li key={entry.id}>
+                          <strong>{entry.author_name}</strong>: {entry.quote || entry.body}{' '}
+                          <button
+                            type="button"
+                            onClick={() => openCommentLink(entry.id)}
+                          >
+                            Abrir conversa
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+          {(originRevision || originRevisionLoading || originRevisionError) && (
+            <section className="origin-revision-panel" aria-label="Revisão de origem">
+              <div className="origin-revision-heading">
+                <div>
+                  <strong>
+                    {originRevision
+                      ? `Revisão de origem ${originRevision.ordinal}`
+                      : 'Revisão de origem'}
+                  </strong>
+                  <p>
+                    Snapshot somente leitura. A revisão atual continua sendo{' '}
+                    {doc.revision_ordinal}.
+                  </p>
+                </div>
+                <div className="origin-revision-actions">
+                  {originRevision && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void navigator.clipboard
+                          .writeText(originRevision.markdown)
+                          .then(() => setNotice('Markdown da origem copiado.'))
+                          .catch(() =>
+                            setNotice('Não foi possível copiar o Markdown da origem.'),
+                          )
+                      }
+                    >
+                      <Copy size={14} /> Copiar Markdown
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      originRevisionRequest.current += 1;
+                      setOriginRevision(null);
+                      setOriginRevisionLoading(false);
+                      setOriginRevisionError('');
+                    }}
+                  >
+                    Voltar à revisão atual
+                  </button>
+                </div>
+              </div>
+              {originRevisionLoading && <p>Carregando snapshot de origem…</p>}
+              {originRevisionError && <p role="alert">{originRevisionError}</p>}
+              {originRevision && (
+                <>
+                  <article className="markdown-document origin-markdown">
+                    <Markdown
+                      components={originMarkdownComponents}
+                      remarkPlugins={[remarkGfm]}
+                      skipHtml
+                    >
+                      {originRevision.markdown}
+                    </Markdown>
+                  </article>
+                  {originRevision.considered_comments.length > 0 && (
+                    <div className="origin-considered-comments">
+                      <strong>Contribuições declaradas nesta revisão</strong>
+                      <ul>
+                        {originRevision.considered_comments.map((entry) => (
+                          <li key={entry.id}>
+                            {entry.author_name}: {entry.quote || entry.body}{' '}
+                            <button
+                              type="button"
+                              onClick={() => openCommentLink(entry.id)}
+                            >
+                              Abrir conversa
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+          )}
           <div className="reading-layout">
             <article ref={article} className="markdown-document">
               {markdownAnalysis.references.length > 0 && (
@@ -3453,6 +4360,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                     Selecione um trecho ou comente sobre o documento.
                   </p>
                 )}
+                {draftSourceRevisionId.current &&
+                  draftSourceRevisionId.current !== doc.current_revision_id && (
+                    <p className="draft-revision-note">
+                      Esta redação começou em outra revisão e preservará essa
+                      origem ao ser enviada.
+                    </p>
+                  )}
                 <label className="sr-only" htmlFor="comment">
                   Seu comentário
                 </label>
@@ -3651,6 +4565,19 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         )}
                         <p>{root.body}</p>
                           <div className="comment-link-actions">
+                        {isOwner && canCreate && (
+                          <label className="considered-comment-toggle">
+                            <input
+                              type="checkbox"
+                              checked={consideredCommentIds.includes(root.id)}
+                              disabled={
+                                !!revisionOperation || busy === 'revision'
+                              }
+                              onChange={() => toggleConsideredComment(root.id)}
+                            />
+                            Considerar nesta revisão
+                          </label>
+                        )}
                         <button
                           type="button"
                           className="comment-reply"
@@ -3668,6 +4595,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         >
                           Responder
                         </button>
+                            <button
+                              type="button"
+                              className="comment-reply"
+                              onClick={() =>
+                                void openOriginRevision(root.source_revision_id)
+                              }
+                            >
+                              Ver revisão de origem
+                            </button>
                             <button
                               type="button"
                               className="comment-reply"
@@ -3789,6 +4725,32 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           </div>
                           <p>{entry.body}</p>
                             <div className="comment-link-actions">
+                              {isOwner && canCreate && (
+                                <label className="considered-comment-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={consideredCommentIds.includes(entry.id)}
+                                    disabled={
+                                      !!revisionOperation || busy === 'revision'
+                                    }
+                                    onChange={() =>
+                                      toggleConsideredComment(entry.id)
+                                    }
+                                  />
+                                  Considerar nesta revisão
+                                </label>
+                              )}
+                              <button
+                                type="button"
+                                className="comment-reply"
+                                onClick={() =>
+                                  void openOriginRevision(
+                                    entry.source_revision_id,
+                                  )
+                                }
+                              >
+                                Ver revisão de origem
+                              </button>
                               <button
                                 type="button"
                                 className="comment-reply"

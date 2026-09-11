@@ -36,11 +36,14 @@ function addSecondRevision(
   markdown = '# v2',
 ) {
   const revisionId = crypto.randomUUID();
+  const baseRevisionId = sqlite
+    .prepare('SELECT current_revision_id FROM documents WHERE id=?')
+    .get(documentId)?.current_revision_id as string;
   sqlite
     .prepare(
       `INSERT INTO document_revisions
-       (id,document_id,ordinal,author_id,title,filename,markdown,created_at)
-       VALUES(?,?,?,?,?,?,?,?)`,
+       (id,document_id,ordinal,author_id,title,filename,markdown,base_revision_id,created_at)
+       VALUES(?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       revisionId,
@@ -50,6 +53,7 @@ function addSecondRevision(
       'v2',
       'plano.md',
       markdown,
+      baseRevisionId,
       '2026-09-11T12:00:00.000Z',
     );
   sqlite
@@ -85,6 +89,10 @@ void test('criação manual e de teste persiste snapshot inicial exato e leitura
       title: document.title,
       filename: document.filename,
       markdown,
+      base_revision_id: null,
+      summary: null,
+      considered_comment_ids: [],
+      considered_comments: [],
       created_at: document.created_at,
     },
   );

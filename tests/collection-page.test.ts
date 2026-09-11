@@ -101,6 +101,54 @@ void test('mescla importação intercalada e páginas históricas sem duplicar o
   assert.equal(new Set(completed.map((entry) => entry.id)).size, 101);
 });
 
+void test('refresh corrente invalida página tardia e preserva cem cards e cursor da cauda', () => {
+  const loaded = Array.from({ length: 100 }, (_, index) =>
+    summary(
+      `document-${(100 - index).toString().padStart(3, '0')}`,
+      '2026-09-10T12:00:00.000Z',
+    ),
+  );
+  const refreshedFirstPage = loaded.slice(0, 50).map((entry, index) =>
+    index === 0
+      ? { ...entry, title: 'Plano v3', filename: 'plano-v3.md', comment_count: 7 }
+      : entry,
+  );
+  const pendingPage = { generation: 4, request: 7, context: 'owner:email' };
+  const refresh = { generation: 4, request: 8, context: 'owner:email' };
+  assert.equal(
+    collectionAttemptMatches(pendingPage, 4, refresh.request, refresh.context),
+    false,
+  );
+  assert.equal(
+    collectionAttemptMatches(refresh, 4, refresh.request, refresh.context),
+    true,
+  );
+  const merged = mergeDocumentPages(loaded, refreshedFirstPage);
+  assert.equal(merged.length, 100);
+  assert.equal(merged[0]?.title, 'Plano v3');
+  assert.equal(merged[0]?.comment_count, 7);
+});
+
+void test('janela fresca sem o head anterior reinicia na página e cursor do servidor', () => {
+  const loaded = [summary('document-old', '2026-09-10T12:00:00.000Z')];
+  const fresh = Array.from({ length: 50 }, (_, index) =>
+    summary(
+      `document-new-${(50 - index).toString().padStart(3, '0')}`,
+      '2026-09-11T12:00:00.000Z',
+    ),
+  );
+  const hasContinuousWindow = fresh.some(
+    (entry) => entry.id === loaded[0]?.id,
+  );
+  const visible = hasContinuousWindow
+    ? mergeDocumentPages(loaded, fresh)
+    : fresh;
+  const cursor = hasContinuousWindow ? null : 'server-next-page';
+  assert.equal(hasContinuousWindow, false);
+  assert.deepEqual(visible, fresh);
+  assert.equal(cursor, 'server-next-page');
+});
+
 void test('mutações alteram apenas o grant confirmado e preservam os demais carregados', () => {
   const old = share('old@example.com', '2026-09-10T11:00:00.000Z');
   const added = share('new@example.com', '2026-09-10T12:00:00.000Z');

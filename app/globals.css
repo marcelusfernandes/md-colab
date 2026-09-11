@@ -308,6 +308,7 @@ a:focus-visible {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   margin-bottom: 22px;
   font-size: 14px;
@@ -318,6 +319,114 @@ a:focus-visible {
   display: flex;
   gap: 7px;
   align-items: center;
+}
+.revision-publisher,
+.origin-revision-panel {
+  margin-bottom: 22px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+.revision-publisher-heading,
+.origin-revision-heading,
+.origin-revision-actions,
+.revision-operation-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.revision-publisher h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+.revision-publisher p,
+.origin-revision-panel p {
+  margin-top: 5px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.revision-publisher > label {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.revision-publisher textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-weight: 400;
+}
+.revision-operation,
+.confirmed-revision {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #d8a936;
+  border-radius: 8px;
+  background: #fff9e8;
+  color: #544519;
+}
+.revision-operation-sending {
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+.revision-operation-error,
+.revision-operation-blocked {
+  border-color: #e2aaa5;
+  background: #fff1ef;
+  color: #7e2822;
+}
+.revision-operation button,
+.confirmed-revision button,
+.origin-revision-panel button {
+  margin-top: 10px;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.revision-operation > button + button {
+  margin-left: 14px;
+}
+.confirmed-revision {
+  border-color: #9bc7ae;
+  background: #edf8f1;
+  color: #246347;
+}
+.confirmed-revision ul,
+.origin-considered-comments ul {
+  margin: 10px 0 0 20px;
+}
+.origin-revision-panel {
+  border-color: #9eb7d2;
+  background: #f2f7fc;
+}
+.origin-revision-actions {
+  justify-content: flex-end;
+}
+.origin-revision-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.origin-markdown {
+  min-height: 0;
+  margin-top: 16px;
+  background: var(--card);
+}
+.origin-considered-comments {
+  margin-top: 14px;
+  font-size: 14px;
 }
 .reading-layout {
   display: grid;
@@ -785,6 +894,13 @@ a:focus-visible {
   .comment-operation-actions {
     display: grid;
   }
+  .revision-publisher-heading,
+  .origin-revision-heading,
+  .origin-revision-actions,
+  .revision-operation-actions {
+    align-items: stretch;
+    display: grid;
+  }
   .preserved-comment {
     margin: -42px 12px 48px;
     padding: 16px;
@@ -873,6 +989,13 @@ a:focus-visible {
 .collection-pagination > .form-error {
   flex-basis: 100%;
   margin: 0;
+}
+.collection-refresh-note {
+  display: block;
+  margin: 14px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
 }
 .document-row {
   display: flex;
@@ -1006,6 +1129,22 @@ a:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 14px;
+}
+.considered-comment-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.considered-comment-toggle input {
+  width: 16px;
+  height: 16px;
+}
+.draft-revision-note {
+  margin: 8px 0;
+  color: #6b5313;
+  font-size: 13px;
 }
 .comment-author {
   display: flex;

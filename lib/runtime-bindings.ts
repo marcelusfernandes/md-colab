@@ -28,5 +28,7 @@ export function getRuntimeBindings(): Cloudflare.Env {
     MAX_ACTIVE_SHARES_PER_DOCUMENT:
       env.MAX_ACTIVE_SHARES_PER_DOCUMENT ??
       process.env.MAX_ACTIVE_SHARES_PER_DOCUMENT,
+    MAX_REVISIONS_PER_DOCUMENT:
+      env.MAX_REVISIONS_PER_DOCUMENT ?? process.env.MAX_REVISIONS_PER_DOCUMENT,
   };
 }

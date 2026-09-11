@@ -5,6 +5,7 @@ import {
   primaryKey,
   index,
   uniqueIndex,
+  type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
@@ -43,6 +44,11 @@ export const documentRevisions = sqliteTable(
     title: text('title').notNull(),
     filename: text('filename').notNull(),
     markdown: text('markdown').notNull(),
+    baseRevisionId: text('base_revision_id').references(
+      (): AnySQLiteColumn => documentRevisions.id,
+    ),
+    summary: text('summary'),
+    consideredCommentIds: text('considered_comment_ids').notNull().default('[]'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [

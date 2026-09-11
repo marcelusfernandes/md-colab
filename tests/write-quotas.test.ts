@@ -7,6 +7,7 @@ import {
   commentLimit,
   DEFAULT_WRITE_QUOTAS,
   ownedDocumentLimit,
+  revisionLimit,
   WriteQuotaError,
   type WriteQuotaEnvironment,
 } from '../lib/write-quotas.ts';
@@ -35,7 +36,9 @@ void test('limites padrão e configuração exigem inteiro decimal positivo segu
     activeShareLimit({}),
     DEFAULT_WRITE_QUOTAS.activeSharesPerDocument,
   );
+  assert.equal(revisionLimit({}), DEFAULT_WRITE_QUOTAS.revisionsPerDocument);
   assert.equal(ownedDocumentLimit({ MAX_OWNED_DOCUMENTS: '250' }), 250);
+  assert.equal(revisionLimit({ MAX_REVISIONS_PER_DOCUMENT: '12' }), 12);
   for (const value of ['', '0', '-1', '1.5', ' 2', '02', '9007199254740992'])
     assert.throws(
       () => ownedDocumentLimit({ MAX_OWNED_DOCUMENTS: value }),

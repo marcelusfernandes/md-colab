@@ -16,6 +16,7 @@ declare namespace Cloudflare {
     MAX_OWNED_DOCUMENTS?: string;
     MAX_COMMENTS_PER_DOCUMENT?: string;
     MAX_ACTIVE_SHARES_PER_DOCUMENT?: string;
+    MAX_REVISIONS_PER_DOCUMENT?: string;
   }
 }
 

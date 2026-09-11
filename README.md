@@ -96,6 +96,8 @@ restore sanitizado, permissões e proxy confiável, siga o
 - `MAX_COMMENTS_PER_DOCUMENT`: total de comentários por plano; padrão `500`.
 - `MAX_ACTIVE_SHARES_PER_DOCUMENT`: total de convidados ativos por plano;
   padrão `100`.
+- `MAX_REVISIONS_PER_DOCUMENT`: total de revisões por plano, incluindo a
+  inicial; padrão `100`.
 - `RESEND_API_KEY`: chave do serviço de envio.
 - `MAIL_FROM`: endereço remetente em domínio verificado no serviço.
 - `NOTIFICATION_DRAIN_LIMIT`: máximo de entregas examinadas por ciclo; padrão `10`.
@@ -145,8 +147,13 @@ desse nível.
 
 Cada plano tem um snapshot inicial imutável, e `source_revision_id` preserva a
 revisão vista por cada raiz e suas respostas. A API autoriza a leitura de uma
-revisão pelo plano. Publicar uma nova revisão e expor histórico ou diff ficam
-para as próximas fatias de #5; o envelope legado de publicação continua igual.
+revisão pelo plano. O autor pode escolher outro arquivo Markdown, registrar um
+resumo e indicar raízes ou respostas consideradas para publicar uma revisão
+sobre a base que viu. Conflitos preservam a tentativa e exigem atualizar a base
+e publicar de novo explicitamente; um UUID identifica o recibo exato. Críticas
+antigas abrem o snapshot de origem em um painel somente leitura. Histórico e
+diff entre revisões, links próprios de revisão e novos avisos ficam para as
+próximas fatias de #5; o envelope legado de publicação continua igual.
 
 O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
 conversa idênticos. A listagem continua paginada pela sequência persistida; quando
@@ -157,7 +164,7 @@ o texto; mudar de documento ou de sessão descarta esse vínculo local.
 
 ### Cotas totais do piloto
 
-As três cotas são tetos totais, não limites por intervalo de tempo. Importações
+As quatro cotas são tetos totais, não limites por intervalo de tempo. Importações
 manuais e publicações por API ou CLI contam juntas em `MAX_OWNED_DOCUMENTS`.
 Quando o teto é alcançado, uma nova escrita retorna `409` com o código estável
 `quota_exceeded`; não há `Retry-After`, repetição automática nem liberação por
