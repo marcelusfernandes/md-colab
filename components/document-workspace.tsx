@@ -3723,7 +3723,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           )}
           {viewer && (
             <>
-              {!viewer.isTest && <PublishingTokens canCreate={canCreate} />}
+              {!viewer.isTest && (
+                <PublishingTokens
+                  key={viewer.id}
+                  canCreate={canCreate}
+                  viewerId={viewer.id}
+                />
+              )}
               <span className="viewer-name">{viewer.name}</span>
               <button
                 type="button"

@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 13);
+  assert.equal(first.applied.length, 14);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    13,
+    14,
   );
   restarted.sqlite.close();
 
@@ -451,6 +451,16 @@ void test('restore is isolated and invalidates snapshot access artifacts', async
       .get()?.revoked_at,
     42,
   );
+  assert.deepEqual(
+    {
+      ...(restored.sqlite
+        .prepare(
+          "SELECT scope,document_id FROM publishing_tokens WHERE id='credential'",
+        )
+        .get() as Record<string, unknown>),
+    },
+    { scope: 'publish', document_id: null },
+  );
   assert.equal(
     restored.sqlite.prepare('SELECT count(*) AS count FROM publications').get()
       ?.count,
@@ -500,6 +510,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0010_serious_dazzler',
     '0011_tiny_valeria_richards',
     '0012_previous_lifeguard',
+    '0013_tiny_daredevil',
   ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
@@ -524,6 +535,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0010_serious_dazzler',
     '0011_tiny_valeria_richards',
     '0012_previous_lifeguard',
+    '0013_tiny_daredevil',
   ]);
   assert.throws(
     () => openPersistentD1(restorePath),
@@ -548,6 +560,16 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     42,
   );
   migrateNodeDatabase(restored.sqlite);
+  assert.deepEqual(
+    {
+      ...(restored.sqlite
+        .prepare(
+          "SELECT scope,document_id FROM publishing_tokens WHERE id='credential'",
+        )
+        .get() as Record<string, unknown>),
+    },
+    { scope: 'publish', document_id: null },
+  );
   restored.sqlite.close();
 
   const ready = openPersistentD1(restorePath);

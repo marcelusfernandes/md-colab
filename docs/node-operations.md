@@ -99,7 +99,7 @@ npm run db:node -- restore \
 
 O destino restaurado é sanitizado antes de ser disponibilizado: remove todos os
 convites, sessões, magic links e limites de autenticação, e revoga todas as
-credenciais de publicação ainda ativas. Os registros de credencial permanecem
+credenciais de API ainda ativas. Os registros de credencial permanecem
 para conservar referências de publicações. Documentos, comentários, contas,
 publicações e a cadeia da outbox são preservados. Isso inclui eventos imutáveis,
 gerações e reconciliações, estados de entrega, attempts, incerteza, leases,
