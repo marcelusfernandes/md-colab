@@ -873,8 +873,32 @@ export class DocumentService {
           : filter === 'unanswered'
             ? 'AND NOT EXISTS(SELECT 1 FROM comments reply WHERE reply.document_id=c.document_id AND COALESCE(reply.root_id,reply.id)=c.id AND reply.id<>c.id)'
             : '';
-    const rows = (
-      await this.db
+    const rootSelection = `FROM comments c JOIN users u ON u.id=c.author_id
+       LEFT JOIN conversation_events e ON e.sequence=(
+         SELECT latest.sequence FROM conversation_events latest
+         WHERE latest.document_id=c.document_id AND latest.root_id=c.id
+         ORDER BY latest.version DESC LIMIT 1
+       )
+       WHERE c.document_id=? AND COALESCE(c.root_id,c.id)=c.id
+         ${boundary === null ? '' : 'AND c.sequence<?'}
+         ${filterSql}
+       ORDER BY c.sequence DESC LIMIT ?`;
+    const rootBindings = [
+      id,
+      ...(boundary === null ? [] : [boundary]),
+      conversationPageSize + 1,
+    ];
+    const replyBindings = [
+      id,
+      ...(boundary === null ? [] : [boundary]),
+      conversationPageSize,
+      id,
+      conversationReplyPreviewSize + 1,
+    ];
+    // Both result sets share one D1 batch snapshot. A reply cannot appear in
+    // the preview without also being reflected in reply_count.
+    const [rootResult, replyResult] = await this.db.batch([
+      this.db
         .prepare(
           `SELECT ${publicCommentFields},c.sequence AS transport_sequence,
              COALESCE(e.state,'open') AS state,e.decision,e.decision_reason,
@@ -883,48 +907,33 @@ export class DocumentService {
               WHERE reply.document_id=c.document_id
                 AND COALESCE(reply.root_id,reply.id)=c.id
                 AND reply.id<>c.id) AS reply_count
-           FROM comments c JOIN users u ON u.id=c.author_id
-           LEFT JOIN conversation_events e ON e.sequence=(
-             SELECT latest.sequence FROM conversation_events latest
-             WHERE latest.document_id=c.document_id AND latest.root_id=c.id
-             ORDER BY latest.version DESC LIMIT 1
+           ${rootSelection}`,
+        )
+        .bind(...rootBindings),
+      this.db
+        .prepare(
+          `WITH root_page AS (
+             SELECT c.id ${rootSelection}
+           ), ranked AS (
+             SELECT ${publicCommentFields},c.sequence AS transport_sequence,
+               ROW_NUMBER() OVER (PARTITION BY c.root_id ORDER BY c.sequence DESC) AS rank
+             FROM comments c JOIN users u ON u.id=c.author_id
+             JOIN root_page roots ON roots.id=c.root_id
+             WHERE c.document_id=? AND c.id<>c.root_id
            )
-           WHERE c.document_id=? AND COALESCE(c.root_id,c.id)=c.id
-             ${boundary === null ? '' : 'AND c.sequence<?'}
-             ${filterSql}
-           ORDER BY c.sequence DESC LIMIT ?`,
+           SELECT * FROM ranked WHERE rank<=? ORDER BY transport_sequence DESC`,
         )
-        .bind(
-          id,
-          ...(boundary === null ? [] : [boundary]),
-          conversationPageSize + 1,
-        )
-        .all<ConversationRootRow>()
-    ).results;
+        .bind(...replyBindings),
+    ]);
+    const rows = rootResult.results as ConversationRootRow[];
     const page = rows.slice(0, conversationPageSize);
-    const rootIds = page.map((row) => row.id);
     const repliesByRoot = new Map<string, SequencedCommentRow[]>();
-    if (rootIds.length > 0) {
-      const placeholders = rootIds.map(() => '?').join(',');
-      const replies = (
-        await this.db
-          .prepare(
-            `WITH ranked AS (
-               SELECT ${publicCommentFields},c.sequence AS transport_sequence,
-                 ROW_NUMBER() OVER (PARTITION BY c.root_id ORDER BY c.sequence DESC) AS rank
-               FROM comments c JOIN users u ON u.id=c.author_id
-               WHERE c.document_id=? AND c.root_id IN (${placeholders}) AND c.id<>c.root_id
-             )
-             SELECT * FROM ranked WHERE rank<=? ORDER BY transport_sequence DESC`,
-          )
-          .bind(id, ...rootIds, conversationReplyPreviewSize + 1)
-          .all<SequencedCommentRow & { rank: number }>()
-      ).results;
-      for (const reply of replies) {
-        const entries = repliesByRoot.get(reply.root_id) ?? [];
-        entries.push(reply);
-        repliesByRoot.set(reply.root_id, entries);
-      }
+    for (const reply of replyResult.results as Array<
+      SequencedCommentRow & { rank: number }
+    >) {
+      const entries = repliesByRoot.get(reply.root_id) ?? [];
+      entries.push(reply);
+      repliesByRoot.set(reply.root_id, entries);
     }
     const conversations = page.map((row) => {
       const {
@@ -1171,7 +1180,7 @@ export class DocumentService {
       ? action
       : null;
     const now = new Date().toISOString();
-    await this.db
+    const insertion = await this.db
       .prepare(
         `INSERT INTO conversation_events (
            id,document_id,root_id,actor_id,base_version,version,action,state,
@@ -1220,7 +1229,21 @@ export class DocumentService {
         409,
         'A conversa mudou desde a sua leitura. Seu motivo foi preservado para revisão.',
       );
-    return { event: inserted, replayed: false };
+    if (
+      inserted.root_id !== rootId ||
+      inserted.actor_id !== actorId ||
+      inserted.base_version !== baseVersion ||
+      inserted.action !== action ||
+      inserted.reason !== reason
+    )
+      throw new HttpError(
+        409,
+        'Esta alteração já foi usada em outra conversa ou com outro conteúdo.',
+      );
+    return {
+      event: inserted,
+      replayed: Number(insertion.meta.changes ?? 0) === 0,
+    };
   }
 
   async comment(id: string, commentId: string) {

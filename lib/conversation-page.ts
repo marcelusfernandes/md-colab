@@ -6,6 +6,37 @@ import type {
 } from './document-service.ts';
 import { commentFromValue, mergeComments } from './comment-page.ts';
 
+type MutableRef<T> = { current: T };
+
+export function invalidateConversationLifecycle(
+  generation: MutableRef<number>,
+  pageRequest: MutableRef<number>,
+  changeRequest: MutableRef<number>,
+  changeInProgress: MutableRef<boolean>,
+) {
+  generation.current += 1;
+  pageRequest.current += 1;
+  changeRequest.current += 1;
+  changeInProgress.current = false;
+}
+
+export function changeCursorAfterPoll(input: {
+  initial: string;
+  next: string;
+  changed: boolean;
+  reloaded: boolean;
+}) {
+  return input.changed && !input.reloaded ? input.initial : input.next;
+}
+
+export function conversationHistoryAttemptMatches(
+  attempt: { documentId: string; rootId: string; request: number },
+  documentId: string | null | undefined,
+  request: number | undefined,
+) {
+  return attempt.documentId === documentId && attempt.request === request;
+}
+
 function cursor(value: unknown, nullable = false) {
   return (
     (nullable && value === null) ||

@@ -1,6 +1,7 @@
 import type {
   ConversationEventAction,
   ConversationEventRow,
+  ConversationRow,
 } from './document-service.ts';
 import { conversationEventFromValue } from './conversation-page.ts';
 
@@ -16,6 +17,20 @@ export type ConversationOperation = Readonly<{
   status: ConversationOperationStatus;
   message: string;
 }>;
+
+export type ConversationDraft = Readonly<{
+  action: ConversationEventAction;
+  reason: string;
+  baseVersion: number;
+}>;
+
+export function createConversationDraft(conversation: ConversationRow) {
+  return Object.freeze({
+    action: conversation.decision ?? ('follow' as const),
+    reason: conversation.decisionReason ?? '',
+    baseVersion: conversation.version,
+  });
+}
 
 export function createConversationOperation(input: {
   documentId: string;

@@ -134,6 +134,29 @@ function pauseConcurrentConversationInserts(db: D1Database) {
   return { controlled, arrivals: () => arrivals };
 }
 
+function insertReplyBeforeLegacyConversationPreview(
+  db: D1Database,
+  insertReply: () => void,
+) {
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.trimStart().startsWith('WITH ranked AS')) return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async all() {
+            insertReply();
+            return bound.all();
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return controlled;
+}
+
 function pauseAfterCommentInsert(db: D1Database) {
   let inserted!: () => void;
   let resume!: () => void;
@@ -1556,6 +1579,63 @@ void test('duas transições na mesma versão não sobrescrevem estado ou decis�
   }
 });
 
+void test('duas transições divergentes com o mesmo UUID não confirmam o conteúdo vencedor', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# UUID concorrente',
+      filename: 'uuid-concorrente.md',
+    });
+    const root = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Raiz.',
+    });
+    const schedule = pauseConcurrentConversationInserts(db);
+    const concurrent = new DocumentService(schedule.controlled, {
+      ...owner.viewer,
+    });
+    const id = crypto.randomUUID();
+    const results = await Promise.allSettled([
+      concurrent.addConversationEvent(document.id, root.id, {
+        id,
+        authorId: owner.viewer.id,
+        baseVersion: 0,
+        action: 'follow',
+        reason: 'Seguir.',
+      }),
+      concurrent.addConversationEvent(document.id, root.id, {
+        id,
+        authorId: owner.viewer.id,
+        baseVersion: 0,
+        action: 'refute',
+        reason: 'Refutar.',
+      }),
+    ]);
+    assert.equal(schedule.arrivals(), 2);
+    assert.equal(
+      results.filter((result) => result.status === 'fulfilled').length,
+      1,
+    );
+    assert.ok(
+      results.some(
+        (result) =>
+          result.status === 'rejected' &&
+          result.reason instanceof HttpError &&
+          result.reason.status === 409,
+      ),
+    );
+    assert.equal(
+      sqlite.prepare('SELECT count(*) AS count FROM conversation_events').get()
+        ?.count,
+      1,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
 void test('conversas e respostas usam páginas limitadas com cursores vinculados ao filtro e à raiz', async () => {
   const { sqlite, owner } = fixture();
   try {
@@ -1615,6 +1695,45 @@ void test('conversas e respostas usam páginas limitadas com cursores vinculados
       }),
       (error) => error instanceof HttpError && error.status === 400,
     );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('contagem e preview de respostas vêm do mesmo snapshot', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Snapshot',
+      filename: 'snapshot.md',
+    });
+    const root = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Raiz.',
+    });
+    const controlled = insertReplyBeforeLegacyConversationPreview(db, () => {
+      sqlite
+        .prepare(
+          `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,root_id,created_at)
+           VALUES(?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          crypto.randomUUID(),
+          document.id,
+          owner.viewer.id,
+          'Resposta concorrente.',
+          '',
+          null,
+          root.id,
+          new Date().toISOString(),
+        );
+    });
+    const page = await new DocumentService(controlled, {
+      ...owner.viewer,
+    }).conversations(document.id);
+    assert.equal(page.conversations[0]?.replyCount, page.conversations[0]?.replies.length);
   } finally {
     sqlite.close();
   }

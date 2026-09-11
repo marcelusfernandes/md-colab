@@ -4,9 +4,11 @@ import {
   conversationEventFromResponse,
   conversationOperationMatches,
   conversationOperationRequest,
+  createConversationDraft,
   createConversationOperation,
   updateConversationOperation,
 } from '../lib/conversation-operation.ts';
+import type { ConversationRow } from '../lib/document-service.ts';
 
 void test('operação congela raiz, ação, motivo e versão para replay consciente', () => {
   const operation = createConversationOperation({
@@ -61,4 +63,17 @@ void test('confirmação exige UUID, raiz, ator, versão, ação e motivo exatos
     () => conversationEventFromResponse({ event: { ...event, reason: 'Outro' } }, operation),
     /não confirmou/,
   );
+});
+
+void test('rascunho mantém a versão vista quando o cartão recebe estado mais novo', () => {
+  const conversation = {
+    decision: null,
+    decisionReason: null,
+    version: 0,
+  } as ConversationRow;
+  const draft = createConversationDraft(conversation);
+  const refreshed = { ...conversation, decision: 'refute', version: 1 } as ConversationRow;
+  assert.equal(createConversationDraft(refreshed).baseVersion, 1);
+  assert.equal(draft.baseVersion, 0);
+  assert.equal(Object.isFrozen(draft), true);
 });

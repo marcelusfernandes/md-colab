@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  changeCursorAfterPoll,
   conversationChangesFromResponse,
+  conversationHistoryAttemptMatches,
   conversationPageFromResponse,
   conversationRepliesFromResponse,
+  invalidateConversationLifecycle,
 } from '../lib/conversation-page.ts';
 
 const root = {
@@ -76,5 +79,52 @@ void test('respostas paginadas permanecem vinculadas à raiz pedida', () => {
       { replies: [{ ...reply, root_id: reply.id }], nextCursor: null },
       root.id,
     ),
+  );
+});
+
+void test('invalidação libera o poll e respostas tardias não assumem o novo contexto', () => {
+  const generation = { current: 3 };
+  const pageRequest = { current: 7 };
+  const changeRequest = { current: 11 };
+  const inProgress = { current: true };
+  invalidateConversationLifecycle(
+    generation,
+    pageRequest,
+    changeRequest,
+    inProgress,
+  );
+  assert.deepEqual(
+    [generation.current, pageRequest.current, changeRequest.current, inProgress.current],
+    [4, 8, 12, false],
+  );
+  const historyAttempt = { documentId: 'document-a', rootId: root.id, request: 2 };
+  assert.equal(
+    conversationHistoryAttemptMatches(historyAttempt, 'document-a', 3),
+    false,
+  );
+  assert.equal(
+    conversationHistoryAttemptMatches(historyAttempt, 'document-b', 2),
+    false,
+  );
+});
+
+void test('poll só consome mudança depois de recarregar o estado observado', () => {
+  assert.equal(
+    changeCursorAfterPoll({
+      initial: 'cursor-antigo',
+      next: 'cursor-novo',
+      changed: true,
+      reloaded: false,
+    }),
+    'cursor-antigo',
+  );
+  assert.equal(
+    changeCursorAfterPoll({
+      initial: 'cursor-antigo',
+      next: 'cursor-novo',
+      changed: false,
+      reloaded: false,
+    }),
+    'cursor-novo',
   );
 });

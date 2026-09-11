@@ -77,16 +77,20 @@ import {
 import { commentPageFromResponse, mergeComments } from '@/lib/comment-page';
 import {
   conversationChangesFromResponse,
+  changeCursorAfterPoll,
   conversationEventsFromResponse,
   conversationFilters,
+  conversationHistoryAttemptMatches,
   conversationPageFromResponse,
   conversationRepliesFromResponse,
+  invalidateConversationLifecycle,
   mergeConversationReplies,
 } from '@/lib/conversation-page';
 import {
   conversationEventFromResponse,
   conversationOperationMatches,
   conversationOperationRequest,
+  createConversationDraft,
   createConversationOperation,
   updateConversationOperation,
   type ConversationOperation,
@@ -229,12 +233,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const sharesNextCursor = useRef<string | null>(null);
   const sharesMutationRequest = useRef(0);
   const refreshCommentsRef = useRef<(() => Promise<void>) | null>(null);
-  const refreshConversationsRef = useRef<(() => Promise<void>) | null>(null);
+  const refreshConversationsRef = useRef<(() => Promise<boolean>) | null>(null);
   const conversationOperationRef = useRef<ConversationOperation | null>(null);
   const conversationGeneration = useRef(0);
   const conversationRequest = useRef(0);
   const conversationChangeRequest = useRef(0);
   const conversationChangeInProgress = useRef(false);
+  const conversationHistoryRequests = useRef(new Map<string, number>());
   const conversationsNextCursor = useRef<string | null>(null);
   const conversationsChangeCursor = useRef<string | null>(null);
   const activeConversationFilter = useRef<ConversationFilter>('all');
@@ -282,12 +287,16 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [conversationFilter, setConversationFilter] =
     useState<ConversationFilter>('all');
   const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [conversationsLoaded, setConversationsLoaded] = useState(false);
   const [conversationsLoadingMore, setConversationsLoadingMore] = useState(false);
   const [conversationsError, setConversationsError] = useState('');
   const [conversationOperation, setConversationOperation] =
     useState<ConversationOperation | null>(null);
   const [conversationDrafts, setConversationDrafts] = useState<
-    Record<string, { action: ConversationEventAction; reason: string }>
+    Record<
+      string,
+      { action: ConversationEventAction; reason: string; baseVersion: number }
+    >
   >({});
   const [conversationHistories, setConversationHistories] = useState<
     Record<
@@ -408,12 +417,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     (operation: CommentOperation, confirmed: CommentRow) => {
       if (commentOperationRef.current?.id !== operation.id) return;
       commentSendRequest.current += 1;
-      conversationGeneration.current += 1;
-      conversationRequest.current += 1;
-      conversationChangeRequest.current += 1;
-      conversationChangeInProgress.current = false;
+      invalidateConversationLifecycle(
+        conversationGeneration,
+        conversationRequest,
+        conversationChangeRequest,
+        conversationChangeInProgress,
+      );
       conversationsNextCursor.current = null;
       conversationsChangeCursor.current = null;
+      setConversationsLoaded(false);
       setBusy((current) =>
         current === 'comment' || current === 'comment-lookup' ? '' : current,
       );
@@ -436,6 +448,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const hideProtectedContent = useCallback(
     (cause: ApiError) => {
       contextGeneration.current += 1;
+      invalidateConversationLifecycle(
+        conversationGeneration,
+        conversationRequest,
+        conversationChangeRequest,
+        conversationChangeInProgress,
+      );
       clearShareContext();
       setShareOpen(false);
       commentsRequest.current += 1;
@@ -462,9 +480,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setCommentsHistoryError('');
       setConversationRows([]);
       setConversationsLoading(false);
+      setConversationsLoaded(false);
       setConversationsLoadingMore(false);
       setConversationsError('');
       setConversationHistories({});
+      conversationHistoryRequests.current.clear();
       const conversationAttempt = conversationOperationRef.current;
       if (conversationAttempt)
         storeConversationOperation(
@@ -626,9 +646,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           );
         }
         contextGeneration.current += 1;
-        conversationGeneration.current += 1;
-        conversationRequest.current += 1;
-        conversationChangeRequest.current += 1;
+        invalidateConversationLifecycle(
+          conversationGeneration,
+          conversationRequest,
+          conversationChangeRequest,
+          conversationChangeInProgress,
+        );
         commentsRequest.current += 1;
         commentsHistoryRequest.current += 1;
         commentsRefreshInProgress.current = false;
@@ -642,9 +665,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         conversationsNextCursor.current = conversationPage.nextCursor;
         conversationsChangeCursor.current = conversationPage.changeCursor;
         setConversationsLoading(false);
+        setConversationsLoaded(true);
         setConversationsLoadingMore(false);
         setConversationsError('');
         setConversationHistories({});
+        conversationHistoryRequests.current.clear();
         const commentPage = commentPageFromResponse(result);
         commentsNextCursor.current = commentPage.pagination.nextCursor;
         commentsOlderCursor.current = commentPage.pagination.olderCursor;
@@ -913,13 +938,16 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   }
   const loadConversationPage = useCallback(
     async (filter: ConversationFilter, append = false) => {
-      if (!doc || !viewer) return;
+      if (!doc || !viewer) return false;
       const cursor = append ? conversationsNextCursor.current : null;
-      if (append && !cursor) return;
+      if (append && !cursor) return false;
       const generation = conversationGeneration.current;
       const request = ++conversationRequest.current;
       if (append) setConversationsLoadingMore(true);
-      else setConversationsLoading(true);
+      else {
+        setConversationsLoading(true);
+        setConversationsLoaded(false);
+      }
       setConversationsError('');
       try {
         const parameters = new URLSearchParams({ filter });
@@ -940,7 +968,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           activeDocumentId.current !== doc.id ||
           activeViewerId.current !== viewer.id
         )
-          return;
+          return false;
         setConversationRows((current) =>
           append
             ? [
@@ -957,17 +985,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         // An older-page snapshot must not advance the live watermark: changes
         // to already loaded roots still need to be observed by the poller.
         if (!append) conversationsChangeCursor.current = page.changeCursor;
+        if (!append) setConversationsLoaded(true);
         setConversationsError('');
+        return true;
       } catch (cause) {
         if (
           !mounted.current ||
           generation !== conversationGeneration.current ||
           request !== conversationRequest.current
         )
-          return;
+          return false;
         if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
           hideProtectedContent(cause);
         else setConversationsError(errorText(cause));
+        return false;
       } finally {
         if (
           mounted.current &&
@@ -985,15 +1016,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const chooseConversationFilter = useCallback(
     (filter: ConversationFilter) => {
       if (filter === activeConversationFilter.current) return;
-      conversationGeneration.current += 1;
-      conversationRequest.current += 1;
-      conversationChangeRequest.current += 1;
+      invalidateConversationLifecycle(
+        conversationGeneration,
+        conversationRequest,
+        conversationChangeRequest,
+        conversationChangeInProgress,
+      );
       conversationsNextCursor.current = null;
       conversationsChangeCursor.current = null;
       activeConversationFilter.current = filter;
       setConversationFilter(filter);
       setConversationRows([]);
+      setConversationsLoaded(false);
       setConversationHistories({});
+      conversationHistoryRequests.current.clear();
       setConversationsError('');
       void loadConversationPage(filter);
     },
@@ -1038,11 +1074,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             throw new Error('O servidor retornou um feed de conversas inválido.');
           changed ||= changes.rootIds.length > 0;
           cursor = changes.nextCursor;
-          conversationsChangeCursor.current = cursor;
           if (!changes.hasMore) break;
         }
+        let reloaded = false;
         if (changed)
-          await loadConversationPage(activeConversationFilter.current);
+          reloaded = await loadConversationPage(
+            activeConversationFilter.current,
+          );
+        if (!changed || !reloaded)
+          conversationsChangeCursor.current = changeCursorAfterPoll({
+            initial: initialCursor,
+            next: cursor,
+            changed,
+            reloaded,
+          });
       } catch (cause) {
         if (
           !active ||
@@ -1065,12 +1110,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           conversationChangeInProgress.current = false;
       }
     };
-    refreshConversationsRef.current = poll;
+    const refresh = () => loadConversationPage(activeConversationFilter.current);
+    refreshConversationsRef.current = refresh;
     const timer = window.setInterval(() => void poll(), 15_000);
     window.addEventListener('focus', poll);
     return () => {
       active = false;
-      if (refreshConversationsRef.current === poll)
+      if (refreshConversationsRef.current === refresh)
         refreshConversationsRef.current = null;
       window.clearInterval(timer);
       window.removeEventListener('focus', poll);
@@ -1867,6 +1913,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         return;
       const confirmed = conversationEventFromResponse(result, operation);
       applyConversationEvent(confirmed);
+      conversationHistoryRequests.current.set(
+        operation.rootId,
+        (conversationHistoryRequests.current.get(operation.rootId) ?? 0) + 1,
+      );
       setConversationHistories((current) => {
         const history = current[operation.rootId];
         if (!history) return current;
@@ -1874,6 +1924,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           ...current,
           [operation.rootId]: {
             ...history,
+            loading: false,
+            error: '',
             events: [
               confirmed,
               ...history.events.filter((event) => event.id !== confirmed.id),
@@ -1882,6 +1934,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         };
       });
       storeConversationOperation(null);
+      if (['follow', 'refute', 'defer'].includes(operation.action))
+        setConversationDrafts((current) => {
+          const next = { ...current };
+          delete next[operation.rootId];
+          return next;
+        });
       setNotice('Alteração da conversa confirmada.');
       await loadConversationPage(activeConversationFilter.current);
     } catch (cause) {
@@ -1950,7 +2008,33 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       }
       const confirmed = conversationEventFromResponse(result, operation);
       applyConversationEvent(confirmed);
+      conversationHistoryRequests.current.set(
+        operation.rootId,
+        (conversationHistoryRequests.current.get(operation.rootId) ?? 0) + 1,
+      );
+      setConversationHistories((current) => {
+        const history = current[operation.rootId];
+        if (!history) return current;
+        return {
+          ...current,
+          [operation.rootId]: {
+            ...history,
+            loading: false,
+            error: '',
+            events: [
+              confirmed,
+              ...history.events.filter((event) => event.id !== confirmed.id),
+            ],
+          },
+        };
+      });
       storeConversationOperation(null);
+      if (['follow', 'refute', 'defer'].includes(operation.action))
+        setConversationDrafts((current) => {
+          const next = { ...current };
+          delete next[operation.rootId];
+          return next;
+        });
       setNotice('Alteração da conversa confirmada.');
       await loadConversationPage(activeConversationFilter.current);
     } catch (cause) {
@@ -1980,13 +2064,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     conversation: ConversationRow,
     action: ConversationEventAction,
     reason?: string,
+    baseVersion = conversation.version,
   ) {
     if (!doc || !viewer || !isOwner || busy || conversationOperation) return;
     const operation = createConversationOperation({
       documentId: doc.id,
       rootId: conversation.root.id,
       viewerId: viewer.id,
-      baseVersion: conversation.version,
+      baseVersion,
       action,
       reason,
     });
@@ -2075,6 +2160,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   }
   async function loadConversationHistory(rootId: string, append = false) {
     if (!doc || busy) return;
+    const attempt = {
+      documentId: doc.id,
+      rootId,
+      request: (conversationHistoryRequests.current.get(rootId) ?? 0) + 1,
+    };
+    conversationHistoryRequests.current.set(rootId, attempt.request);
     const current = conversationHistories[rootId];
     const cursor = append ? current?.nextCursor : null;
     if (append && !cursor) return;
@@ -2098,7 +2189,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         ),
         rootId,
       );
-      if (!mounted.current || activeDocumentId.current !== doc.id) return;
+      if (
+        !mounted.current ||
+        !conversationHistoryAttemptMatches(
+          attempt,
+          activeDocumentId.current,
+          conversationHistoryRequests.current.get(rootId),
+        )
+      )
+        return;
       setConversationHistories((histories) => ({
         ...histories,
         [rootId]: {
@@ -2119,6 +2218,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         },
       }));
     } catch (cause) {
+      if (
+        !conversationHistoryAttemptMatches(
+          attempt,
+          activeDocumentId.current,
+          conversationHistoryRequests.current.get(rootId),
+        )
+      )
+        return;
       if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
         hideProtectedContent(cause);
       else
@@ -2967,7 +3074,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               </form>
               {conversationsLoading && conversationRows.length === 0 ? (
                 <div className="comments-empty">Carregando conversas…</div>
-              ) : conversationRows.length === 0 ? (
+              ) : conversationsLoaded && conversationRows.length === 0 ? (
                 <div className="comments-empty">
                   {conversationFilter === 'all'
                     ? 'Nenhum comentário ainda.'
@@ -2977,10 +3084,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 <div className="comments-list">
                   {conversationRows.map((conversation) => {
                     const { root, replies } = conversation;
-                    const draft = conversationDrafts[root.id] ?? {
-                      action: conversation.decision ?? ('follow' as const),
-                      reason: conversation.decisionReason ?? '',
-                    };
+                    const draft =
+                      conversationDrafts[root.id] ??
+                      createConversationDraft(conversation);
                     const history = conversationHistories[root.id];
                     return (
                     <section className="comment-thread" key={root.id}>
@@ -3102,6 +3208,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                                   conversation,
                                   draft.action,
                                   draft.reason,
+                                  draft.baseVersion,
                                 )
                               }
                             >
@@ -3144,13 +3251,17 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         className="comment-reply conversation-history-toggle"
                         disabled={history?.loading}
                         onClick={() => {
-                          if (history)
+                          if (history) {
+                            conversationHistoryRequests.current.set(
+                              root.id,
+                              (conversationHistoryRequests.current.get(root.id) ?? 0) + 1,
+                            );
                             setConversationHistories((current) => {
                               const next = { ...current };
                               delete next[root.id];
                               return next;
                             });
-                          else void loadConversationHistory(root.id);
+                          } else void loadConversationHistory(root.id);
                         }}
                       >
                         {history ? 'Ocultar histórico' : 'Ver histórico'}
