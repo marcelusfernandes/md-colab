@@ -66,12 +66,17 @@ export function RevisionHistory({
   const historyCursor = useRef<string | null>(null);
   const selectionRequest = useRef(0);
   const comparisonRequest = useRef(0);
+  const currentReadRequest = useRef(0);
   const [revisions, setRevisions] = useState<DocumentRevisionSummary[]>([]);
   const revisionsRef = useRef<DocumentRevisionSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [historyRefreshing, setHistoryRefreshing] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [historyFailedKind, setHistoryFailedKind] = useState<
+    'initial' | 'refresh' | 'older' | null
+  >(null);
   const [historyNotice, setHistoryNotice] = useState('');
   const [selected, setSelected] = useState<DocumentRevisionReceipt | null>(
     null,
@@ -130,8 +135,10 @@ export function RevisionHistory({
       const attemptContext = context;
       historyInProgress.current = true;
       setHistoryError('');
+      setHistoryFailedKind(null);
       if (kind === 'initial') setHistoryLoading(true);
       if (kind === 'older') setHistoryLoadingMore(true);
+      if (kind === 'refresh') setHistoryRefreshing(true);
       try {
         const parameters = cursor
           ? `?${new URLSearchParams({ cursor }).toString()}`
@@ -175,8 +182,14 @@ export function RevisionHistory({
         if (
           request === historyRequest.current &&
           contextRef.current === attemptContext
-        )
+        ) {
+          if (
+            !(cause instanceof ApiError) ||
+            ![401, 403, 404].includes(cause.status)
+          )
+            setHistoryFailedKind(kind);
           handleReadError(cause, setHistoryError);
+        }
       } finally {
         if (
           request === historyRequest.current &&
@@ -185,6 +198,7 @@ export function RevisionHistory({
           historyInProgress.current = false;
           setHistoryLoading(false);
           setHistoryLoadingMore(false);
+          setHistoryRefreshing(false);
         }
       }
     },
@@ -196,6 +210,7 @@ export function RevisionHistory({
     historyRequest.current += 1;
     selectionRequest.current += 1;
     comparisonRequest.current += 1;
+    currentReadRequest.current += 1;
     historyInProgress.current = false;
     historyCursor.current = null;
     revisionsRef.current = [];
@@ -203,8 +218,10 @@ export function RevisionHistory({
     setRevisions([]);
     setHistoryLoading(true);
     setHistoryLoadingMore(false);
+    setHistoryRefreshing(false);
     setHistoryHasMore(false);
     setHistoryError('');
+    setHistoryFailedKind(null);
     setHistoryNotice('');
     setSelected(null);
     setSelectionError('');
@@ -212,10 +229,24 @@ export function RevisionHistory({
     setComparison(null);
     setComparisonError('');
     setCurrentError('');
+    setCurrentLoading(false);
     void loadHistory('initial');
   }, [context, loadHistory]);
 
+  useEffect(
+    () => () => {
+      contextRef.current = '';
+      historyRequest.current += 1;
+      selectionRequest.current += 1;
+      comparisonRequest.current += 1;
+      currentReadRequest.current += 1;
+      historyInProgress.current = false;
+    },
+    [],
+  );
+
   useEffect(() => {
+    currentReadRequest.current += 1;
     const request = ++selectionRequest.current;
     const attempt = { request, context, revisionId: revisionId ?? '' };
     // oxlint-disable-next-line react/react-compiler -- URL selection owns a separate snapshot lifecycle and invalidates the previous response synchronously.
@@ -225,6 +256,7 @@ export function RevisionHistory({
     setComparison(null);
     setComparisonError('');
     setCurrentError('');
+    setCurrentLoading(false);
     if (!revisionId) {
       setSelected(null);
       setSelectionLoading(false);
@@ -344,16 +376,43 @@ export function RevisionHistory({
     }
   }
 
+  function navigateRevision(id: string | null) {
+    currentReadRequest.current += 1;
+    setCurrentLoading(false);
+    setCurrentError('');
+    onNavigate(id);
+  }
+
+  function openRevisionComment(id: string) {
+    currentReadRequest.current += 1;
+    onOpenComment(id);
+  }
+
   async function returnCurrent() {
     if (currentLoading) return;
+    const request = ++currentReadRequest.current;
+    const attemptContext = context;
+    const attemptRevisionId = revisionId;
+    const isCurrent = () =>
+      revisionReadMatches(
+        {
+          request,
+          context: attemptContext,
+          revisionId: attemptRevisionId ?? '',
+        },
+        currentReadRequest.current,
+        contextRef.current,
+        revisionId,
+      );
     setCurrentLoading(true);
     setCurrentError('');
     try {
-      if (await onReloadCurrent()) onNavigate(null);
+      const installed = await onReloadCurrent();
+      if (installed && isCurrent()) onNavigate(null);
     } catch (cause) {
-      handleReadError(cause, setCurrentError);
+      if (isCurrent()) handleReadError(cause, setCurrentError);
     } finally {
-      setCurrentLoading(false);
+      if (isCurrent()) setCurrentLoading(false);
     }
   }
 
@@ -374,10 +433,15 @@ export function RevisionHistory({
         </div>
         <Button
           variant="outline"
-          disabled={historyLoading || historyLoadingMore}
+          disabled={historyLoading || historyLoadingMore || historyRefreshing}
           onClick={() => void loadHistory('refresh')}
         >
-          <RefreshCcw size={15} /> Atualizar histórico
+          {historyRefreshing ? (
+            <LoaderCircle className="spin" size={15} />
+          ) : (
+            <RefreshCcw size={15} />
+          )}{' '}
+          {historyRefreshing ? 'Atualizando…' : 'Atualizar histórico'}
         </Button>
       </div>
       {destinationError && (
@@ -392,7 +456,7 @@ export function RevisionHistory({
         <p>
           <LoaderCircle className="spin" size={16} /> Carregando histórico…
         </p>
-      ) : historyError ? (
+      ) : historyError && revisions.length === 0 ? (
         <p role="alert" className="form-error">
           {historyError}{' '}
           <button type="button" onClick={() => void loadHistory('initial')}>
@@ -412,7 +476,7 @@ export function RevisionHistory({
                 <button
                   type="button"
                   aria-current={revisionId === revision.id ? 'true' : undefined}
-                  onClick={() => onNavigate(revision.id)}
+                  onClick={() => navigateRevision(revision.id)}
                 >
                   <strong>
                     Revisão {revision.ordinal}
@@ -446,7 +510,17 @@ export function RevisionHistory({
           )}
           {historyError && (
             <p role="alert" className="form-error">
-              {historyError} As revisões já carregadas foram mantidas.
+              {historyError} As revisões já carregadas foram mantidas.{' '}
+              {historyFailedKind && historyFailedKind !== 'initial' && (
+                <button
+                  type="button"
+                  onClick={() => void loadHistory(historyFailedKind)}
+                >
+                  {historyFailedKind === 'refresh'
+                    ? 'Tentar atualizar novamente'
+                    : 'Tentar carregar novamente'}
+                </button>
+              )}
             </p>
           )}
         </>
@@ -550,7 +624,7 @@ export function RevisionHistory({
                         {entry.quote || entry.body}{' '}
                         <button
                           type="button"
-                          onClick={() => onOpenComment(entry.id)}
+                          onClick={() => openRevisionComment(entry.id)}
                         >
                           Abrir conversa
                         </button>
@@ -674,7 +748,7 @@ export function RevisionHistory({
                         abaixo.
                       </p>
                     ) : orderedComparison.diff.identical ? (
-                      <p>Os snapshots são idênticos.</p>
+                      <p>O conteúdo Markdown é idêntico.</p>
                     ) : orderedComparison.diff.lines.length === 0 ? (
                       <p>
                         O conteúdo das linhas é igual; somente o formato de
