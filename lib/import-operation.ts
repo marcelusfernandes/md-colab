@@ -127,18 +127,24 @@ export function documentFromImportResponse(
     throw new Error(
       'A resposta não confirmou esta importação. Verifique o resultado.',
     );
-  const document = (value as { document?: unknown }).document;
-  if (!document || typeof document !== 'object' || Array.isArray(document))
+  let row: DocumentRow;
+  try {
+    row = documentFromValue((value as { document?: unknown }).document);
+  } catch {
     throw new Error(
       'A resposta não confirmou esta importação. Verifique o resultado.',
     );
-  const row = document as Partial<DocumentRow>;
+  }
   if (
     row.id !== operation.id ||
     row.owner_id !== operation.viewerId ||
     row.markdown !== operation.markdown ||
     row.filename !== operation.filename ||
     row.title !== operation.title ||
+    row.current_revision_id !== operation.id ||
+    row.revision_ordinal !== 1 ||
+    row.revision_author_id !== operation.viewerId ||
+    row.revision_created_at !== row.created_at ||
     row.is_test !== (operation.isTest ? 1 : 0) ||
     typeof row.created_at !== 'string' ||
     !row.created_at ||
@@ -147,5 +153,50 @@ export function documentFromImportResponse(
     throw new Error(
       'A resposta não confirmou esta importação. Verifique o resultado.',
     );
+  return row;
+}
+
+export function documentFromValue(value: unknown): DocumentRow {
+  const row = value as Partial<DocumentRow> | null;
+  if (
+    !row ||
+    typeof row !== 'object' ||
+    Array.isArray(row) ||
+    Object.keys(row).sort().join(',') !==
+      [
+        'id',
+        'owner_id',
+        'title',
+        'filename',
+        'markdown',
+        'current_revision_id',
+        'revision_ordinal',
+        'revision_author_id',
+        'revision_created_at',
+        'is_test',
+        'created_at',
+      ]
+        .sort()
+        .join(',') ||
+    typeof row.id !== 'string' ||
+    typeof row.owner_id !== 'string' ||
+    typeof row.title !== 'string' ||
+    typeof row.filename !== 'string' ||
+    typeof row.markdown !== 'string' ||
+    typeof row.current_revision_id !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      row.current_revision_id,
+    ) ||
+    !Number.isSafeInteger(row.revision_ordinal) ||
+    row.revision_ordinal! < 1 ||
+    typeof row.revision_author_id !== 'string' ||
+    !row.revision_author_id ||
+    typeof row.revision_created_at !== 'string' ||
+    !Number.isFinite(Date.parse(row.revision_created_at)) ||
+    (row.is_test !== 0 && row.is_test !== 1) ||
+    typeof row.created_at !== 'string' ||
+    !Number.isFinite(Date.parse(row.created_at))
+  )
+    throw new Error('O servidor retornou um documento inválido.');
   return row as DocumentRow;
 }

@@ -18,6 +18,10 @@ export type DocumentRow = {
   title: string;
   filename: string;
   markdown: string;
+  current_revision_id: string;
+  revision_ordinal: number;
+  revision_author_id: string;
+  revision_created_at: string;
   is_test: number;
   created_at: string;
 };
@@ -27,9 +31,20 @@ export type CommentRow = {
   body: string;
   quote: string;
   source_start: number | null;
+  source_revision_id: string;
   created_at: string;
   author_id: string;
   author_name: string;
+};
+export type DocumentRevisionRow = {
+  id: string;
+  document_id: string;
+  ordinal: number;
+  author_id: string;
+  title: string;
+  filename: string;
+  markdown: string;
+  created_at: string;
 };
 export type CommentPagination = {
   olderCursor: string | null;
@@ -90,7 +105,10 @@ export type ConversationPage = {
   changeCursor: string;
 };
 export type ShareRow = { email: string; name: string; created_at: string };
-export type DocumentSummary = Omit<DocumentRow, 'markdown'> & {
+export type DocumentSummary = Pick<
+  DocumentRow,
+  'id' | 'owner_id' | 'title' | 'filename' | 'is_test' | 'created_at'
+> & {
   owner_name: string;
   comment_count: number;
 };
@@ -109,7 +127,7 @@ const conversationReplyPageSize = 50;
 const conversationEventPageSize = 50;
 const conversationChangePageSize = 99;
 const publicCommentFields =
-  'c.id,COALESCE(c.root_id,c.id) AS root_id,c.body,c.quote,c.source_start,c.created_at,c.author_id,u.name AS author_name';
+  'c.id,COALESCE(c.root_id,c.id) AS root_id,c.body,c.quote,c.source_start,c.source_revision_id,c.created_at,c.author_id,u.name AS author_name';
 type CommentCursorKind = 'before' | 'after';
 type CommentCursor = {
   v: 1;
@@ -591,7 +609,12 @@ export class DocumentService {
   }
   async document(id: string, ownerOnly = false) {
     const doc = await this.db
-      .prepare(`SELECT d.* FROM documents d WHERE d.id=? AND d.is_test=? AND
+      .prepare(`SELECT d.id,d.owner_id,r.title,r.filename,r.markdown,d.is_test,d.created_at,
+        r.id AS current_revision_id,r.ordinal AS revision_ordinal,
+        r.author_id AS revision_author_id,r.created_at AS revision_created_at
+      FROM documents d JOIN document_revisions r
+        ON r.id=d.current_revision_id AND r.document_id=d.id
+      WHERE d.id=? AND d.is_test=? AND
       (d.owner_id=? OR (?=0 AND (?=1 OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=?))))`)
       .bind(
         id,
@@ -606,6 +629,25 @@ export class DocumentService {
       throw new HttpError(404, 'Documento indisponível para esta conta.');
     return doc;
   }
+  async revision(id: string, revisionId: string) {
+    await this.document(id);
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        revisionId,
+      )
+    )
+      throw new HttpError(400, 'Revisão inválida.');
+    const revision = await this.db
+      .prepare(
+        `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
+         FROM document_revisions WHERE id=? AND document_id=?`,
+      )
+      .bind(revisionId, id)
+      .first<DocumentRevisionRow>();
+    if (!revision) throw new HttpError(404, 'Revisão indisponível.');
+    await this.document(id);
+    return revision;
+  }
   async create(input: Record<string, unknown>) {
     const { id, authorId, markdown, filename, title } =
       manualDocumentInput(input);
@@ -616,9 +658,20 @@ export class DocumentService {
       );
     const isTest = this.viewer.isTest ? 1 : 0;
     const existing = await this.db
-      .prepare('SELECT * FROM documents WHERE id=?')
+      .prepare(
+        `SELECT d.owner_id,d.is_test,r.title,r.filename,r.markdown
+         FROM documents d LEFT JOIN document_revisions r
+           ON r.id=d.current_revision_id AND r.document_id=d.id
+         WHERE d.id=?`,
+      )
       .bind(id)
-      .first<DocumentRow>();
+      .first<{
+        owner_id: string;
+        is_test: number;
+        title: string | null;
+        filename: string | null;
+        markdown: string | null;
+      }>();
     if (existing) {
       if (
         existing.owner_id !== authorId ||
@@ -631,35 +684,65 @@ export class DocumentService {
           409,
           'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
         );
-      await this.document(id);
-      return existing;
+      return this.document(id);
     }
     const limit = ownedDocumentLimit(this.quotaEnvironment);
-    await this.db
-      .prepare(
-        `INSERT INTO documents (id,owner_id,title,filename,markdown,created_at,is_test)
-         SELECT ?,?,?,?,?,?,? WHERE
-         NOT EXISTS(SELECT 1 FROM documents WHERE id=?) AND
-         (SELECT count(*) FROM documents WHERE owner_id=? AND is_test=?)<?`,
-      )
-      .bind(
-        id,
-        authorId,
-        title,
-        filename,
-        markdown,
-        new Date().toISOString(),
-        isTest,
-        id,
-        authorId,
-        isTest,
-        limit,
-      )
-      .run();
+    const createdAt = new Date().toISOString();
+    await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO documents (id,owner_id,title,filename,markdown,created_at,is_test,current_revision_id)
+           SELECT ?,?,?,?,?,?,?,NULL WHERE
+           NOT EXISTS(SELECT 1 FROM documents WHERE id=?) AND
+           (SELECT count(*) FROM documents WHERE owner_id=? AND is_test=?)<?`,
+        )
+        .bind(
+          id,
+          authorId,
+          title,
+          filename,
+          markdown,
+          createdAt,
+          isTest,
+          id,
+          authorId,
+          isTest,
+          limit,
+        ),
+      this.db
+        .prepare(
+          `INSERT INTO document_revisions
+             (id,document_id,ordinal,author_id,title,filename,markdown,created_at)
+           SELECT d.id,d.id,1,d.owner_id,d.title,d.filename,d.markdown,d.created_at
+           FROM documents d WHERE d.id=? AND d.owner_id=? AND d.is_test=?
+             AND d.title=? AND d.filename=? AND d.markdown=?
+             AND NOT EXISTS(SELECT 1 FROM document_revisions r WHERE r.document_id=d.id)`,
+        )
+        .bind(id, authorId, isTest, title, filename, markdown),
+      this.db
+        .prepare(
+          `UPDATE documents SET current_revision_id=? WHERE id=?
+           AND current_revision_id IS NULL
+           AND EXISTS(SELECT 1 FROM document_revisions r
+             WHERE r.id=? AND r.document_id=documents.id AND r.ordinal=1)`,
+        )
+        .bind(id, id, id),
+    ]);
     const document = await this.db
-      .prepare('SELECT * FROM documents WHERE id=?')
+      .prepare(
+        `SELECT d.owner_id,d.is_test,r.title,r.filename,r.markdown
+         FROM documents d LEFT JOIN document_revisions r
+           ON r.id=d.current_revision_id AND r.document_id=d.id
+         WHERE d.id=?`,
+      )
       .bind(id)
-      .first<DocumentRow>();
+      .first<{
+        owner_id: string;
+        is_test: number;
+        title: string | null;
+        filename: string | null;
+        markdown: string | null;
+      }>();
     if (!document)
       throw quotaExceeded(
         'Você atingiu o limite total de planos próprios. Peça ao operador para ampliar a configuração.',
@@ -675,7 +758,7 @@ export class DocumentService {
         409,
         'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
       );
-    return document;
+    return this.document(id);
   }
   async comments(
     id: string,
@@ -1355,7 +1438,7 @@ export class DocumentService {
   }
 
   async addComment(id: string, input: Record<string, unknown>) {
-    const doc = await this.document(id);
+    await this.document(id);
     const authorId = requiredText(
       input.authorId,
       'Identidade do comentário',
@@ -1378,8 +1461,7 @@ export class DocumentService {
       sourceStart !== null &&
       (typeof sourceStart !== 'number' ||
         !Number.isInteger(sourceStart) ||
-        sourceStart < 0 ||
-        sourceStart >= doc.markdown.length)
+        sourceStart < 0)
     )
       throw new HttpError(400, 'Trecho inválido. Selecione novamente.');
     const commentId = requiredText(input.id, 'Identificador do comentário', 64);
@@ -1394,6 +1476,7 @@ export class DocumentService {
             'body',
             'quote',
             'sourceStart',
+            'sourceRevisionId',
             'rootId',
           ].includes(key),
       )
@@ -1405,25 +1488,17 @@ export class DocumentService {
         : requiredText(input.rootId, 'Conversa', 64);
     if (requestedRootId && !/^[0-9a-f-]{36}$/i.test(requestedRootId))
       throw new HttpError(400, 'Conversa inválida.');
-    // A reply never carries a fresh anchor: the root owns the preserved context.
-    let rootId = commentId;
-    if (requestedRootId) {
-      const root = await this.db
-        .prepare(
-          `SELECT id,document_id,COALESCE(root_id,id) AS root_id
-           FROM comments WHERE id=? AND document_id=?`,
-        )
-        .bind(requestedRootId, id)
-        .first<{ id: string; document_id: string; root_id: string }>();
-      if (!root || root.id !== root.root_id)
-        throw new HttpError(404, 'Conversa indisponível.');
-      if (quote !== '' || sourceStart !== null)
-        throw new HttpError(
-          400,
-          'Uma resposta preserva o trecho e a origem da conversa raiz.',
-        );
-      rootId = root.id;
-    }
+    const requestedSourceRevisionId =
+      input.sourceRevisionId === undefined || input.sourceRevisionId === null
+        ? null
+        : requiredText(input.sourceRevisionId, 'Revisão de origem', 36);
+    if (
+      requestedSourceRevisionId &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        requestedSourceRevisionId,
+      )
+    )
+      throw new HttpError(400, 'Revisão de origem inválida.');
     const existing = await this.db
       .prepare(
         `SELECT ${publicCommentFields},c.document_id FROM comments c JOIN users u ON u.id=c.author_id WHERE c.id=?`,
@@ -1431,28 +1506,117 @@ export class DocumentService {
       .bind(commentId)
       .first<CommentRow & { document_id: string }>();
     if (existing) {
+      const rootId = requestedRootId ?? commentId;
       if (
         existing.author_id !== authorId ||
         existing.document_id !== id ||
         existing.body !== body ||
         existing.quote !== quote ||
         existing.source_start !== sourceStart ||
-        existing.root_id !== rootId
+        existing.root_id !== rootId ||
+        (requestedSourceRevisionId !== null &&
+          existing.source_revision_id !== requestedSourceRevisionId)
       )
         throw new HttpError(
           409,
           'Este comentário já foi enviado com outro conteúdo.',
         );
+      const sourceRevision = await this.db
+        .prepare(
+          'SELECT markdown FROM document_revisions WHERE id=? AND document_id=?',
+        )
+        .bind(existing.source_revision_id, id)
+        .first<{ markdown: string }>();
+      if (!sourceRevision)
+        throw new Error('Comment source revision is unavailable.');
+      if (sourceStart !== null && sourceStart >= sourceRevision.markdown.length)
+        throw new HttpError(400, 'Trecho inválido. Selecione novamente.');
       await this.document(id);
       return existing;
     }
+
+    // A reply never carries a fresh anchor: the root owns the preserved context.
+    let rootId = commentId;
+    let sourceRevision: DocumentRevisionRow | null = null;
+    let requireSingleRevision = false;
+    if (requestedRootId) {
+      const root = await this.db
+        .prepare(
+          `SELECT id,document_id,COALESCE(root_id,id) AS root_id,source_revision_id
+           FROM comments WHERE id=? AND document_id=?`,
+        )
+        .bind(requestedRootId, id)
+        .first<{
+          id: string;
+          document_id: string;
+          root_id: string;
+          source_revision_id: string | null;
+        }>();
+      if (!root || root.id !== root.root_id || !root.source_revision_id)
+        throw new HttpError(404, 'Conversa indisponível.');
+      if (quote !== '' || sourceStart !== null)
+        throw new HttpError(
+          400,
+          'Uma resposta preserva o trecho e a origem da conversa raiz.',
+        );
+      if (
+        requestedSourceRevisionId !== null &&
+        requestedSourceRevisionId !== root.source_revision_id
+      )
+        throw new HttpError(
+          409,
+          'A resposta deve preservar a revisão de origem da conversa.',
+        );
+      rootId = root.id;
+      sourceRevision = await this.db
+        .prepare(
+          `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
+           FROM document_revisions WHERE id=? AND document_id=?`,
+        )
+        .bind(root.source_revision_id, id)
+        .first<DocumentRevisionRow>();
+    } else if (requestedSourceRevisionId) {
+      sourceRevision = await this.db
+        .prepare(
+          `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
+           FROM document_revisions WHERE id=? AND document_id=?`,
+        )
+        .bind(requestedSourceRevisionId, id)
+        .first<DocumentRevisionRow>();
+    } else {
+      const revisions = (
+        await this.db
+          .prepare(
+            `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
+             FROM document_revisions WHERE document_id=? ORDER BY ordinal LIMIT 2`,
+          )
+          .bind(id)
+          .all<DocumentRevisionRow>()
+      ).results;
+      if (revisions.length !== 1)
+        throw new HttpError(
+          409,
+          'Informe a revisão exibida antes de enviar este comentário.',
+        );
+      sourceRevision = revisions[0];
+      requireSingleRevision = true;
+    }
+    if (!sourceRevision) throw new HttpError(404, 'Revisão indisponível.');
+    if (sourceStart !== null && sourceStart >= sourceRevision.markdown.length)
+      throw new HttpError(400, 'Trecho inválido. Selecione novamente.');
+
     const limit = commentLimit(this.quotaEnvironment);
     await this.db
       .prepare(
-        `INSERT INTO comments (id,document_id,author_id,body,quote,source_start,root_id,created_at)
-         SELECT ?,?,?,?,?,?,?,? WHERE
+        `INSERT INTO comments (id,document_id,author_id,body,quote,source_start,source_revision_id,root_id,created_at)
+         SELECT ?,?,?,?,?,?,?,?,? WHERE
          NOT EXISTS(SELECT 1 FROM comments WHERE id=?) AND
          (SELECT count(*) FROM comments WHERE document_id=?)<? AND
+         EXISTS(SELECT 1 FROM document_revisions r WHERE r.id=? AND r.document_id=?) AND
+         (?=0 OR (SELECT count(*) FROM document_revisions WHERE document_id=?)=1) AND
+         (? IS NULL OR EXISTS(SELECT 1 FROM comments root
+           WHERE root.id=? AND root.document_id=? AND COALESCE(root.root_id,root.id)=root.id
+             AND root.source_revision_id=?)) AND
          EXISTS(SELECT 1 FROM documents d WHERE d.id=? AND d.is_test=? AND
            (d.owner_id=? OR ?=1 OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=?)))`,
       )
@@ -1463,11 +1627,20 @@ export class DocumentService {
         body,
         quote,
         sourceStart,
+        sourceRevision.id,
         rootId,
         new Date().toISOString(),
         commentId,
         id,
         limit,
+        sourceRevision.id,
+        id,
+        requireSingleRevision ? 1 : 0,
+        id,
+        requestedRootId,
+        requestedRootId,
+        id,
+        sourceRevision.id,
         id,
         this.viewer.isTest ? 1 : 0,
         this.viewer.id,
@@ -1484,6 +1657,19 @@ export class DocumentService {
       )
       .bind(commentId)
       .first<CommentRow & { document_id: string }>();
+    if (!comment && requireSingleRevision) {
+      const revisionCount = await this.db
+        .prepare(
+          'SELECT count(*) AS count FROM document_revisions WHERE document_id=?',
+        )
+        .bind(id)
+        .first<{ count: number }>();
+      if ((revisionCount?.count ?? 0) !== 1)
+        throw new HttpError(
+          409,
+          'Informe a revisão exibida antes de enviar este comentário.',
+        );
+    }
     if (!comment)
       throw quotaExceeded(
         'Este plano atingiu o limite total de comentários. Peça ao operador para ampliar a configuração.',
@@ -1494,7 +1680,8 @@ export class DocumentService {
       comment.body !== body ||
       comment.quote !== quote ||
       comment.source_start !== sourceStart ||
-      comment.root_id !== rootId
+      comment.root_id !== rootId ||
+      comment.source_revision_id !== sourceRevision.id
     )
       throw new HttpError(
         409,

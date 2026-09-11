@@ -221,8 +221,8 @@ export class PublicationService {
       await this.db.batch([
         this.db
           .prepare(
-            `INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test)
-             SELECT ?,?,?,?,?,?,0 WHERE
+            `INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test,current_revision_id)
+             SELECT ?,?,?,?,?,?,0,NULL WHERE
              (SELECT count(*) FROM documents WHERE owner_id=? AND is_test=0)<?`,
           )
           .bind(
@@ -236,10 +236,27 @@ export class PublicationService {
             limit,
           ),
         this.db
+          .prepare(
+            `INSERT INTO document_revisions
+               (id,document_id,ordinal,author_id,title,filename,markdown,created_at)
+             SELECT d.id,d.id,1,d.owner_id,d.title,d.filename,d.markdown,d.created_at
+             FROM documents d WHERE d.id=? AND d.owner_id=? AND d.is_test=0`,
+          )
+          .bind(documentId, viewer.id),
+        this.db
+          .prepare(
+            `UPDATE documents SET current_revision_id=? WHERE id=?
+             AND current_revision_id IS NULL
+             AND EXISTS(SELECT 1 FROM document_revisions r
+               WHERE r.id=? AND r.document_id=documents.id AND r.ordinal=1)`,
+          )
+          .bind(documentId, documentId, documentId),
+        this.db
           .prepare(`INSERT INTO publications(
             id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at
           ) SELECT ?,?,?,?,?,?,? WHERE EXISTS(
             SELECT 1 FROM documents WHERE id=? AND owner_id=? AND is_test=0
+              AND current_revision_id=?
           )`)
           .bind(
             publicationId,
@@ -251,6 +268,7 @@ export class PublicationService {
             createdAt,
             documentId,
             viewer.id,
+            documentId,
           ),
       ]);
       const persisted = await this.previous(viewer.id, keyHash);

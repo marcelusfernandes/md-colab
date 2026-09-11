@@ -262,8 +262,9 @@ void test('Bearer autentica exclusivamente POST publications e nunca cai para co
 void test('publicação preserva Markdown, limita contrato e retorna URL e IDs estáveis', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());
-  const credential = await f.createCredential(await f.login());
-  const markdown = '\n# Título\n\n![referência](./imagem.png)\n';
+  const cookie = await f.login();
+  const credential = await f.createCredential(cookie);
+  const markdown = '\uFEFF# Título\r\n\r\n![referência](./imagem.png)\r\n';
   const response = await f.publish(credential.token, 'stable-1', {
     markdown,
     filename: ' plano.md ',
@@ -271,6 +272,11 @@ void test('publicação preserva Markdown, limita contrato e retorna URL e IDs e
   });
   assert.equal(response.status, 201);
   const result = await body<PublicationResult>(response);
+  assert.deepEqual(Object.keys(result).sort(), [
+    'documentId',
+    'publicationId',
+    'url',
+  ]);
   assert.match(result.documentId, /^[0-9a-f-]{36}$/i);
   assert.match(result.publicationId, /^[0-9a-f-]{36}$/i);
   assert.equal(result.url, origin + '/d/' + result.documentId);
@@ -291,7 +297,58 @@ void test('publicação preserva Markdown, limita contrato e retorna URL e IDs e
       is_test: 0,
     },
   );
+  const revisionResponse = await f.call(
+    `documents/${result.documentId}/revisions/${result.documentId}`,
+    'GET',
+    undefined,
+    cookie,
+  );
+  assert.equal(revisionResponse.status, 200);
+  assert.equal(
+    (await body<{ revision: { markdown: string } }>(revisionResponse)).revision
+      .markdown,
+    markdown,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `documents/${result.documentId}/revisions/${result.documentId}`,
+        'GET',
+      )
+    ).status,
+    401,
+  );
   assert.equal(f.sqlite.prepare('SELECT count(*) n FROM shares').get()?.n, 0);
+  assert.deepEqual(
+    {
+      ...(f.sqlite
+        .prepare(
+          `SELECT r.id,r.document_id,r.ordinal,r.author_id,r.title,r.filename,r.markdown,r.created_at
+           FROM documents d JOIN document_revisions r
+             ON r.id=d.current_revision_id AND r.document_id=d.id
+           WHERE d.id=?`,
+        )
+        .get(result.documentId) as Record<string, unknown>),
+    },
+    {
+      id: result.documentId,
+      document_id: result.documentId,
+      ordinal: 1,
+      author_id: (
+        f.sqlite
+          .prepare('SELECT owner_id FROM documents WHERE id=?')
+          .get(result.documentId) as { owner_id: string }
+      ).owner_id,
+      title: 'Plano pela API',
+      filename: 'plano.md',
+      markdown,
+      created_at: (
+        f.sqlite
+          .prepare('SELECT created_at FROM documents WHERE id=?')
+          .get(result.documentId) as { created_at: string }
+      ).created_at,
+    },
+  );
   assert.equal(
     (
       await f.publish(credential.token, 'extra-field', {

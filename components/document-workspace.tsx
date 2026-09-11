@@ -71,11 +71,16 @@ import {
   operationAttemptMatches,
   operationMatchesContext,
   operationRequest,
+  preserveDraftSourceRevision,
   shouldClearComposer,
   updateCommentOperation,
   type CommentOperation,
 } from '@/lib/comment-operation';
-import { commentPageFromResponse, mergeComments } from '@/lib/comment-page';
+import {
+  commentPageFromResponse,
+  commentRootFromResponse,
+  mergeComments,
+} from '@/lib/comment-page';
 import {
   conversationChangesFromResponse,
   changeCursorAfterPoll,
@@ -110,6 +115,7 @@ import {
 import {
   createImportOperation,
   documentFromImportResponse,
+  documentFromValue,
   importAttemptMatches,
   importOperationMatchesSession,
   importOperationRequest,
@@ -215,6 +221,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const commentOperationRef = useRef<CommentOperation | null>(null);
   const importOperationRef = useRef<ImportOperation | null>(null);
   const commentValue = useRef('');
+  const draftSourceRevisionId = useRef<string | null>(null);
+  const draftReplyRootId = useRef<string | null>(null);
   const composerRevision = useRef(0);
   const contextGeneration = useRef(0);
   const activeDocumentId = useRef<string | null>(null);
@@ -554,6 +562,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setQuote('');
         setSourceStart(null);
         setReplyRoot(null);
+        draftSourceRevisionId.current = null;
+        draftReplyRootId.current = null;
         composerRevision.current += 1;
       }
       commentOperationRef.current = null;
@@ -701,6 +711,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setQuote('');
         setSourceStart(null);
         setReplyRoot(null);
+        draftSourceRevisionId.current = null;
+        draftReplyRootId.current = null;
         composerRevision.current += 1;
         setNotice(
           'A tentativa anterior pertencia a outra sessão e não foi reutilizada.',
@@ -743,14 +755,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setNeedsLogin(false);
       if (documentId) {
         setConversationsLoading(true);
-        const result = await api<{
-          document: DocumentRow;
+        const response = await api<{
+          document: unknown;
           comments: CommentRow[];
           roots: CommentRow[];
           pagination: CommentPagination;
           isOwner: boolean;
         }>('documents/' + documentId);
         if (!mounted.current || request !== loadRequest.current) return;
+        const result = {
+          ...response,
+          document: documentFromValue(response.document),
+        };
         const conversationPage = conversationPageFromResponse(
           await api<unknown>(
             'documents/' + documentId + '/conversations?filter=all',
@@ -771,6 +787,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           setQuote('');
           setSourceStart(null);
           setReplyRoot(null);
+          draftSourceRevisionId.current = null;
+          draftReplyRootId.current = null;
           composerRevision.current += 1;
           setNotice(
             'A tentativa anterior pertencia a outro documento e não foi reutilizada.',
@@ -798,6 +816,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         activeDocumentId.current = result.document.id;
         activeViewerId.current = user.id;
         setDoc(result.document);
+        if (!commentValue.current.trim() && !currentOperation)
+          draftSourceRevisionId.current = preserveDraftSourceRevision(
+            draftSourceRevisionId.current,
+            result.document.current_revision_id,
+          );
         activeConversationFilter.current = 'all';
         setConversationFilter('all');
         setConversationRows(conversationPage.conversations);
@@ -812,18 +835,32 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         const commentPage = commentPageFromResponse(result);
         commentsNextCursor.current = commentPage.pagination.nextCursor;
         commentsOlderCursor.current = commentPage.pagination.olderCursor;
-        const loadedComments = mergeComments(
+        let loadedComments = mergeComments(
           commentPage.comments,
           commentPage.roots,
         );
+        const preservedReplyRootId =
+          currentOperation?.rootId ?? draftReplyRootId.current;
+        let preservedReplyRoot = preservedReplyRootId
+          ? (loadedComments.find(
+              (entry) => entry.id === preservedReplyRootId,
+            ) ?? null)
+          : null;
+        if (preservedReplyRootId && !preservedReplyRoot) {
+          preservedReplyRoot = commentRootFromResponse(
+            await api<unknown>(
+              `documents/${result.document.id}/comments/${preservedReplyRootId}`,
+              'GET',
+              undefined,
+              { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+            ),
+            preservedReplyRootId,
+          );
+          if (!mounted.current || request !== loadRequest.current) return;
+          loadedComments = mergeComments(loadedComments, [preservedReplyRoot]);
+        }
         setComments(loadedComments);
-        setReplyRoot(
-          currentOperation?.rootId
-            ? (loadedComments.find(
-                (entry) => entry.id === currentOperation.rootId,
-              ) ?? null)
-            : null,
-        );
+        setReplyRoot(preservedReplyRoot);
         setHasOlderComments(commentPage.pagination.olderCursor !== null);
         setCommentsUpdating(false);
         setCommentsLoadingOlder(false);
@@ -1952,11 +1989,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       ?.closest('[data-source-start]')
       ?.getAttribute('data-source-start');
     setQuote(text);
+    draftSourceRevisionId.current = doc?.current_revision_id ?? null;
     setSourceStart(
       anchor === undefined || anchor === null ? null : Number(anchor),
     );
     composerRevision.current += 1;
-  }, [busy, composerIsReply]);
+  }, [busy, composerIsReply, doc?.current_revision_id]);
   useEffect(() => {
     const node = article.current;
     if (!node) return;
@@ -2151,6 +2189,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       body: comment,
       quote,
       sourceStart,
+      sourceRevisionId:
+        replyRoot?.source_revision_id ??
+        draftSourceRevisionId.current ??
+        doc.current_revision_id,
       rootId: replyRoot?.id ?? null,
       composerRevision: composerRevision.current,
     });
@@ -3388,6 +3430,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                       onClick={() => {
                         if (commentOperation) return;
                         setReplyRoot(null);
+                        draftReplyRootId.current = null;
+                        draftSourceRevisionId.current = doc.current_revision_id;
                         composerRevision.current += 1;
                       }}
                     >
@@ -3430,6 +3474,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   value={comment}
                   disabled={busy === 'comment'}
                   onChange={(e) => {
+                    if (e.target.value.trim())
+                      draftSourceRevisionId.current =
+                        preserveDraftSourceRevision(
+                          draftSourceRevisionId.current,
+                          replyRoot?.source_revision_id ??
+                            doc.current_revision_id,
+                        );
                     commentValue.current = e.target.value;
                     setComment(e.target.value);
                     composerRevision.current += 1;
@@ -3611,6 +3662,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           disabled={!!busy || !!commentOperation}
                           onClick={() => {
                             setReplyRoot(root);
+                            draftReplyRootId.current = root.id;
+                            draftSourceRevisionId.current =
+                              root.source_revision_id;
                             setQuote('');
                             setSourceStart(null);
                             composerRevision.current += 1;

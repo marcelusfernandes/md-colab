@@ -38,7 +38,12 @@ export function commentFromValue(value: unknown, ids = new Set<string>()) {
     typeof comment.body !== 'string' ||
     typeof comment.quote !== 'string' ||
     (comment.source_start !== null &&
-      (!Number.isSafeInteger(comment.source_start) || comment.source_start! < 0)) ||
+      (!Number.isSafeInteger(comment.source_start) ||
+        comment.source_start! < 0)) ||
+    typeof comment.source_revision_id !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      comment.source_revision_id,
+    ) ||
     typeof comment.created_at !== 'string' ||
     !Number.isFinite(Date.parse(comment.created_at)) ||
     typeof comment.author_id !== 'string' ||
@@ -52,10 +57,27 @@ export function commentFromValue(value: unknown, ids = new Set<string>()) {
     body: comment.body,
     quote: comment.quote,
     source_start: comment.source_start,
+    source_revision_id: comment.source_revision_id,
     created_at: comment.created_at,
     author_id: comment.author_id,
     author_name: comment.author_name,
   } as CommentRow;
+}
+
+export function commentRootFromResponse(value: unknown, expectedId: string) {
+  const result = value as { comment?: unknown } | null;
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    Array.isArray(result) ||
+    Object.keys(result).length !== 1 ||
+    !Object.hasOwn(result, 'comment')
+  )
+    throw new Error('O servidor retornou uma conversa inválida.');
+  const comment = commentFromValue(result.comment);
+  if (comment.id !== expectedId || comment.root_id !== expectedId)
+    throw new Error('O servidor retornou uma conversa inválida.');
+  return comment;
 }
 
 export function commentPageFromResponse(value: unknown): CommentPage {

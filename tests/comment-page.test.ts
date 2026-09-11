@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commentPageFromResponse, mergeComments } from '../lib/comment-page.ts';
+import {
+  commentPageFromResponse,
+  commentRootFromResponse,
+  mergeComments,
+} from '../lib/comment-page.ts';
 
 const cursor = 'eyJ2IjoxLCJkIjoiZCIsImsiOiJhZnRlciIsInMiOjB9';
 const comment = {
@@ -9,6 +13,7 @@ const comment = {
   body: 'Comentário',
   quote: '',
   source_start: null,
+  source_revision_id: '00000000-0000-4000-8000-000000000010',
   created_at: '2026-01-01T00:00:00.000Z',
   author_id: 'author',
   author_name: 'Pessoa',
@@ -69,5 +74,18 @@ void test('mescla páginas e confirmações por UUID mantendo a ordem visual', (
       [laterSequenceButEarlierTime.id, laterSequenceButEarlierTime.body],
       [comment.id, 'Resposta canônica'],
     ],
+  );
+});
+
+void test('recupera uma raiz exata fora da página sem aceitar resposta ou envelope parcial', () => {
+  assert.deepEqual(commentRootFromResponse({ comment }, comment.id), comment);
+  assert.throws(() =>
+    commentRootFromResponse(
+      { comment: { ...comment, root_id: crypto.randomUUID() } },
+      comment.id,
+    ),
+  );
+  assert.throws(() =>
+    commentRootFromResponse({ comment, extra: true }, comment.id),
   );
 });

@@ -7,9 +7,12 @@ import {
   operationAttemptMatches,
   operationMatchesContext,
   operationRequest,
+  preserveDraftSourceRevision,
   shouldClearComposer,
   updateCommentOperation,
 } from '../lib/comment-operation.ts';
+
+const sourceRevisionId = '00000000-0000-4000-8000-000000000010';
 
 function operation() {
   return createCommentOperation({
@@ -18,6 +21,7 @@ function operation() {
     body: '  Uma contribuição.  ',
     quote: '  trecho  ',
     sourceStart: 12,
+    sourceRevisionId,
     composerRevision: 4,
   });
 }
@@ -32,6 +36,15 @@ void test('retry preserva a mesma identidade e o payload normalizado da tentativ
   assert.equal(operationRequest(retry).authorId, 'viewer-a');
 });
 
+void test('seleção vazia preserva a revisão capturada após refresh e início da redação', () => {
+  const v1 = '00000000-0000-4000-8000-000000000010';
+  const v2 = '00000000-0000-4000-8000-000000000020';
+  const selected = preserveDraftSourceRevision(null, v1);
+  const afterRefresh = preserveDraftSourceRevision(selected, v2);
+  const afterFirstCharacter = preserveDraftSourceRevision(afterRefresh, v2);
+  assert.equal(afterFirstCharacter, v1);
+});
+
 void test('operação de resposta congela a conversa e rejeita confirmação de outra raiz', () => {
   const rootId = '00000000-0000-4000-8000-000000000099';
   const reply = createCommentOperation({
@@ -40,6 +53,7 @@ void test('operação de resposta congela a conversa e rejeita confirmação de 
     body: 'Resposta',
     quote: '',
     sourceStart: null,
+    sourceRevisionId,
     rootId,
     composerRevision: 1,
   });
@@ -56,6 +70,7 @@ void test('operação de resposta congela a conversa e rejeita confirmação de 
             body: reply.body,
             quote: reply.quote,
             source_start: null,
+            source_revision_id: sourceRevisionId,
             created_at: '2026-09-10T12:00:00.000Z',
           },
         },
@@ -76,6 +91,7 @@ void test('resposta confirma somente a operação e não consome uma revisão po
       body: pending.body,
       quote: pending.quote,
       source_start: pending.sourceStart,
+      source_revision_id: pending.sourceRevisionId,
       created_at: '2026-09-10T12:00:00.000Z',
     },
   };
@@ -110,6 +126,7 @@ void test('documento, identidade e resposta divergentes não reconciliam a tenta
             body: 'Outro conteúdo.',
             quote: pending.quote,
             source_start: pending.sourceStart,
+            source_revision_id: pending.sourceRevisionId,
             created_at: '2026-09-10T12:00:00.000Z',
           },
         },

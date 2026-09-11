@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 9);
+  assert.equal(first.applied.length, 10);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    9,
+    10,
   );
   restarted.sqlite.close();
 
@@ -145,14 +145,46 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
   seedBeforeCommentsMigration(success);
   migrateNodeDatabase(success, migrations);
   const ordered = success
-    .prepare('SELECT id,root_id,sequence FROM comments ORDER BY sequence')
-    .all() as { id: string; root_id: string; sequence: number }[];
+    .prepare(
+      'SELECT id,root_id,source_revision_id,sequence FROM comments ORDER BY sequence',
+    )
+    .all() as {
+    id: string;
+    root_id: string;
+    source_revision_id: string;
+    sequence: number;
+  }[];
   assert.deepEqual(
-    ordered.map((row) => [row.id, row.root_id, row.sequence]),
+    ordered.map((row) => [
+      row.id,
+      row.root_id,
+      row.source_revision_id,
+      row.sequence,
+    ]),
     [
-      ['comment-a', 'comment-a', 1],
-      ['comment-b', 'comment-b', 2],
+      ['comment-a', 'comment-a', 'doc', 1],
+      ['comment-b', 'comment-b', 'doc', 2],
     ],
+  );
+  assert.deepEqual(
+    {
+      ...(success
+        .prepare(
+          `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
+           FROM document_revisions WHERE id='doc'`,
+        )
+        .get() as Record<string, unknown>),
+    },
+    {
+      id: 'doc',
+      document_id: 'doc',
+      ordinal: 1,
+      author_id: 'owner',
+      title: 'Plan',
+      filename: 'plan.md',
+      markdown: '# Plan',
+      created_at: '2026-09-10T00:00:00Z',
+    },
   );
   assert.equal(
     success.prepare('SELECT count(*) AS count FROM conversation_events').get()
@@ -166,8 +198,8 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
   );
   success
     .prepare(
-      `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
-       VALUES(?,?,?,?,?,?,?)`,
+      `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,source_revision_id,created_at)
+       VALUES(?,?,?,?,?,?,?,?)`,
     )
     .run(
       'legacy-writer',
@@ -176,6 +208,7 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
       'Legacy writer',
       '',
       null,
+      'doc',
       '2026-09-10T00:00:03Z',
     );
   const legacyChange = success
@@ -218,6 +251,104 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
     0,
   );
   failure.close();
+});
+
+void test('revision backfill preserves comment, conversation, cursor and outbox rows in place', (t) => {
+  const directory = temporary(t);
+  const sqlite = new DatabaseSync(join(directory, 'revision-backfill.sqlite'));
+  migrateNodeDatabase(sqlite, undefined, 9);
+  sqlite.exec(`
+    INSERT INTO users(id,email,name) VALUES
+      ('owner','owner@example.test','Owner'),
+      ('guest','guest@example.test','Guest');
+    INSERT INTO documents(id,owner_id,title,filename,markdown,created_at,is_test)
+      VALUES('doc','owner','Plan','plan.md','# Plan\r\n\r\nOriginal.\r\n','2026-09-10T00:00:00.000Z',0);
+    INSERT INTO shares(document_id,email,name,created_at)
+      VALUES('doc','guest@example.test','Guest','2026-09-10T00:00:01.000Z');
+    INSERT INTO comments(id,document_id,author_id,body,quote,source_start,root_id,created_at)
+      VALUES('comment','doc','guest','Critique','Original',10,'comment','2026-09-10T00:00:02.000Z');
+    INSERT INTO conversation_events(
+      id,document_id,root_id,actor_id,base_version,version,action,state,
+      decision,decision_reason,reason,created_at
+    ) VALUES(
+      'event','doc','comment','owner',0,1,'follow','open','follow','Apply',NULL,
+      '2026-09-10T00:00:03.000Z'
+    );
+  `);
+  const tables = [
+    'comments',
+    'conversation_changes',
+    'conversation_events',
+    'notification_events',
+    'notification_deliveries',
+  ];
+  const before = new Map(
+    tables.map((table) => [
+      table,
+      JSON.stringify(sqlite.prepare(`SELECT * FROM ${table} ORDER BY 1`).all()),
+    ]),
+  );
+  migrateNodeDatabase(sqlite);
+  for (const table of tables) {
+    const columns =
+      table === 'comments'
+        ? 'sequence,id,document_id,author_id,body,quote,source_start,created_at,root_id'
+        : '*';
+    const previous =
+      table === 'comments'
+        ? JSON.stringify(
+            JSON.parse(before.get(table)!).map(
+              ({
+                source_revision_id: _source,
+                ...row
+              }: Record<string, unknown>) => row,
+            ),
+          )
+        : before.get(table);
+    assert.equal(
+      JSON.stringify(
+        sqlite.prepare(`SELECT ${columns} FROM ${table} ORDER BY 1`).all(),
+      ),
+      previous,
+      `${table} mudou durante o backfill`,
+    );
+  }
+  assert.equal(
+    sqlite
+      .prepare(
+        `SELECT count(*) AS count FROM comments
+         WHERE source_revision_id='doc'`,
+      )
+      .get()?.count,
+    1,
+  );
+  assert.deepEqual(
+    {
+      ...(sqlite
+        .prepare(
+          `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
+           FROM document_revisions`,
+        )
+        .get() as Record<string, unknown>),
+    },
+    {
+      id: 'doc',
+      document_id: 'doc',
+      ordinal: 1,
+      author_id: 'owner',
+      title: 'Plan',
+      filename: 'plan.md',
+      markdown: '# Plan\r\n\r\nOriginal.\r\n',
+      created_at: '2026-09-10T00:00:00.000Z',
+    },
+  );
+  migrateNodeDatabase(sqlite);
+  assert.equal(
+    sqlite.prepare('SELECT count(*) AS count FROM document_revisions').get()
+      ?.count,
+    1,
+  );
+  sqlite.close();
 });
 
 void test('restore is isolated and invalidates snapshot access artifacts', async (t) => {
@@ -326,6 +457,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0006_hesitant_dazzler',
     '0007_nifty_iron_man',
     '0008_lethal_ultron',
+    '0009_slimy_kingpin',
   ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
@@ -346,6 +478,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0006_hesitant_dazzler',
     '0007_nifty_iron_man',
     '0008_lethal_ultron',
+    '0009_slimy_kingpin',
   ]);
   assert.throws(
     () => openPersistentD1(restorePath),

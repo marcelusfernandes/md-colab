@@ -64,6 +64,13 @@
       "when": 1789094249302,
       "tag": "0008_lethal_ultron",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789098031259,
+      "tag": "0009_slimy_kingpin",
+      "breakpoints": true
     }
   ]
 }

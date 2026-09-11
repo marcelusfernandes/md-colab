@@ -42,6 +42,7 @@ void test('corpo 2xx ausente não é aceito como confirmação de comentário', 
     body: 'Contribuição',
     quote: '',
     sourceStart: null,
+    sourceRevisionId: '00000000-0000-4000-8000-000000000010',
     composerRevision: 0,
   });
   const response = await api<unknown>(

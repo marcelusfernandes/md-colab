@@ -13,6 +13,7 @@ export type CommentOperation = Readonly<{
   body: string;
   quote: string;
   sourceStart: number | null;
+  sourceRevisionId: string;
   rootId: string | null;
   composerRevision: number;
   status: CommentOperationStatus;
@@ -24,12 +25,20 @@ export type CommentAttempt = Readonly<{
   request: number;
 }>;
 
+export function preserveDraftSourceRevision(
+  capturedRevisionId: string | null,
+  displayedRevisionId: string,
+) {
+  return capturedRevisionId ?? displayedRevisionId;
+}
+
 export function createCommentOperation(input: {
   documentId: string;
   viewerId: string;
   body: string;
   quote: string;
   sourceStart: number | null;
+  sourceRevisionId: string;
   rootId?: string | null;
   composerRevision: number;
 }): CommentOperation {
@@ -40,6 +49,7 @@ export function createCommentOperation(input: {
     body: input.body.trim(),
     quote: input.quote.trim(),
     sourceStart: input.sourceStart,
+    sourceRevisionId: input.sourceRevisionId,
     rootId: input.rootId ?? null,
     composerRevision: input.composerRevision,
     status: 'sending' as const,
@@ -99,6 +109,7 @@ export function operationRequest(operation: CommentOperation) {
     body: operation.body,
     quote: operation.quote,
     sourceStart: operation.sourceStart,
+    sourceRevisionId: operation.sourceRevisionId,
     ...(operation.rootId === null ? {} : { rootId: operation.rootId }),
   };
 }
@@ -116,6 +127,7 @@ export function commentFromResponse(
     comment.body !== operation.body ||
     comment.quote !== operation.quote ||
     comment.source_start !== operation.sourceStart ||
+    comment.source_revision_id !== operation.sourceRevisionId ||
     comment.root_id !== (operation.rootId ?? operation.id) ||
     typeof comment.created_at !== 'string' ||
     typeof comment.author_name !== 'string'

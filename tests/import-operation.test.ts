@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createImportOperation,
   documentFromImportResponse,
+  documentFromValue,
   importAttemptMatches,
   importOperationMatchesSession,
   importOperationRequest,
@@ -41,10 +42,16 @@ void test('confirmação exige documento escalar com identidade, contexto e payl
     title: pending.title,
     filename: pending.filename,
     markdown: pending.markdown,
+    current_revision_id: pending.id,
+    revision_ordinal: 1,
+    revision_author_id: pending.viewerId,
+    revision_created_at: new Date().toISOString(),
     is_test: 1,
-    created_at: new Date().toISOString(),
+    created_at: '',
   };
+  document.created_at = document.revision_created_at;
   assert.deepEqual(documentFromImportResponse({ document }, pending), document);
+  assert.deepEqual(documentFromValue(document), document);
   for (const invalid of [
     null,
     [],
@@ -55,6 +62,12 @@ void test('confirmação exige documento escalar com identidade, contexto e payl
     { document: { ...document, markdown: '# Outro' } },
     { document: { ...document, filename: 'outro.md' } },
     { document: { ...document, title: 'Outro' } },
+    { document: { ...document, current_revision_id: crypto.randomUUID() } },
+    { document: { ...document, revision_ordinal: 2 } },
+    { document: { ...document, revision_author_id: 'viewer-b' } },
+    {
+      document: { ...document, revision_created_at: new Date(0).toISOString() },
+    },
     { document: { ...document, is_test: '1' } },
     { document: { ...document, created_at: null } },
     { document: { ...document, created_at: '' } },

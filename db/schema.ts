@@ -23,10 +23,35 @@ export const documents = sqliteTable(
     title: text('title').notNull(),
     filename: text('filename').notNull(),
     markdown: text('markdown').notNull(),
+    currentRevisionId: text('current_revision_id'),
     isTest: integer('is_test').notNull().default(0),
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('documents_owner').on(table.ownerId)],
+);
+export const documentRevisions = sqliteTable(
+  'document_revisions',
+  {
+    id: text('id').primaryKey(),
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    ordinal: integer('ordinal').notNull(),
+    authorId: text('author_id')
+      .notNull()
+      .references(() => users.id),
+    title: text('title').notNull(),
+    filename: text('filename').notNull(),
+    markdown: text('markdown').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('document_revisions_document_ordinal').on(
+      table.documentId,
+      table.ordinal,
+    ),
+    index('document_revisions_document').on(table.documentId),
+  ],
 );
 export const shares = sqliteTable(
   'shares',
@@ -57,6 +82,9 @@ export const comments = sqliteTable(
     body: text('body').notNull(),
     quote: text('quote').notNull(),
     sourceStart: integer('source_start'),
+    sourceRevisionId: text('source_revision_id').references(
+      () => documentRevisions.id,
+    ),
     // A root points to itself; replies point to that stable root. It remains
     // nullable in the physical schema only for the legacy INSERT trigger.
     rootId: text('root_id'),

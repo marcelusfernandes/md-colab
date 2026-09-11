@@ -17,6 +17,7 @@ const comment = (id: string, root_id = rootId) => ({
   body: id === rootId ? 'Raiz' : 'Resposta',
   quote: id === rootId ? 'Trecho' : '',
   source_start: id === rootId ? 4 : null,
+  source_revision_id: '00000000-0000-4000-8000-000000000010',
   created_at: '2026-09-11T00:00:00.000Z',
   author_id: 'author',
   author_name: 'Pessoa',
