@@ -73,6 +73,61 @@ export const comments = sqliteTable(
   ],
 );
 
+export const conversationEvents = sqliteTable(
+  'conversation_events',
+  {
+    sequence: integer('sequence').primaryKey({ autoIncrement: true }),
+    id: text('id').notNull().unique(),
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    rootId: text('root_id').notNull(),
+    actorId: text('actor_id')
+      .notNull()
+      .references(() => users.id),
+    baseVersion: integer('base_version').notNull(),
+    version: integer('version').notNull(),
+    action: text('action').notNull(),
+    state: text('state').notNull(),
+    decision: text('decision'),
+    decisionReason: text('decision_reason'),
+    reason: text('reason'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('conversation_events_root_version').on(
+      table.rootId,
+      table.version,
+    ),
+    index('conversation_events_document_sequence').on(
+      table.documentId,
+      table.sequence,
+    ),
+    index('conversation_events_root_sequence').on(
+      table.rootId,
+      table.sequence,
+    ),
+  ],
+);
+
+export const conversationChanges = sqliteTable(
+  'conversation_changes',
+  {
+    sequence: integer('sequence').primaryKey({ autoIncrement: true }),
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    rootId: text('root_id').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('conversation_changes_document_sequence').on(
+      table.documentId,
+      table.sequence,
+    ),
+  ],
+);
+
 export const magicLinks = sqliteTable(
   'magic_links',
   {

@@ -3,6 +3,7 @@ import {
   DocumentService,
   HttpError,
   type CommentPageQuery,
+  type ConversationFilter,
   type CursorPageQuery,
 } from './document-service.ts';
 import { ResendMailer, type Mailer } from './mailer.ts';
@@ -19,6 +20,7 @@ type DiagnosticRoute =
   | 'documents'
   | 'document'
   | 'comments'
+  | 'conversations'
   | 'shares'
   | 'unknown';
 type DiagnosticCategory =
@@ -77,6 +79,11 @@ function diagnosticRoute(request: Request): DiagnosticRoute {
     if (parts.length === 3) return 'document';
     if (parts[3] === 'comments' && (parts.length === 4 || parts.length === 5))
       return 'comments';
+    if (
+      (parts[3] === 'conversations' && parts.length >= 4 && parts.length <= 7) ||
+      (parts[3] === 'conversation-changes' && parts.length === 4)
+    )
+      return 'conversations';
     if (parts[3] === 'shares' && parts.length === 4) return 'shares';
     return 'unknown';
   } catch {
@@ -193,6 +200,44 @@ function cursorPageQuery(
     throw new HttpError(400, `Parâmetros de ${collection} inválidos.`);
   const cursor = parameters.get('cursor');
   return cursor === null ? {} : { cursor };
+}
+
+function conversationPageQuery(parameters: URLSearchParams) {
+  const keys = [...parameters.keys()];
+  if (
+    keys.some((key) => key !== 'filter' && key !== 'cursor') ||
+    parameters.getAll('filter').length > 1 ||
+    parameters.getAll('cursor').length > 1
+  )
+    throw new HttpError(400, 'Parâmetros de conversas inválidos.');
+  const filter = parameters.get('filter') ?? 'all';
+  if (!['all', 'open', 'unanswered', 'closed'].includes(filter))
+    throw new HttpError(400, 'Filtro de conversas inválido.');
+  const cursor = parameters.get('cursor');
+  return {
+    filter: filter as ConversationFilter,
+    ...(cursor === null ? {} : { cursor }),
+  };
+}
+
+function oneCursorQuery(parameters: URLSearchParams, label: string) {
+  const keys = [...parameters.keys()];
+  if (
+    keys.some((key) => key !== 'cursor') ||
+    parameters.getAll('cursor').length > 1
+  )
+    throw new HttpError(400, `Parâmetros de ${label} inválidos.`);
+  return parameters.get('cursor') ?? undefined;
+}
+
+function conversationChangesQuery(parameters: URLSearchParams) {
+  const keys = [...parameters.keys()];
+  if (
+    keys.some((key) => key !== 'after') ||
+    parameters.getAll('after').length !== 1
+  )
+    throw new HttpError(400, 'Parâmetros de mudanças de conversas inválidos.');
+  return parameters.get('after')!;
 }
 
 export async function handleApi(
@@ -329,10 +374,10 @@ export async function handleApi(
         });
       throw new HttpError(405, 'Ação indisponível.');
     }
-    if (path[0] !== 'documents' || path.length > 4)
+    if (path[0] !== 'documents' || path.length > 6)
       throw new HttpError(404, 'Página não encontrada.');
-    const [, id, action, resourceId] = path;
-    if (resourceId && !(request.method === 'GET' && action === 'comments'))
+    const [, id, action, resourceId, subresource, eventId] = path;
+    if (resourceId && action === 'comments' && request.method !== 'GET')
       throw new HttpError(404, 'Página não encontrada.');
     if (request.method === 'GET') {
       if (!id)
@@ -348,12 +393,48 @@ export async function handleApi(
           isOwner: document.owner_id === viewer.id,
         });
       }
-      if (action === 'comments' && resourceId)
+      if (action === 'comments' && resourceId && !subresource)
         return json({ comment: await service.comment(id, resourceId) });
-      if (action === 'comments')
+      if (action === 'comments' && !resourceId)
         return json(
           await service.comments(id, commentPageQuery(url.searchParams)),
         );
+      if (action === 'conversations' && !resourceId)
+        return json(
+          await service.conversations(id, conversationPageQuery(url.searchParams)),
+        );
+      if (action === 'conversations' && resourceId && !subresource)
+        return json({
+          conversation: await service.conversationState(id, resourceId),
+        });
+      if (action === 'conversation-changes' && !resourceId)
+        return json(
+          await service.conversationChanges(
+            id,
+            conversationChangesQuery(url.searchParams),
+          ),
+        );
+      if (action === 'conversations' && resourceId && subresource === 'replies' && !eventId)
+        return json(
+          await service.conversationReplies(
+            id,
+            resourceId,
+            oneCursorQuery(url.searchParams, 'respostas'),
+          ),
+        );
+      if (action === 'conversations' && resourceId && subresource === 'events') {
+        if (eventId)
+          return json({
+            event: await service.conversationEvent(id, resourceId, eventId),
+          });
+        return json(
+          await service.conversationEvents(
+            id,
+            resourceId,
+            oneCursorQuery(url.searchParams, 'histórico'),
+          ),
+        );
+      }
       if (action === 'shares' && !resourceId)
         return json(
           await service.shares(
@@ -390,9 +471,18 @@ export async function handleApi(
           );
         return json({ document }, 201);
       }
-      if (action === 'comments')
+      if (action === 'comments' && !resourceId)
         return json({ comment: await service.addComment(id, input) }, 201);
-      if (action === 'shares') {
+      if (
+        action === 'conversations' &&
+        resourceId &&
+        subresource === 'events' &&
+        !eventId
+      ) {
+        const result = await service.addConversationEvent(id, resourceId, input);
+        return json({ event: result.event }, result.replayed ? 200 : 201);
+      }
+      if (action === 'shares' && !resourceId) {
         await service.document(id, true);
         if (viewer.isTest)
           throw new HttpError(

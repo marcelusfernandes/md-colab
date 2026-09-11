@@ -213,6 +213,47 @@ void test('digitar o mesmo e-mail de outro dono não assume identidade nem revel
     (await owner.call('documents/' + created.body.document.id)).body.isOwner,
     true,
   );
+  const root = await owner.call(
+    `documents/${created.body.document.id}/comments`,
+    'POST',
+    {
+      id: crypto.randomUUID(),
+      authorId: ownerViewer.id,
+      body: 'Crítica no teste.',
+    },
+  );
+  const otherViewer = (await other.call('session')).body.viewer;
+  assert.equal(
+    (
+      await other.call(
+        `documents/${created.body.document.id}/conversations/${root.body.comment!.id}/events`,
+        'POST',
+        {
+          id: crypto.randomUUID(),
+          authorId: otherViewer.id,
+          baseVersion: 0,
+          action: 'close',
+        },
+      )
+    ).status,
+    404,
+    'o mesmo e-mail declarado não recupera propriedade da conversa',
+  );
+  assert.equal(
+    (
+      await owner.call(
+        `documents/${created.body.document.id}/conversations/${root.body.comment!.id}/events`,
+        'POST',
+        {
+          id: crypto.randomUUID(),
+          authorId: ownerViewer.id,
+          baseVersion: 0,
+          action: 'close',
+        },
+      )
+    ).status,
+    201,
+  );
   // Reentering in the same active browser preserves ownership.
   await owner.call('auth/test', 'POST', { email: 'owner@example.com' });
   assert.equal(
