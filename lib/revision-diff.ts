@@ -195,6 +195,19 @@ export function compareRevisionMarkdown(
         before.finalNewline !== after.finalNewline,
     );
   }
+  if (beforeMarkdown === afterMarkdown) {
+    const format = markdownFormat(beforeMarkdown);
+    return {
+      available: true,
+      message: null,
+      identical: true,
+      bomChanged: false,
+      lineEndingsChanged: false,
+      before: formatOf(format),
+      after: formatOf(format),
+      lines: [],
+    };
+  }
   const before = parsedMarkdown(beforeMarkdown);
   const after = parsedMarkdown(afterMarkdown);
   const bomChanged = before.bom !== after.bom;
@@ -210,7 +223,7 @@ export function compareRevisionMarkdown(
     return {
       available: true,
       message: null,
-      identical: beforeMarkdown === afterMarkdown,
+      identical: false,
       bomChanged,
       lineEndingsChanged,
       before: formatOf(before),
@@ -246,8 +259,7 @@ export function compareRevisionMarkdown(
   for (let beforeIndex = 1; beforeIndex <= beforeCount; beforeIndex += 1) {
     current[0] = 0;
     for (let afterIndex = 1; afterIndex <= afterCount; afterIndex += 1) {
-      const directionIndex =
-        (beforeIndex - 1) * afterCount + afterIndex - 1;
+      const directionIndex = (beforeIndex - 1) * afterCount + afterIndex - 1;
       if (beforeIds[beforeIndex - 1] === afterIds[afterIndex - 1]) {
         current[afterIndex] = previous[afterIndex - 1]! + 1;
         directions[directionIndex] = 1;
@@ -284,16 +296,12 @@ export function compareRevisionMarkdown(
           ? 2
           : 3;
     if (direction === 1) {
-      if (
-        !append({ kind: 'equal', text: before.lines[beforeIndex - 1]! })
-      )
+      if (!append({ kind: 'equal', text: before.lines[beforeIndex - 1]! }))
         return unavailable(before, after, bomChanged, lineEndingsChanged);
       beforeIndex -= 1;
       afterIndex -= 1;
     } else if (direction === 2) {
-      if (
-        !append({ kind: 'removed', text: before.lines[beforeIndex - 1]! })
-      )
+      if (!append({ kind: 'removed', text: before.lines[beforeIndex - 1]! }))
         return unavailable(before, after, bomChanged, lineEndingsChanged);
       beforeIndex -= 1;
     } else {

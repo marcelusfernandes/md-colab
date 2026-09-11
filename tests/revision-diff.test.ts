@@ -20,7 +20,10 @@ void test('diff distingue inclusão, remoção, substituição e bloco movido', 
     [{ kind: 'removed', text: 'b' }],
   );
 
-  const replacement = compareRevisionMarkdown('antes\nmesmo offset', 'depois\nmesmo offset');
+  const replacement = compareRevisionMarkdown(
+    'antes\nmesmo offset',
+    'depois\nmesmo offset',
+  );
   assert.deepEqual(
     replacement.lines.filter((line) => line.kind !== 'equal'),
     [
@@ -38,8 +41,29 @@ void test('conteúdo idêntico e diferenças de BOM ou terminação têm estados
   const identical = compareRevisionMarkdown('Olá 🌎\nlinha', 'Olá 🌎\nlinha');
   assert.equal(identical.identical, true);
   assert.deepEqual(identical.lines, []);
+  const identicalLongLine = 'á'.repeat(500_015);
+  assert.equal(
+    new TextEncoder().encode(identicalLongLine).byteLength,
+    1_000_030,
+  );
+  assert.deepEqual(
+    compareRevisionMarkdown(identicalLongLine, identicalLongLine),
+    {
+      available: true,
+      message: null,
+      identical: true,
+      bomChanged: false,
+      lineEndingsChanged: false,
+      before: { bom: false, lineEndings: 'none', finalNewline: false },
+      after: { bom: false, lineEndings: 'none', finalNewline: false },
+      lines: [],
+    },
+  );
 
-  const formatting = compareRevisionMarkdown('\uFEFFOlá\r\nlinha\r\n', 'Olá\nlinha\n');
+  const formatting = compareRevisionMarkdown(
+    '\uFEFFOlá\r\nlinha\r\n',
+    'Olá\nlinha\n',
+  );
   assert.equal(formatting.available, true);
   assert.equal(formatting.identical, false);
   assert.equal(formatting.bomChanged, true);
