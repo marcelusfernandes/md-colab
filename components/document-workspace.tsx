@@ -48,6 +48,10 @@ import type {
   CommentPagination,
   DocumentSummary,
   ShareRow,
+  ConversationRow,
+  ConversationFilter,
+  ConversationEventAction,
+  ConversationEventRow,
 } from '@/lib/document-service';
 import {
   collectionAttemptMatches,
@@ -71,6 +75,22 @@ import {
   type CommentOperation,
 } from '@/lib/comment-operation';
 import { commentPageFromResponse, mergeComments } from '@/lib/comment-page';
+import {
+  conversationChangesFromResponse,
+  conversationEventsFromResponse,
+  conversationFilters,
+  conversationPageFromResponse,
+  conversationRepliesFromResponse,
+  mergeConversationReplies,
+} from '@/lib/conversation-page';
+import {
+  conversationEventFromResponse,
+  conversationOperationMatches,
+  conversationOperationRequest,
+  createConversationOperation,
+  updateConversationOperation,
+  type ConversationOperation,
+} from '@/lib/conversation-operation';
 import {
   createImportOperation,
   documentFromImportResponse,
@@ -209,6 +229,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const sharesNextCursor = useRef<string | null>(null);
   const sharesMutationRequest = useRef(0);
   const refreshCommentsRef = useRef<(() => Promise<void>) | null>(null);
+  const refreshConversationsRef = useRef<(() => Promise<void>) | null>(null);
+  const conversationOperationRef = useRef<ConversationOperation | null>(null);
+  const conversationGeneration = useRef(0);
+  const conversationRequest = useRef(0);
+  const conversationChangeRequest = useRef(0);
+  const conversationChangeInProgress = useRef(false);
+  const conversationsNextCursor = useRef<string | null>(null);
+  const conversationsChangeCursor = useRef<string | null>(null);
+  const activeConversationFilter = useRef<ConversationFilter>('all');
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [accessMode, setAccessMode] = useState<'email' | 'test'>('email');
   const [authorMode, setAuthorMode] = useState<'allowlist' | 'open'>(
@@ -224,9 +253,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [doc, setDoc] = useState<DocumentRow | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [comments, setComments] = useState<CommentRow[]>([]);
-  const [hasOlderComments, setHasOlderComments] = useState(false);
+  const [, setHasOlderComments] = useState(false);
   const [commentsUpdating, setCommentsUpdating] = useState(false);
-  const [commentsLoadingOlder, setCommentsLoadingOlder] = useState(false);
+  const [, setCommentsLoadingOlder] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [shares, setShares] = useState<ShareRow[]>([]);
   const [sharesLoading, setSharesLoading] = useState(false);
@@ -248,7 +277,29 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     'id' | 'filename'
   > | null>(null);
   const [commentsRefreshError, setCommentsRefreshError] = useState('');
-  const [commentsHistoryError, setCommentsHistoryError] = useState('');
+  const [, setCommentsHistoryError] = useState('');
+  const [conversationRows, setConversationRows] = useState<ConversationRow[]>([]);
+  const [conversationFilter, setConversationFilter] =
+    useState<ConversationFilter>('all');
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [conversationsLoadingMore, setConversationsLoadingMore] = useState(false);
+  const [conversationsError, setConversationsError] = useState('');
+  const [conversationOperation, setConversationOperation] =
+    useState<ConversationOperation | null>(null);
+  const [conversationDrafts, setConversationDrafts] = useState<
+    Record<string, { action: ConversationEventAction; reason: string }>
+  >({});
+  const [conversationHistories, setConversationHistories] = useState<
+    Record<
+      string,
+      {
+        events: ConversationEventRow[];
+        nextCursor: string | null;
+        loading: boolean;
+        error: string;
+      }
+    >
+  >({});
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [shareError, setShareError] = useState('');
@@ -257,7 +308,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [notice, setNotice] = useState('');
   const hasUnconfirmedComment =
     Boolean(comment.trim()) || Boolean(commentOperation?.body.trim());
-  const hasUnconfirmedWork = hasUnconfirmedComment || Boolean(importOperation);
+  const hasUnconfirmedWork =
+    hasUnconfirmedComment || Boolean(importOperation) || Boolean(conversationOperation);
   const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
     () =>
       doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] },
@@ -269,33 +321,6 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       markdownComponents(markdownAnalysis.headingIds as Record<number, string>),
     [markdownAnalysis.headingIds],
   );
-  const conversations = useMemo(() => {
-    const byRoot = new Map<string, CommentRow[]>();
-    for (const entry of comments) {
-      const entries = byRoot.get(entry.root_id) ?? [];
-      entries.push(entry);
-      byRoot.set(entry.root_id, entries);
-    }
-    return [...byRoot.entries()]
-      .map(([rootId, entries]) => {
-        const root = entries.find((entry) => entry.id === rootId) ?? entries[0];
-        return {
-          root,
-          replies: entries
-            .filter((entry) => entry.id !== root.id)
-            .sort(
-              (left, right) =>
-                left.created_at.localeCompare(right.created_at) ||
-                left.id.localeCompare(right.id),
-            ),
-        };
-      })
-      .sort(
-        (left, right) =>
-          left.root.created_at.localeCompare(right.root.created_at) ||
-          left.root.id.localeCompare(right.root.id),
-      );
-  }, [comments]);
   const pendingReplyRoot = useMemo(
     () =>
       commentOperation?.rootId
@@ -326,6 +351,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     (operation: ImportOperation | null) => {
       importOperationRef.current = operation;
       setImportOperation(operation);
+    },
+    [],
+  );
+  const storeConversationOperation = useCallback(
+    (operation: ConversationOperation | null) => {
+      conversationOperationRef.current = operation;
+      setConversationOperation(operation);
     },
     [],
   );
@@ -376,6 +408,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     (operation: CommentOperation, confirmed: CommentRow) => {
       if (commentOperationRef.current?.id !== operation.id) return;
       commentSendRequest.current += 1;
+      conversationGeneration.current += 1;
+      conversationRequest.current += 1;
+      conversationChangeRequest.current += 1;
+      conversationChangeInProgress.current = false;
+      conversationsNextCursor.current = null;
+      conversationsChangeCursor.current = null;
       setBusy((current) =>
         current === 'comment' || current === 'comment-lookup' ? '' : current,
       );
@@ -391,6 +429,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       commentOperationRef.current = null;
       setCommentOperation(null);
       setNotice('Comentário confirmado.');
+      void refreshConversationsRef.current?.();
     },
     [],
   );
@@ -421,6 +460,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setReplyRoot(null);
       setCommentsRefreshError('');
       setCommentsHistoryError('');
+      setConversationRows([]);
+      setConversationsLoading(false);
+      setConversationsLoadingMore(false);
+      setConversationsError('');
+      setConversationHistories({});
+      const conversationAttempt = conversationOperationRef.current;
+      if (conversationAttempt)
+        storeConversationOperation(
+          updateConversationOperation(
+            conversationAttempt,
+            'error',
+            'O acesso mudou. A escolha e o motivo foram preservados, mas esta operação não será reenviada nesta sessão.',
+          ),
+        );
       const operation = commentOperationRef.current;
       if (operation) {
         const blocked = updateCommentOperation(
@@ -445,7 +498,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setCanCreate(false);
       }
     },
-    [clearShareContext],
+    [clearShareContext, storeConversationOperation],
   );
 
   const load = useCallback(async () => {
@@ -494,6 +547,17 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           'A tentativa anterior pertencia a outra sessão e não foi reutilizada.',
         );
       }
+      const previousConversationOperation = conversationOperationRef.current;
+      if (
+        previousConversationOperation &&
+        previousConversationOperation.viewerId !== user.id
+      ) {
+        storeConversationOperation(null);
+        setConversationDrafts({});
+        setNotice(
+          'A alteração de conversa anterior pertencia a outra sessão e não foi reutilizada.',
+        );
+      }
       const previousImport = importOperationRef.current;
       if (
         previousImport &&
@@ -519,6 +583,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setCanCreate(allowed);
       setNeedsLogin(false);
       if (documentId) {
+        setConversationsLoading(true);
         const result = await api<{
           document: DocumentRow;
           comments: CommentRow[];
@@ -526,6 +591,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           pagination: CommentPagination;
           isOwner: boolean;
         }>('documents/' + documentId);
+        if (!mounted.current || request !== loadRequest.current) return;
+        const conversationPage = conversationPageFromResponse(
+          await api<unknown>(
+            'documents/' + documentId + '/conversations?filter=all',
+            'GET',
+            undefined,
+            { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+          ),
+        );
         if (!mounted.current || request !== loadRequest.current) return;
         const currentOperation = commentOperationRef.current;
         if (
@@ -552,6 +626,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           );
         }
         contextGeneration.current += 1;
+        conversationGeneration.current += 1;
+        conversationRequest.current += 1;
+        conversationChangeRequest.current += 1;
         commentsRequest.current += 1;
         commentsHistoryRequest.current += 1;
         commentsRefreshInProgress.current = false;
@@ -559,6 +636,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         activeDocumentId.current = result.document.id;
         activeViewerId.current = user.id;
         setDoc(result.document);
+        activeConversationFilter.current = 'all';
+        setConversationFilter('all');
+        setConversationRows(conversationPage.conversations);
+        conversationsNextCursor.current = conversationPage.nextCursor;
+        conversationsChangeCursor.current = conversationPage.changeCursor;
+        setConversationsLoading(false);
+        setConversationsLoadingMore(false);
+        setConversationsError('');
+        setConversationHistories({});
         const commentPage = commentPageFromResponse(result);
         commentsNextCursor.current = commentPage.pagination.nextCursor;
         commentsOlderCursor.current = commentPage.pagination.olderCursor;
@@ -601,6 +687,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       }
     } catch (e) {
       if (!mounted.current || request !== loadRequest.current) return;
+      setConversationsLoading(false);
       if (
         documentId &&
         e instanceof ApiError &&
@@ -673,6 +760,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     documentId,
     hideProtectedContent,
     storeCommentOperation,
+    storeConversationOperation,
     storeImportOperation,
   ]);
   useEffect(() => {
@@ -823,6 +911,172 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       }
     }
   }
+  const loadConversationPage = useCallback(
+    async (filter: ConversationFilter, append = false) => {
+      if (!doc || !viewer) return;
+      const cursor = append ? conversationsNextCursor.current : null;
+      if (append && !cursor) return;
+      const generation = conversationGeneration.current;
+      const request = ++conversationRequest.current;
+      if (append) setConversationsLoadingMore(true);
+      else setConversationsLoading(true);
+      setConversationsError('');
+      try {
+        const parameters = new URLSearchParams({ filter });
+        if (cursor) parameters.set('cursor', cursor);
+        const page = conversationPageFromResponse(
+          await api<unknown>(
+            `documents/${doc.id}/conversations?${parameters}`,
+            'GET',
+            undefined,
+            { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+          ),
+        );
+        if (
+          !mounted.current ||
+          generation !== conversationGeneration.current ||
+          request !== conversationRequest.current ||
+          activeConversationFilter.current !== filter ||
+          activeDocumentId.current !== doc.id ||
+          activeViewerId.current !== viewer.id
+        )
+          return;
+        setConversationRows((current) =>
+          append
+            ? [
+                ...new Map(
+                  [...current, ...page.conversations].map((entry) => [
+                    entry.root.id,
+                    entry,
+                  ]),
+                ).values(),
+              ]
+            : page.conversations,
+        );
+        conversationsNextCursor.current = page.nextCursor;
+        // An older-page snapshot must not advance the live watermark: changes
+        // to already loaded roots still need to be observed by the poller.
+        if (!append) conversationsChangeCursor.current = page.changeCursor;
+        setConversationsError('');
+      } catch (cause) {
+        if (
+          !mounted.current ||
+          generation !== conversationGeneration.current ||
+          request !== conversationRequest.current
+        )
+          return;
+        if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
+          hideProtectedContent(cause);
+        else setConversationsError(errorText(cause));
+      } finally {
+        if (
+          mounted.current &&
+          generation === conversationGeneration.current &&
+          request === conversationRequest.current
+        ) {
+          setConversationsLoading(false);
+          setConversationsLoadingMore(false);
+        }
+      }
+    },
+    [doc, hideProtectedContent, viewer],
+  );
+
+  const chooseConversationFilter = useCallback(
+    (filter: ConversationFilter) => {
+      if (filter === activeConversationFilter.current) return;
+      conversationGeneration.current += 1;
+      conversationRequest.current += 1;
+      conversationChangeRequest.current += 1;
+      conversationsNextCursor.current = null;
+      conversationsChangeCursor.current = null;
+      activeConversationFilter.current = filter;
+      setConversationFilter(filter);
+      setConversationRows([]);
+      setConversationHistories({});
+      setConversationsError('');
+      void loadConversationPage(filter);
+    },
+    [loadConversationPage],
+  );
+
+  useEffect(() => {
+    if (!doc || !viewer) return;
+    let active = true;
+    const poll = async () => {
+      if (
+        document.visibilityState !== 'visible' ||
+        conversationChangeInProgress.current
+      )
+        return;
+      const initialCursor = conversationsChangeCursor.current;
+      if (!initialCursor) return;
+      const generation = conversationGeneration.current;
+      const request = ++conversationChangeRequest.current;
+      conversationChangeInProgress.current = true;
+      try {
+        let cursor = initialCursor;
+        let changed = false;
+        for (;;) {
+          const changes = conversationChangesFromResponse(
+            await api<unknown>(
+              `documents/${doc.id}/conversation-changes?after=${encodeURIComponent(cursor)}`,
+              'GET',
+              undefined,
+              { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+            ),
+          );
+          if (
+            !active ||
+            generation !== conversationGeneration.current ||
+            request !== conversationChangeRequest.current ||
+            activeDocumentId.current !== doc.id ||
+            activeViewerId.current !== viewer.id
+          )
+            return;
+          if (changes.hasMore && changes.nextCursor === cursor)
+            throw new Error('O servidor retornou um feed de conversas inválido.');
+          changed ||= changes.rootIds.length > 0;
+          cursor = changes.nextCursor;
+          conversationsChangeCursor.current = cursor;
+          if (!changes.hasMore) break;
+        }
+        if (changed)
+          await loadConversationPage(activeConversationFilter.current);
+      } catch (cause) {
+        if (
+          !active ||
+          generation !== conversationGeneration.current ||
+          request !== conversationChangeRequest.current
+        )
+          return;
+        if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
+          hideProtectedContent(cause);
+        else
+          setConversationsError(
+            'Não foi possível atualizar as conversas. ' + errorText(cause),
+          );
+      } finally {
+        if (
+          active &&
+          generation === conversationGeneration.current &&
+          request === conversationChangeRequest.current
+        )
+          conversationChangeInProgress.current = false;
+      }
+    };
+    refreshConversationsRef.current = poll;
+    const timer = window.setInterval(() => void poll(), 15_000);
+    window.addEventListener('focus', poll);
+    return () => {
+      active = false;
+      if (refreshConversationsRef.current === poll)
+        refreshConversationsRef.current = null;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', poll);
+    };
+  }, [doc, hideProtectedContent, loadConversationPage, viewer]);
+
   useEffect(() => {
     if (!loadedDocumentId || !window.location.hash) return;
     const frame = window.requestAnimationFrame(() => {
@@ -955,7 +1209,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     viewer,
   ]);
 
-  const loadOlderComments = useCallback(async () => {
+  const _loadOlderComments = useCallback(async () => {
     if (!doc || !viewer || commentsHistoryInProgress.current) return;
     const cursor = commentsOlderCursor.current;
     if (!cursor) return;
@@ -1564,6 +1818,321 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     storeCommentOperation(operation);
     await sendCommentOperation(operation);
   }
+  function applyConversationEvent(event: ConversationEventRow) {
+    setConversationRows((current) =>
+      current.map((entry) =>
+        entry.root.id === event.root_id
+          ? {
+              ...entry,
+              state: event.state,
+              decision: event.decision,
+              decisionReason: event.decision_reason,
+              version: event.version,
+            }
+          : entry,
+      ),
+    );
+  }
+  async function sendConversationOperation(operation: ConversationOperation) {
+    if (
+      busy ||
+      !conversationOperationMatches(
+        operation,
+        activeDocumentId.current,
+        activeViewerId.current,
+      )
+    )
+      return;
+    storeConversationOperation(
+      updateConversationOperation(operation, 'sending', ''),
+    );
+    setBusy('conversation');
+    setConversationsError('');
+    try {
+      const result = await api<unknown>(
+        `documents/${operation.documentId}/conversations/${operation.rootId}/events`,
+        'POST',
+        conversationOperationRequest(operation),
+        { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+      );
+      if (
+        !mounted.current ||
+        conversationOperationRef.current?.id !== operation.id ||
+        !conversationOperationMatches(
+          operation,
+          activeDocumentId.current,
+          activeViewerId.current,
+        )
+      )
+        return;
+      const confirmed = conversationEventFromResponse(result, operation);
+      applyConversationEvent(confirmed);
+      setConversationHistories((current) => {
+        const history = current[operation.rootId];
+        if (!history) return current;
+        return {
+          ...current,
+          [operation.rootId]: {
+            ...history,
+            events: [
+              confirmed,
+              ...history.events.filter((event) => event.id !== confirmed.id),
+            ],
+          },
+        };
+      });
+      storeConversationOperation(null);
+      setNotice('Alteração da conversa confirmada.');
+      await loadConversationPage(activeConversationFilter.current);
+    } catch (cause) {
+      if (
+        !mounted.current ||
+        conversationOperationRef.current?.id !== operation.id ||
+        !conversationOperationMatches(
+          operation,
+          activeDocumentId.current,
+          activeViewerId.current,
+        )
+      )
+        return;
+      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) {
+        hideProtectedContent(cause);
+        return;
+      }
+      const rejected = cause instanceof ApiError && [400, 409].includes(cause.status);
+      storeConversationOperation(
+        updateConversationOperation(
+          operation,
+          rejected ? 'error' : 'uncertain',
+          rejected
+            ? errorText(cause)
+            : `${errorText(cause)} O servidor pode ter recebido a alteração; verifique ou reenvie a mesma operação.`,
+        ),
+      );
+    } finally {
+      if (mounted.current)
+        setBusy((current) => (current === 'conversation' ? '' : current));
+    }
+  }
+  async function verifyConversationOperation(operation: ConversationOperation) {
+    if (
+      busy ||
+      !conversationOperationMatches(
+        operation,
+        activeDocumentId.current,
+        activeViewerId.current,
+      )
+    )
+      return;
+    setBusy('conversation-lookup');
+    try {
+      const result = await api<unknown>(
+        `documents/${operation.documentId}/conversations/${operation.rootId}/events/${operation.id}`,
+        'GET',
+        undefined,
+        { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+      );
+      if (
+        !mounted.current ||
+        conversationOperationRef.current?.id !== operation.id
+      )
+        return;
+      const value = result as { event?: unknown } | null;
+      if (value?.event === null) {
+        storeConversationOperation(
+          updateConversationOperation(
+            operation,
+            'uncertain',
+            'A alteração ainda não foi encontrada. Verifique novamente ou reenvie a mesma operação.',
+          ),
+        );
+        return;
+      }
+      const confirmed = conversationEventFromResponse(result, operation);
+      applyConversationEvent(confirmed);
+      storeConversationOperation(null);
+      setNotice('Alteração da conversa confirmada.');
+      await loadConversationPage(activeConversationFilter.current);
+    } catch (cause) {
+      if (
+        !mounted.current ||
+        conversationOperationRef.current?.id !== operation.id
+      )
+        return;
+      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) {
+        hideProtectedContent(cause);
+        return;
+      }
+      storeConversationOperation(
+        updateConversationOperation(
+          operation,
+          'uncertain',
+          `${errorText(cause)} O resultado continua incerto.`,
+        ),
+      );
+    } finally {
+      setBusy((current) =>
+        current === 'conversation-lookup' ? '' : current,
+      );
+    }
+  }
+  function startConversationOperation(
+    conversation: ConversationRow,
+    action: ConversationEventAction,
+    reason?: string,
+  ) {
+    if (!doc || !viewer || !isOwner || busy || conversationOperation) return;
+    const operation = createConversationOperation({
+      documentId: doc.id,
+      rootId: conversation.root.id,
+      viewerId: viewer.id,
+      baseVersion: conversation.version,
+      action,
+      reason,
+    });
+    storeConversationOperation(operation);
+    void sendConversationOperation(operation);
+  }
+  async function retryConversationAsNew(operation: ConversationOperation) {
+    if (!doc || !viewer || busy) return;
+    setBusy('conversation-reload');
+    try {
+      const result = (await api<unknown>(
+        `documents/${doc.id}/conversations/${operation.rootId}`,
+        'GET',
+        undefined,
+        { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+      )) as {
+        conversation?: {
+          root_id?: unknown;
+          version?: unknown;
+        };
+      };
+      if (
+        !mounted.current ||
+        conversationOperationRef.current?.id !== operation.id ||
+        result.conversation?.root_id !== operation.rootId ||
+        !Number.isSafeInteger(result.conversation.version) ||
+        Number(result.conversation.version) < 0
+      )
+        throw new Error('O servidor retornou um estado de conversa inválido.');
+      const replacement = createConversationOperation({
+        documentId: doc.id,
+        rootId: operation.rootId,
+        viewerId: viewer.id,
+        baseVersion: Number(result.conversation.version),
+        action: operation.action,
+        reason: operation.reason,
+      });
+      storeConversationOperation(replacement);
+      setBusy('');
+      await sendConversationOperation(replacement);
+    } catch (cause) {
+      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
+        hideProtectedContent(cause);
+      else
+        storeConversationOperation(
+          updateConversationOperation(
+            operation,
+            'error',
+            `${errorText(cause)} A escolha e o motivo continuam preservados.`,
+          ),
+        );
+    } finally {
+      setBusy((current) => (current === 'conversation-reload' ? '' : current));
+    }
+  }
+  async function loadConversationReplies(conversation: ConversationRow) {
+    if (!doc || !conversation.repliesCursor || busy) return;
+    setBusy(`replies:${conversation.root.id}`);
+    try {
+      const page = conversationRepliesFromResponse(
+        await api<unknown>(
+          `documents/${doc.id}/conversations/${conversation.root.id}/replies?cursor=${encodeURIComponent(conversation.repliesCursor)}`,
+          'GET',
+          undefined,
+          { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+        ),
+        conversation.root.id,
+      );
+      if (!mounted.current || activeDocumentId.current !== doc.id) return;
+      setConversationRows((current) =>
+        current.map((entry) =>
+          entry.root.id === conversation.root.id
+            ? mergeConversationReplies(entry, page.replies, page.nextCursor)
+            : entry,
+        ),
+      );
+    } catch (cause) {
+      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
+        hideProtectedContent(cause);
+      else setConversationsError(errorText(cause));
+    } finally {
+      setBusy((current) =>
+        current === `replies:${conversation.root.id}` ? '' : current,
+      );
+    }
+  }
+  async function loadConversationHistory(rootId: string, append = false) {
+    if (!doc || busy) return;
+    const current = conversationHistories[rootId];
+    const cursor = append ? current?.nextCursor : null;
+    if (append && !cursor) return;
+    setConversationHistories((histories) => ({
+      ...histories,
+      [rootId]: {
+        events: append ? (histories[rootId]?.events ?? []) : [],
+        nextCursor: append ? (histories[rootId]?.nextCursor ?? null) : null,
+        loading: true,
+        error: '',
+      },
+    }));
+    try {
+      const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+      const page = conversationEventsFromResponse(
+        await api<unknown>(
+          `documents/${doc.id}/conversations/${rootId}/events${suffix}`,
+          'GET',
+          undefined,
+          { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+        ),
+        rootId,
+      );
+      if (!mounted.current || activeDocumentId.current !== doc.id) return;
+      setConversationHistories((histories) => ({
+        ...histories,
+        [rootId]: {
+          events: append
+            ? [
+                ...(histories[rootId]?.events ?? []),
+                ...page.events.filter(
+                  (event) =>
+                    !(histories[rootId]?.events ?? []).some(
+                      (currentEvent) => currentEvent.id === event.id,
+                    ),
+                ),
+              ]
+            : page.events,
+          nextCursor: page.nextCursor,
+          loading: false,
+          error: '',
+        },
+      }));
+    } catch (cause) {
+      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
+        hideProtectedContent(cause);
+      else
+        setConversationHistories((histories) => ({
+          ...histories,
+          [rootId]: {
+            events: histories[rootId]?.events ?? [],
+            nextCursor: histories[rootId]?.nextCursor ?? null,
+            loading: false,
+            error: errorText(cause),
+          },
+        }));
+    }
+  }
   function currentShareContext() {
     return doc && viewer
       ? `${doc.id}:${viewer.id}:${viewer.isTest ? 'test' : 'email'}`
@@ -2126,9 +2695,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 <MessageSquare size={18} /> Comentários{' '}
                 <span
                   className="comment-count"
-                  aria-label={`${comments.length} comentários carregados`}
+                  aria-label={`${conversationRows.length} conversas carregadas`}
                 >
-                  {comments.length} carregados
+                  {conversationRows.length} conversas
                 </span>
               </h2>
               {commentsRefreshError && (
@@ -2147,6 +2716,107 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 <output className="comments-progress">
                   Buscando novos comentários…
                 </output>
+              )}
+              <div className="conversation-filters" aria-label="Filtrar conversas">
+                {conversationFilters.map((filter) => (
+                  <button
+                    type="button"
+                    key={filter.value}
+                    aria-pressed={conversationFilter === filter.value}
+                    disabled={conversationsLoading}
+                    onClick={() => chooseConversationFilter(filter.value)}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+              <p className="conversation-filter-status" aria-live="polite">
+                Filtro ativo:{' '}
+                {conversationFilters.find(
+                  (filter) => filter.value === conversationFilter,
+                )?.label ?? 'Todas'}
+                .
+              </p>
+              {conversationsError && (
+                <div className="comments-refresh-error" role="alert">
+                  <p>{conversationsError}</p>
+                  <button
+                    type="button"
+                    disabled={conversationsLoading}
+                    onClick={() => void loadConversationPage(conversationFilter)}
+                  >
+                    Tentar carregar conversas novamente
+                  </button>
+                </div>
+              )}
+              {conversationOperation && (
+                <div
+                  className={
+                    'comment-operation comment-operation-' +
+                    conversationOperation.status
+                  }
+                  role={
+                    conversationOperation.status === 'sending'
+                      ? 'status'
+                      : 'alert'
+                  }
+                >
+                  <strong>
+                    {conversationOperation.status === 'sending'
+                      ? 'Salvando alteração da conversa…'
+                      : conversationOperation.status === 'uncertain'
+                        ? 'Resultado da alteração ainda não confirmado'
+                        : 'Revise esta alteração da conversa'}
+                  </strong>
+                  {conversationOperation.message && (
+                    <p>{conversationOperation.message}</p>
+                  )}
+                  {conversationOperation.reason && (
+                    <p>Motivo preservado: {conversationOperation.reason}</p>
+                  )}
+                  {conversationOperation.status === 'uncertain' && (
+                    <div className="comment-operation-actions">
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() =>
+                          void verifyConversationOperation(conversationOperation)
+                        }
+                      >
+                        Verificar agora
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() =>
+                          void sendConversationOperation(conversationOperation)
+                        }
+                      >
+                        Reenviar a mesma operação
+                      </button>
+                    </div>
+                  )}
+                  {conversationOperation.status === 'error' && (
+                    <div className="comment-operation-actions">
+                      <button
+                        type="button"
+                        disabled={!!busy || conversationsLoading}
+                        onClick={() =>
+                          void retryConversationAsNew(conversationOperation)
+                        }
+                      >
+                        Recarregar e tentar com novo identificador
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() => storeConversationOperation(null)}
+                      >
+                        Manter apenas como rascunho
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
               <form onSubmit={(event) => void addComment(event)}>
                 {composerIsReply ? (
@@ -2295,38 +2965,45 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         : 'Comentar'}
                 </Button>
               </form>
-              {hasOlderComments && !commentsHistoryError && (
-                <div className="comments-pagination">
-                  <p>Há comentários anteriores além dos carregados.</p>
-                  <button
-                    type="button"
-                    disabled={!!busy || commentsLoadingOlder}
-                    onClick={() => void loadOlderComments()}
-                  >
-                    {commentsLoadingOlder
-                      ? 'Carregando anteriores…'
-                      : 'Carregar comentários anteriores'}
-                  </button>
+              {conversationsLoading && conversationRows.length === 0 ? (
+                <div className="comments-empty">Carregando conversas…</div>
+              ) : conversationRows.length === 0 ? (
+                <div className="comments-empty">
+                  {conversationFilter === 'all'
+                    ? 'Nenhum comentário ainda.'
+                    : 'Nenhuma conversa corresponde a este filtro.'}
                 </div>
-              )}
-              {commentsHistoryError && (
-                <div className="comments-refresh-error" role="alert">
-                  <p>{commentsHistoryError}</p>
-                  <button
-                    type="button"
-                    disabled={!!busy || commentsLoadingOlder}
-                    onClick={() => void loadOlderComments()}
-                  >
-                    Tentar carregar anteriores novamente
-                  </button>
-                </div>
-              )}
-              {comments.length === 0 ? (
-                <div className="comments-empty">Nenhum comentário ainda.</div>
               ) : (
                 <div className="comments-list">
-                  {conversations.map(({ root, replies }) => (
+                  {conversationRows.map((conversation) => {
+                    const { root, replies } = conversation;
+                    const draft = conversationDrafts[root.id] ?? {
+                      action: conversation.decision ?? ('follow' as const),
+                      reason: conversation.decisionReason ?? '',
+                    };
+                    const history = conversationHistories[root.id];
+                    return (
                     <section className="comment-thread" key={root.id}>
+                      <div className="conversation-summary">
+                        <span className={`conversation-state conversation-state-${conversation.state}`}>
+                          {conversation.state === 'open' ? 'Aberta' : 'Encerrada'}
+                        </span>
+                        <span>
+                          {conversation.replyCount === 0
+                            ? 'Sem resposta'
+                            : `${conversation.replyCount} ${conversation.replyCount === 1 ? 'resposta' : 'respostas'}`}
+                        </span>
+                        {conversation.decision && (
+                          <span>
+                            Decisão:{' '}
+                            {conversation.decision === 'follow'
+                              ? 'seguir'
+                              : conversation.decision === 'refute'
+                                ? 'refutar'
+                                : 'adiar'}
+                          </span>
+                        )}
+                      </div>
                       <section className="comment-item">
                         <div className="comment-author">
                           <span className="avatar">
@@ -2364,6 +3041,74 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         >
                           Responder
                         </button>
+                        {isOwner && (
+                          <div className="conversation-owner-controls">
+                            <button
+                              type="button"
+                              disabled={!!busy || !!conversationOperation}
+                              onClick={() =>
+                                startConversationOperation(
+                                  conversation,
+                                  conversation.state === 'open' ? 'close' : 'reopen',
+                                )
+                              }
+                            >
+                              {conversation.state === 'open'
+                                ? 'Encerrar conversa'
+                                : 'Reabrir conversa'}
+                            </button>
+                            <label>
+                              Decisão do autor
+                              <select
+                                value={draft.action}
+                                disabled={!!busy || !!conversationOperation}
+                                onChange={(event) =>
+                                  setConversationDrafts((current) => ({
+                                    ...current,
+                                    [root.id]: {
+                                      ...draft,
+                                      action: event.target.value as ConversationEventAction,
+                                    },
+                                  }))
+                                }
+                              >
+                                <option value="follow">Seguir</option>
+                                <option value="refute">Refutar</option>
+                                <option value="defer">Adiar</option>
+                              </select>
+                            </label>
+                            <label>
+                              Motivo opcional
+                              <input
+                                value={draft.reason}
+                                maxLength={500}
+                                disabled={!!busy || !!conversationOperation}
+                                onChange={(event) =>
+                                  setConversationDrafts((current) => ({
+                                    ...current,
+                                    [root.id]: {
+                                      ...draft,
+                                      reason: event.target.value,
+                                    },
+                                  }))
+                                }
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              disabled={!!busy || !!conversationOperation}
+                              onClick={() =>
+                                startConversationOperation(
+                                  conversation,
+                                  draft.action,
+                                  draft.reason,
+                                )
+                              }
+                            >
+                              Registrar decisão
+                            </button>
+                          </div>
+                        )}
                       </section>
                       {replies.map((entry) => (
                         <section
@@ -2384,8 +3129,85 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           <p>{entry.body}</p>
                         </section>
                       ))}
+                      {conversation.repliesCursor && (
+                        <button
+                          type="button"
+                          className="comment-reply conversation-more"
+                          disabled={!!busy}
+                          onClick={() => void loadConversationReplies(conversation)}
+                        >
+                          Carregar respostas anteriores
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="comment-reply conversation-history-toggle"
+                        disabled={history?.loading}
+                        onClick={() => {
+                          if (history)
+                            setConversationHistories((current) => {
+                              const next = { ...current };
+                              delete next[root.id];
+                              return next;
+                            });
+                          else void loadConversationHistory(root.id);
+                        }}
+                      >
+                        {history ? 'Ocultar histórico' : 'Ver histórico'}
+                      </button>
+                      {history && (
+                        <div className="conversation-history">
+                          {history.error && <p role="alert">{history.error}</p>}
+                          {history.loading && history.events.length === 0 ? (
+                            <p>Carregando histórico…</p>
+                          ) : history.events.length === 0 ? (
+                            <p>Nenhuma alteração registrada. A conversa começou aberta.</p>
+                          ) : (
+                            <ol>
+                              {history.events.map((event) => (
+                                <li key={event.id}>
+                                  <strong>{event.actor_name}</strong>{' '}
+                                  {event.action === 'close'
+                                    ? 'encerrou a conversa'
+                                    : event.action === 'reopen'
+                                      ? 'reabriu a conversa'
+                                      : `decidiu ${event.action === 'follow' ? 'seguir' : event.action === 'refute' ? 'refutar' : 'adiar'}`}{' '}
+                                  <time dateTime={event.created_at}>
+                                    {dateLabel(event.created_at)}
+                                  </time>
+                                  {event.reason && <p>{event.reason}</p>}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                          {history.nextCursor && (
+                            <button
+                              type="button"
+                              disabled={history.loading}
+                              onClick={() => void loadConversationHistory(root.id, true)}
+                            >
+                              Carregar histórico anterior
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </section>
-                  ))}
+                    );
+                  })}
+                </div>
+              )}
+              {conversationsNextCursor.current && (
+                <div className="comments-pagination">
+                  <p>Há mais conversas neste filtro.</p>
+                  <button
+                    type="button"
+                    disabled={conversationsLoadingMore}
+                    onClick={() => void loadConversationPage(conversationFilter, true)}
+                  >
+                    {conversationsLoadingMore
+                      ? 'Carregando conversas…'
+                      : 'Carregar mais conversas'}
+                  </button>
                 </div>
               )}
             </aside>

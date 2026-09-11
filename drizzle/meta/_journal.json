@@ -43,6 +43,13 @@
       "when": 1789083883318,
       "tag": "0005_first_apocalypse",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789086401119,
+      "tag": "0006_hesitant_dazzler",
+      "breakpoints": true
     }
   ]
 }

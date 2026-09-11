@@ -29,6 +29,14 @@ async function data(response: Response) {
     redirect: string;
     isOwner: boolean;
     comments: { author_name: string }[];
+    conversations: Array<{
+      root: { id: string };
+      state: 'open' | 'closed';
+    }>;
+    changeCursor: string;
+    rootIds: string[];
+    event: { id: string; decision_reason: string | null };
+    events: Array<{ id: string }>;
   }>;
 }
 function fixture() {
@@ -379,6 +387,160 @@ void test('HTTP mantém respostas na raiz autorizada e rejeita replay, outro pla
   assert.equal((await f.call(`documents/${documentId}/comments`, 'POST', {
     id: crypto.randomUUID(), authorId: guestSession.viewer.id, body: 'Após revogação.', rootId,
   }, guestCookie)).status, 404);
+});
+
+void test('HTTP expõe filtros e histórico a participantes, mas reserva transições ao dono atual', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const ownerSession = await data(
+    await f.call('session', 'GET', undefined, owner.cookie),
+  );
+  const created = await f.call(
+    'documents',
+    'POST',
+    {
+      id: crypto.randomUUID(),
+      authorId: ownerSession.viewer.id,
+      markdown: '# Conversas',
+      filename: 'conversas.md',
+    },
+    owner.cookie,
+  );
+  const documentId = (await data(created)).document.id;
+  const invite = await f.call(
+    `documents/${documentId}/shares`,
+    'POST',
+    { email: 'conversation-guest@example.com' },
+    owner.cookie,
+  );
+  assert.equal(invite.status, 200);
+  const guestLogin = await f.call('auth/verify', 'POST', {
+    token: f.mailbox.lastToken(),
+  });
+  const guestCookie = guestLogin.headers.get('set-cookie')!.split(';')[0];
+  const guestSession = await data(
+    await f.call('session', 'GET', undefined, guestCookie),
+  );
+  const rootId = crypto.randomUUID();
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/comments`,
+        'POST',
+        {
+          id: rootId,
+          authorId: guestSession.viewer.id,
+          body: 'Crítica a decidir.',
+        },
+        guestCookie,
+      )
+    ).status,
+    201,
+  );
+  const pageResponse = await f.call(
+    `documents/${documentId}/conversations?filter=unanswered`,
+    'GET',
+    undefined,
+    guestCookie,
+  );
+  assert.equal(pageResponse.status, 200);
+  const page = await data(pageResponse);
+  assert.equal(page.conversations[0].root.id, rootId);
+  assert.equal(page.conversations[0].state, 'open');
+  const rejected = await f.call(
+    `documents/${documentId}/conversations/${rootId}/events`,
+    'POST',
+    {
+      id: crypto.randomUUID(),
+      authorId: guestSession.viewer.id,
+      baseVersion: 0,
+      action: 'close',
+    },
+    guestCookie,
+  );
+  assert.equal(rejected.status, 404);
+  const eventId = crypto.randomUUID();
+  const accepted = await f.call(
+    `documents/${documentId}/conversations/${rootId}/events`,
+    'POST',
+    {
+      id: eventId,
+      authorId: ownerSession.viewer.id,
+      baseVersion: 0,
+      action: 'defer',
+      reason: 'Aguardar evidência.',
+    },
+    owner.cookie,
+  );
+  assert.equal(accepted.status, 201);
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/conversations/${rootId}/events`,
+        'POST',
+        {
+          id: eventId,
+          authorId: ownerSession.viewer.id,
+          baseVersion: 0,
+          action: 'defer',
+          reason: 'Aguardar evidência.',
+        },
+        owner.cookie,
+      )
+    ).status,
+    200,
+  );
+  const lookup = await data(
+    await f.call(
+      `documents/${documentId}/conversations/${rootId}/events/${eventId}`,
+      'GET',
+      undefined,
+      guestCookie,
+    ),
+  );
+  assert.equal(lookup.event.id, eventId);
+  assert.equal(lookup.event.decision_reason, 'Aguardar evidência.');
+  const history = await data(
+    await f.call(
+      `documents/${documentId}/conversations/${rootId}/events`,
+      'GET',
+      undefined,
+      guestCookie,
+    ),
+  );
+  assert.equal(history.events.length, 1);
+  const changes = await data(
+    await f.call(
+      `documents/${documentId}/conversation-changes?after=${encodeURIComponent(page.changeCursor)}`,
+      'GET',
+      undefined,
+      guestCookie,
+    ),
+  );
+  assert.deepEqual(changes.rootIds, [rootId]);
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/shares`,
+        'DELETE',
+        { email: 'conversation-guest@example.com' },
+        owner.cookie,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/conversations/${rootId}/events/${eventId}`,
+        'GET',
+        undefined,
+        guestCookie,
+      )
+    ).status,
+    404,
+  );
 });
 
 void test('listas HTTP aceitam somente um cursor opcional e preservam envelopes nomeados', async (t) => {

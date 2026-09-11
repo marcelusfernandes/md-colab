@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 6);
+  assert.equal(first.applied.length, 7);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    6,
+    7,
   );
   restarted.sqlite.close();
 
@@ -154,6 +154,39 @@ void test('comments migration and its ledger entry commit atomically', (t) => {
       ['comment-b', 'comment-b', 2],
     ],
   );
+  assert.equal(
+    success.prepare('SELECT count(*) AS count FROM conversation_events').get()
+      ?.count,
+    0,
+  );
+  assert.equal(
+    success.prepare('SELECT count(*) AS count FROM conversation_changes').get()
+      ?.count,
+    0,
+  );
+  success
+    .prepare(
+      `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
+       VALUES(?,?,?,?,?,?,?)`,
+    )
+    .run(
+      'legacy-writer',
+      'doc',
+      'owner',
+      'Legacy writer',
+      '',
+      null,
+      '2026-09-10T00:00:03Z',
+    );
+  const legacyChange = success
+    .prepare(
+      `SELECT c.root_id,changes.root_id AS changed_root
+       FROM comments c JOIN conversation_changes changes ON changes.root_id=c.id
+       WHERE c.id='legacy-writer'`,
+    )
+    .get();
+  assert.equal(legacyChange?.root_id, 'legacy-writer');
+  assert.equal(legacyChange?.changed_root, 'legacy-writer');
   success.close();
 
   appendFileSync(
@@ -290,6 +323,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
   assert.deepEqual(backup.pending, [
     '0004_polite_mandrill',
     '0005_first_apocalypse',
+    '0006_hesitant_dazzler',
   ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
@@ -307,6 +341,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
   assert.deepEqual(result.pending, [
     '0004_polite_mandrill',
     '0005_first_apocalypse',
+    '0006_hesitant_dazzler',
   ]);
   assert.throws(
     () => openPersistentD1(restorePath),

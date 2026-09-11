@@ -45,6 +45,46 @@ export type CommentPageQuery = {
   before?: string;
   after?: string;
 };
+export type ConversationFilter = 'all' | 'open' | 'unanswered' | 'closed';
+export type ConversationEventAction =
+  | 'close'
+  | 'reopen'
+  | 'follow'
+  | 'refute'
+  | 'defer';
+export type ConversationEventRow = {
+  id: string;
+  root_id: string;
+  actor_id: string;
+  actor_name: string;
+  base_version: number;
+  version: number;
+  action: ConversationEventAction;
+  state: 'open' | 'closed';
+  decision: 'follow' | 'refute' | 'defer' | null;
+  decision_reason: string | null;
+  reason: string | null;
+  created_at: string;
+};
+export type ConversationRow = {
+  root: CommentRow;
+  replies: CommentRow[];
+  repliesCursor: string | null;
+  replyCount: number;
+  state: 'open' | 'closed';
+  decision: 'follow' | 'refute' | 'defer' | null;
+  decisionReason: string | null;
+  version: number;
+};
+export type ConversationPageQuery = {
+  filter?: ConversationFilter;
+  cursor?: string;
+};
+export type ConversationPage = {
+  conversations: ConversationRow[];
+  nextCursor: string | null;
+  changeCursor: string;
+};
 export type ShareRow = { email: string; name: string; created_at: string };
 export type DocumentSummary = Omit<DocumentRow, 'markdown'> & {
   owner_name: string;
@@ -59,6 +99,11 @@ export type SharePage = { shares: ShareRow[]; nextCursor: string | null };
 const documentPageSize = 50;
 const sharePageSize = 100;
 const commentPageSize = 100;
+const conversationPageSize = 50;
+const conversationReplyPreviewSize = 3;
+const conversationReplyPageSize = 50;
+const conversationEventPageSize = 50;
+const conversationChangePageSize = 99;
 const publicCommentFields =
   'c.id,COALESCE(c.root_id,c.id) AS root_id,c.body,c.quote,c.source_start,c.created_at,c.author_id,u.name AS author_name';
 type CommentCursorKind = 'before' | 'after';
@@ -87,6 +132,38 @@ type ShareCursor = {
   isTest: boolean;
   createdAt: string;
   email: string;
+};
+type ConversationCursor = {
+  v: 1;
+  type: 'conversations';
+  direction: 'older';
+  documentId: string;
+  filter: ConversationFilter;
+  sequence: number;
+};
+type ConversationChangeCursor = {
+  v: 1;
+  type: 'conversation-changes';
+  documentId: string;
+  sequence: number;
+};
+type ConversationChildCursor = {
+  v: 1;
+  type: 'conversation-replies' | 'conversation-events';
+  documentId: string;
+  rootId: string;
+  sequence: number;
+};
+type ConversationRootRow = SequencedCommentRow & {
+  state: 'open' | 'closed';
+  decision: 'follow' | 'refute' | 'defer' | null;
+  decision_reason: string | null;
+  version: number;
+  reply_count: number;
+};
+type SequencedConversationEventRow = ConversationEventRow & {
+  transport_sequence: number;
+  document_id: string;
 };
 
 function cursorBase64(value: string) {
@@ -226,6 +303,112 @@ function decodeCommentCursor(
     return cursor.s!;
   } catch {
     throw new HttpError(400, 'Cursor de comentários inválido.');
+  }
+}
+
+function validSequence(value: unknown, minimum = 0): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= minimum;
+}
+
+function encodeConversationCursor(cursor: ConversationCursor) {
+  return cursorBase64(JSON.stringify(cursor));
+}
+
+function decodeConversationCursor(
+  value: string,
+  documentId: string,
+  filter: ConversationFilter,
+) {
+  try {
+    if (!validCursorText(value)) throw new Error();
+    const cursor = JSON.parse(cursorText(value)) as Partial<ConversationCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !==
+        'direction,documentId,filter,sequence,type,v' ||
+      cursor.v !== 1 ||
+      cursor.type !== 'conversations' ||
+      cursor.direction !== 'older' ||
+      cursor.documentId !== documentId ||
+      cursor.filter !== filter ||
+      !validSequence(cursor.sequence, 1) ||
+      encodeConversationCursor(cursor as ConversationCursor) !== value
+    )
+      throw new Error();
+    return cursor.sequence!;
+  } catch {
+    throw new HttpError(400, 'Cursor de conversas inválido.');
+  }
+}
+
+function encodeConversationChangeCursor(cursor: ConversationChangeCursor) {
+  return cursorBase64(JSON.stringify(cursor));
+}
+
+function decodeConversationChangeCursor(value: string, documentId: string) {
+  try {
+    if (!validCursorText(value)) throw new Error();
+    const cursor = JSON.parse(
+      cursorText(value),
+    ) as Partial<ConversationChangeCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !== 'documentId,sequence,type,v' ||
+      cursor.v !== 1 ||
+      cursor.type !== 'conversation-changes' ||
+      cursor.documentId !== documentId ||
+      !validSequence(cursor.sequence) ||
+      encodeConversationChangeCursor(cursor as ConversationChangeCursor) !==
+        value
+    )
+      throw new Error();
+    return cursor.sequence!;
+  } catch {
+    throw new HttpError(400, 'Cursor de mudanças de conversas inválido.');
+  }
+}
+
+function encodeConversationChildCursor(cursor: ConversationChildCursor) {
+  return cursorBase64(JSON.stringify(cursor));
+}
+
+function decodeConversationChildCursor(
+  value: string,
+  documentId: string,
+  rootId: string,
+  type: ConversationChildCursor['type'],
+) {
+  try {
+    if (!validCursorText(value)) throw new Error();
+    const cursor = JSON.parse(
+      cursorText(value),
+    ) as Partial<ConversationChildCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !==
+        'documentId,rootId,sequence,type,v' ||
+      cursor.v !== 1 ||
+      cursor.type !== type ||
+      cursor.documentId !== documentId ||
+      cursor.rootId !== rootId ||
+      !validSequence(cursor.sequence, 1) ||
+      encodeConversationChildCursor(cursor as ConversationChildCursor) !== value
+    )
+      throw new Error();
+    return cursor.sequence!;
+  } catch {
+    throw new HttpError(
+      400,
+      type === 'conversation-replies'
+        ? 'Cursor de respostas inválido.'
+        : 'Cursor de histórico inválido.',
+    );
   }
 }
 
@@ -617,6 +800,427 @@ export class DocumentService {
       const root = roots.get(rootId);
       return root ? [root] : [];
     });
+  }
+
+  private async conversationRoot(id: string, rootId: string) {
+    if (!/^[0-9a-f-]{36}$/i.test(rootId))
+      throw new HttpError(400, 'Conversa inválida.');
+    const root = await this.db
+      .prepare(
+        `SELECT id FROM comments
+         WHERE document_id=? AND id=? AND COALESCE(root_id,id)=id`,
+      )
+      .bind(id, rootId)
+      .first<{ id: string }>();
+    if (!root) throw new HttpError(404, 'Conversa indisponível.');
+    return root;
+  }
+
+  async conversationState(id: string, rootId: string) {
+    await this.document(id);
+    await this.conversationRoot(id, rootId);
+    return this.db
+      .prepare(
+        `SELECT r.id AS root_id,COALESCE(e.state,'open') AS state,e.decision,
+           e.decision_reason,COALESCE(e.version,0) AS version,
+           (SELECT count(*) FROM comments reply
+            WHERE reply.document_id=r.document_id
+              AND COALESCE(reply.root_id,reply.id)=r.id
+              AND reply.id<>r.id) AS reply_count
+         FROM comments r LEFT JOIN conversation_events e ON e.sequence=(
+           SELECT latest.sequence FROM conversation_events latest
+           WHERE latest.document_id=r.document_id AND latest.root_id=r.id
+           ORDER BY latest.version DESC LIMIT 1
+         )
+         WHERE r.document_id=? AND r.id=? AND COALESCE(r.root_id,r.id)=r.id`,
+      )
+      .bind(id, rootId)
+      .first<{
+        root_id: string;
+        state: 'open' | 'closed';
+        decision: 'follow' | 'refute' | 'defer' | null;
+        decision_reason: string | null;
+        version: number;
+        reply_count: number;
+      }>();
+  }
+
+  async conversations(
+    id: string,
+    query: ConversationPageQuery = {},
+  ): Promise<ConversationPage> {
+    await this.document(id);
+    const filter = query.filter ?? 'all';
+    if (!['all', 'open', 'unanswered', 'closed'].includes(filter))
+      throw new HttpError(400, 'Filtro de conversas inválido.');
+    const boundary = query.cursor
+      ? decodeConversationCursor(query.cursor, id, filter)
+      : null;
+    // The watermark is captured before the snapshot so a concurrent write is
+    // either represented in the snapshot or replayed by the unfiltered feed.
+    const watermark =
+      (await this.db
+        .prepare(
+          'SELECT COALESCE(max(sequence),0) AS sequence FROM conversation_changes WHERE document_id=?',
+        )
+        .bind(id)
+        .first<{ sequence: number }>())?.sequence ?? 0;
+    const filterSql =
+      filter === 'open'
+        ? "AND COALESCE(e.state,'open')='open'"
+        : filter === 'closed'
+          ? "AND COALESCE(e.state,'open')='closed'"
+          : filter === 'unanswered'
+            ? 'AND NOT EXISTS(SELECT 1 FROM comments reply WHERE reply.document_id=c.document_id AND COALESCE(reply.root_id,reply.id)=c.id AND reply.id<>c.id)'
+            : '';
+    const rows = (
+      await this.db
+        .prepare(
+          `SELECT ${publicCommentFields},c.sequence AS transport_sequence,
+             COALESCE(e.state,'open') AS state,e.decision,e.decision_reason,
+             COALESCE(e.version,0) AS version,
+             (SELECT count(*) FROM comments reply
+              WHERE reply.document_id=c.document_id
+                AND COALESCE(reply.root_id,reply.id)=c.id
+                AND reply.id<>c.id) AS reply_count
+           FROM comments c JOIN users u ON u.id=c.author_id
+           LEFT JOIN conversation_events e ON e.sequence=(
+             SELECT latest.sequence FROM conversation_events latest
+             WHERE latest.document_id=c.document_id AND latest.root_id=c.id
+             ORDER BY latest.version DESC LIMIT 1
+           )
+           WHERE c.document_id=? AND COALESCE(c.root_id,c.id)=c.id
+             ${boundary === null ? '' : 'AND c.sequence<?'}
+             ${filterSql}
+           ORDER BY c.sequence DESC LIMIT ?`,
+        )
+        .bind(
+          id,
+          ...(boundary === null ? [] : [boundary]),
+          conversationPageSize + 1,
+        )
+        .all<ConversationRootRow>()
+    ).results;
+    const page = rows.slice(0, conversationPageSize);
+    const rootIds = page.map((row) => row.id);
+    const repliesByRoot = new Map<string, SequencedCommentRow[]>();
+    if (rootIds.length > 0) {
+      const placeholders = rootIds.map(() => '?').join(',');
+      const replies = (
+        await this.db
+          .prepare(
+            `WITH ranked AS (
+               SELECT ${publicCommentFields},c.sequence AS transport_sequence,
+                 ROW_NUMBER() OVER (PARTITION BY c.root_id ORDER BY c.sequence DESC) AS rank
+               FROM comments c JOIN users u ON u.id=c.author_id
+               WHERE c.document_id=? AND c.root_id IN (${placeholders}) AND c.id<>c.root_id
+             )
+             SELECT * FROM ranked WHERE rank<=? ORDER BY transport_sequence DESC`,
+          )
+          .bind(id, ...rootIds, conversationReplyPreviewSize + 1)
+          .all<SequencedCommentRow & { rank: number }>()
+      ).results;
+      for (const reply of replies) {
+        const entries = repliesByRoot.get(reply.root_id) ?? [];
+        entries.push(reply);
+        repliesByRoot.set(reply.root_id, entries);
+      }
+    }
+    const conversations = page.map((row) => {
+      const {
+        transport_sequence: _transportSequence,
+        reply_count,
+        decision_reason,
+        state,
+        decision,
+        version,
+        ...root
+      } = row;
+      const newest = repliesByRoot.get(row.id) ?? [];
+      const preview = newest.slice(0, conversationReplyPreviewSize);
+      return {
+        root,
+        replies: publicComments(preview),
+        repliesCursor:
+          newest.length > conversationReplyPreviewSize && preview.length > 0
+            ? encodeConversationChildCursor({
+                v: 1,
+                type: 'conversation-replies',
+                documentId: id,
+                rootId: row.id,
+                sequence: sequenceOf(preview.at(-1)),
+              })
+            : null,
+        replyCount: Number(reply_count),
+        state,
+        decision,
+        decisionReason: decision_reason,
+        version: Number(version),
+      } satisfies ConversationRow;
+    });
+    const last = page.at(-1);
+    return {
+      conversations,
+      nextCursor:
+        rows.length > conversationPageSize && last
+          ? encodeConversationCursor({
+              v: 1,
+              type: 'conversations',
+              direction: 'older',
+              documentId: id,
+              filter,
+              sequence: sequenceOf(last),
+            })
+          : null,
+      changeCursor: encodeConversationChangeCursor({
+        v: 1,
+        type: 'conversation-changes',
+        documentId: id,
+        sequence: Number(watermark),
+      }),
+    };
+  }
+
+  async conversationChanges(id: string, after: string) {
+    await this.document(id);
+    const boundary = decodeConversationChangeCursor(after, id);
+    const rows = (
+      await this.db
+        .prepare(
+          `SELECT sequence,root_id FROM conversation_changes
+           WHERE document_id=? AND sequence>? ORDER BY sequence LIMIT ?`,
+        )
+        .bind(id, boundary, conversationChangePageSize + 1)
+        .all<{ sequence: number; root_id: string }>()
+    ).results;
+    const page = rows.slice(0, conversationChangePageSize);
+    const sequence = page.at(-1)?.sequence ?? boundary;
+    return {
+      rootIds: [...new Set(page.map((row) => row.root_id))],
+      nextCursor: encodeConversationChangeCursor({
+        v: 1,
+        type: 'conversation-changes',
+        documentId: id,
+        sequence: Number(sequence),
+      }),
+      hasMore: rows.length > conversationChangePageSize,
+    };
+  }
+
+  async conversationReplies(id: string, rootId: string, cursor?: string) {
+    await this.document(id);
+    await this.conversationRoot(id, rootId);
+    const boundary = cursor
+      ? decodeConversationChildCursor(
+          cursor,
+          id,
+          rootId,
+          'conversation-replies',
+        )
+      : null;
+    const rows = (
+      await this.db
+        .prepare(
+          `SELECT ${publicCommentFields},c.sequence AS transport_sequence
+           FROM comments c JOIN users u ON u.id=c.author_id
+           WHERE c.document_id=? AND c.root_id=? AND c.id<>c.root_id
+             ${boundary === null ? '' : 'AND c.sequence<?'}
+           ORDER BY c.sequence DESC LIMIT ?`,
+        )
+        .bind(
+          id,
+          rootId,
+          ...(boundary === null ? [] : [boundary]),
+          conversationReplyPageSize + 1,
+        )
+        .all<SequencedCommentRow>()
+    ).results;
+    const page = rows.slice(0, conversationReplyPageSize);
+    return {
+      replies: publicComments(page),
+      nextCursor:
+        rows.length > conversationReplyPageSize && page.length > 0
+          ? encodeConversationChildCursor({
+              v: 1,
+              type: 'conversation-replies',
+              documentId: id,
+              rootId,
+              sequence: sequenceOf(page.at(-1)),
+            })
+          : null,
+    };
+  }
+
+  async conversationEvents(id: string, rootId: string, cursor?: string) {
+    await this.document(id);
+    await this.conversationRoot(id, rootId);
+    const boundary = cursor
+      ? decodeConversationChildCursor(
+          cursor,
+          id,
+          rootId,
+          'conversation-events',
+        )
+      : null;
+    const rows = (
+      await this.db
+        .prepare(
+          `SELECT e.id,e.document_id,e.root_id,e.actor_id,u.name AS actor_name,
+             e.base_version,e.version,e.action,e.state,e.decision,
+             e.decision_reason,e.reason,e.created_at,e.sequence AS transport_sequence
+           FROM conversation_events e JOIN users u ON u.id=e.actor_id
+           WHERE e.document_id=? AND e.root_id=?
+             ${boundary === null ? '' : 'AND e.sequence<?'}
+           ORDER BY e.sequence DESC LIMIT ?`,
+        )
+        .bind(
+          id,
+          rootId,
+          ...(boundary === null ? [] : [boundary]),
+          conversationEventPageSize + 1,
+        )
+        .all<SequencedConversationEventRow>()
+    ).results;
+    const page = rows.slice(0, conversationEventPageSize);
+    return {
+      events: page.map(({ transport_sequence: _sequence, document_id: _id, ...event }) => event),
+      nextCursor:
+        rows.length > conversationEventPageSize && page.length > 0
+          ? encodeConversationChildCursor({
+              v: 1,
+              type: 'conversation-events',
+              documentId: id,
+              rootId,
+              sequence: Number(page.at(-1)!.transport_sequence),
+            })
+          : null,
+    };
+  }
+
+  async conversationEvent(id: string, rootId: string, eventId: string) {
+    await this.document(id);
+    await this.conversationRoot(id, rootId);
+    if (!/^[0-9a-f-]{36}$/i.test(eventId))
+      throw new HttpError(400, 'Identificador inválido.');
+    return this.db
+      .prepare(
+        `SELECT e.id,e.root_id,e.actor_id,u.name AS actor_name,e.base_version,
+           e.version,e.action,e.state,e.decision,e.decision_reason,e.reason,e.created_at
+         FROM conversation_events e JOIN users u ON u.id=e.actor_id
+         WHERE e.document_id=? AND e.root_id=? AND e.id=?`,
+      )
+      .bind(id, rootId, eventId)
+      .first<ConversationEventRow>();
+  }
+
+  async addConversationEvent(
+    id: string,
+    rootId: string,
+    input: Record<string, unknown>,
+  ) {
+    const document = await this.document(id, true);
+    await this.conversationRoot(id, rootId);
+    if (
+      Object.keys(input).some(
+        (key) => !['id', 'authorId', 'baseVersion', 'action', 'reason'].includes(key),
+      )
+    )
+      throw new HttpError(400, 'Alteração de conversa inválida.');
+    const eventId = requiredText(input.id, 'Identificador da alteração', 36);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId))
+      throw new HttpError(400, 'Identificador da alteração inválido.');
+    const actorId = requiredText(input.authorId, 'Autor da alteração', 128);
+    if (actorId !== this.viewer.id)
+      throw new HttpError(409, 'Esta alteração pertence a outra sessão.');
+    const baseVersion = input.baseVersion;
+    if (!validSequence(baseVersion))
+      throw new HttpError(400, 'Versão-base da conversa inválida.');
+    const action = input.action;
+    if (
+      typeof action !== 'string' ||
+      !['close', 'reopen', 'follow', 'refute', 'defer'].includes(action)
+    )
+      throw new HttpError(400, 'Ação de conversa inválida.');
+    const reason =
+      input.reason === undefined || input.reason === null || input.reason === ''
+        ? null
+        : requiredText(input.reason, 'Motivo', 500);
+    const existing = await this.db
+      .prepare(
+        `SELECT e.id,e.root_id,e.actor_id,u.name AS actor_name,e.base_version,
+           e.version,e.action,e.state,e.decision,e.decision_reason,e.reason,
+           e.created_at,e.document_id
+         FROM conversation_events e JOIN users u ON u.id=e.actor_id WHERE e.id=?`,
+      )
+      .bind(eventId)
+      .first<ConversationEventRow & { document_id: string }>();
+    if (existing) {
+      if (
+        existing.document_id !== id ||
+        existing.root_id !== rootId ||
+        existing.actor_id !== actorId ||
+        existing.base_version !== baseVersion ||
+        existing.action !== action ||
+        existing.reason !== reason
+      )
+        throw new HttpError(409, 'Esta alteração já foi usada em outra conversa ou com outro conteúdo.');
+      const { document_id: _documentId, ...event } = existing;
+      return { event, replayed: true };
+    }
+    const decision = ['follow', 'refute', 'defer'].includes(action)
+      ? action
+      : null;
+    const now = new Date().toISOString();
+    await this.db
+      .prepare(
+        `INSERT INTO conversation_events (
+           id,document_id,root_id,actor_id,base_version,version,action,state,
+           decision,decision_reason,reason,created_at
+         )
+         SELECT ?,d.id,r.id,?,?,?+1,?,
+           CASE WHEN ?='close' THEN 'closed' WHEN ?='reopen' THEN 'open'
+             ELSE COALESCE(previous.state,'open') END,
+           CASE WHEN ? IS NOT NULL THEN ? ELSE previous.decision END,
+           CASE WHEN ? IS NOT NULL THEN ? ELSE previous.decision_reason END,
+           ?,?
+         FROM documents d JOIN comments r ON r.document_id=d.id
+         LEFT JOIN conversation_events previous ON previous.sequence=(
+           SELECT latest.sequence FROM conversation_events latest
+           WHERE latest.document_id=d.id AND latest.root_id=r.id
+           ORDER BY latest.version DESC LIMIT 1
+         )
+         WHERE d.id=? AND d.owner_id=? AND d.is_test=? AND r.id=?
+           AND COALESCE(r.root_id,r.id)=r.id
+           AND COALESCE(previous.version,0)=?`,
+      )
+      .bind(
+        eventId,
+        actorId,
+        baseVersion,
+        baseVersion,
+        action,
+        action,
+        action,
+        decision,
+        decision,
+        decision,
+        reason,
+        reason,
+        now,
+        id,
+        actorId,
+        document.is_test,
+        rootId,
+        baseVersion,
+      )
+      .run();
+    const inserted = await this.conversationEvent(id, rootId, eventId);
+    if (!inserted)
+      throw new HttpError(
+        409,
+        'A conversa mudou desde a sua leitura. Seu motivo foi preservado para revisão.',
+      );
+    return { event: inserted, replayed: false };
   }
 
   async comment(id: string, commentId: string) {

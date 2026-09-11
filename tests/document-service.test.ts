@@ -107,6 +107,33 @@ function pauseConcurrentDocumentInserts(db: D1Database) {
   return { controlled, arrivals: () => arrivals };
 }
 
+function pauseConcurrentConversationInserts(db: D1Database) {
+  let arrivals = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.startsWith('INSERT INTO conversation_events')) return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async run() {
+            arrivals += 1;
+            if (arrivals === 2) release();
+            await gate;
+            return bound.run();
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return { controlled, arrivals: () => arrivals };
+}
+
 function pauseAfterCommentInsert(db: D1Database) {
   let inserted!: () => void;
   let resume!: () => void;
@@ -1274,6 +1301,320 @@ void test('falha inesperada após INSERT confirmado não é convertida em sucess
       1,
     );
     assert.equal((await owner.create(payload)).markdown, payload.markdown);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('estado e decisão da conversa têm histórico append-only, replay antigo e conflito por versão', async () => {
+  const { sqlite, owner, guest } = fixture();
+  try {
+    await Promise.all([owner.registerViewer(), guest.registerViewer()]);
+    const document = await createDocument(owner, {
+      markdown: '# Decisões',
+      filename: 'decisoes.md',
+    });
+    await owner.share(document.id, { email: guest.viewer.email });
+    const root = await guest.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: guest.viewer.id,
+      body: 'Considere reduzir o escopo.',
+    });
+    const initial = await owner.conversations(document.id);
+    assert.equal(initial.conversations[0]?.state, 'open');
+    assert.equal(initial.conversations[0]?.decision, null);
+    assert.equal(initial.conversations[0]?.version, 0);
+    assert.equal(
+      sqlite.prepare('SELECT count(*) AS count FROM conversation_events').get()
+        ?.count,
+      0,
+      'raízes existentes não ganham ator ou evento fabricado',
+    );
+
+    const followId = crypto.randomUUID();
+    const followed = await owner.addConversationEvent(document.id, root.id, {
+      id: followId,
+      authorId: owner.viewer.id,
+      baseVersion: 0,
+      action: 'follow',
+      reason: 'Reduz risco sem perder o objetivo.',
+    });
+    assert.equal(followed.event.state, 'open');
+    assert.equal(followed.event.decision, 'follow');
+    assert.equal(
+      followed.event.decision_reason,
+      'Reduz risco sem perder o objetivo.',
+    );
+    const closed = await owner.addConversationEvent(document.id, root.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      baseVersion: 1,
+      action: 'close',
+    });
+    assert.equal(closed.event.state, 'closed');
+    assert.equal(closed.event.decision, 'follow');
+    assert.equal(
+      closed.event.decision_reason,
+      'Reduz risco sem perder o objetivo.',
+    );
+    const reopened = await owner.addConversationEvent(document.id, root.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      baseVersion: 2,
+      action: 'reopen',
+      reason: 'Uma nova resposta trouxe contexto.',
+    });
+    assert.equal(reopened.event.state, 'open');
+    assert.equal(reopened.event.decision, 'follow');
+
+    const oldReplay = await owner.addConversationEvent(document.id, root.id, {
+      id: followId,
+      authorId: owner.viewer.id,
+      baseVersion: 0,
+      action: 'follow',
+      reason: 'Reduz risco sem perder o objetivo.',
+    });
+    assert.equal(oldReplay.replayed, true);
+    assert.equal(oldReplay.event.version, 1);
+    assert.equal((await owner.conversations(document.id)).conversations[0]?.state, 'open');
+    assert.equal(
+      sqlite.prepare('SELECT count(*) AS count FROM conversation_events').get()
+        ?.count,
+      3,
+    );
+
+    const stale = {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      baseVersion: 2,
+      action: 'refute',
+      reason: 'Este motivo precisa permanecer no cliente.',
+    };
+    await assert.rejects(
+      owner.addConversationEvent(document.id, root.id, stale),
+      (error) =>
+        error instanceof HttpError &&
+        error.status === 409 &&
+        error.message.includes('motivo'),
+    );
+    await assert.rejects(
+      owner.addConversationEvent(document.id, root.id, {
+        ...stale,
+        id: followId,
+      }),
+      (error) => error instanceof HttpError && error.status === 409,
+    );
+    await assert.rejects(
+      guest.addConversationEvent(document.id, root.id, {
+        id: crypto.randomUUID(),
+        authorId: guest.viewer.id,
+        baseVersion: 3,
+        action: 'close',
+      }),
+      denied,
+    );
+    assert.equal((await guest.conversationEvents(document.id, root.id)).events.length, 3);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('filtros e changefeed reagem a respostas e estado sem depender da sequência de comentários', async () => {
+  const { sqlite, owner, guest } = fixture();
+  try {
+    await Promise.all([owner.registerViewer(), guest.registerViewer()]);
+    const document = await createDocument(owner, {
+      markdown: '# Filtros',
+      filename: 'filtros.md',
+    });
+    await owner.share(document.id, { email: guest.viewer.email });
+    const unansweredRoot = await guest.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: guest.viewer.id,
+      body: 'Sem resposta.',
+    });
+    const answeredRoot = await guest.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: guest.viewer.id,
+      body: 'Com resposta.',
+    });
+    await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Resposta inicial.',
+      rootId: answeredRoot.id,
+    });
+    const snapshot = await owner.conversations(document.id, {
+      filter: 'unanswered',
+    });
+    assert.deepEqual(
+      snapshot.conversations.map((entry) => entry.root.id),
+      [unansweredRoot.id],
+    );
+    const closed = await owner.addConversationEvent(
+      document.id,
+      unansweredRoot.id,
+      {
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        baseVersion: 0,
+        action: 'close',
+      },
+    );
+    assert.equal(closed.event.version, 1);
+    assert.deepEqual(
+      (await owner.conversations(document.id, { filter: 'closed' })).conversations.map(
+        (entry) => entry.root.id,
+      ),
+      [unansweredRoot.id],
+    );
+    assert.deepEqual(
+      (await owner.conversations(document.id, { filter: 'open' })).conversations.map(
+        (entry) => entry.root.id,
+      ),
+      [answeredRoot.id],
+    );
+    await guest.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: guest.viewer.id,
+      body: 'Revisor ainda pode responder encerrada.',
+      rootId: unansweredRoot.id,
+    });
+    assert.deepEqual(
+      (await owner.conversations(document.id, { filter: 'unanswered' })).conversations,
+      [],
+    );
+    assert.equal(
+      (await owner.conversations(document.id, { filter: 'closed' })).conversations[0]
+        ?.state,
+      'closed',
+      'responder não reabre a conversa',
+    );
+    const changes = await owner.conversationChanges(
+      document.id,
+      snapshot.changeCursor,
+    );
+    assert.ok(changes.rootIds.includes(unansweredRoot.id));
+    assert.equal(changes.hasMore, false);
+    assert.notEqual(changes.nextCursor, snapshot.changeCursor);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('duas transições na mesma versão não sobrescrevem estado ou decisão', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Concorrência',
+      filename: 'concorrencia.md',
+    });
+    const root = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Raiz concorrente.',
+    });
+    const schedule = pauseConcurrentConversationInserts(db);
+    const concurrent = new DocumentService(schedule.controlled, {
+      ...owner.viewer,
+    });
+    const results = await Promise.allSettled([
+      concurrent.addConversationEvent(document.id, root.id, {
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        baseVersion: 0,
+        action: 'close',
+      }),
+      concurrent.addConversationEvent(document.id, root.id, {
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        baseVersion: 0,
+        action: 'refute',
+        reason: 'Escolha concorrente.',
+      }),
+    ]);
+    assert.equal(schedule.arrivals(), 2);
+    assert.equal(
+      results.filter((result) => result.status === 'fulfilled').length,
+      1,
+    );
+    const rejected = results.find((result) => result.status === 'rejected');
+    assert.ok(
+      rejected?.status === 'rejected' &&
+        rejected.reason instanceof HttpError &&
+        rejected.reason.status === 409,
+    );
+    assert.equal(
+      sqlite.prepare('SELECT count(*) AS count FROM conversation_events').get()
+        ?.count,
+      1,
+    );
+    assert.equal((await owner.conversations(document.id)).conversations[0]?.version, 1);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('conversas e respostas usam páginas limitadas com cursores vinculados ao filtro e à raiz', async () => {
+  const { sqlite, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Páginas',
+      filename: 'paginas.md',
+    });
+    const roots = [];
+    for (let index = 0; index < 55; index += 1)
+      roots.push(
+        await owner.addComment(document.id, {
+          id: stableCommentId(20_000 + index),
+          authorId: owner.viewer.id,
+          body: `Raiz ${index}`,
+        }),
+      );
+    const busyRoot = roots.at(-1)!;
+    for (let index = 0; index < 54; index += 1)
+      await owner.addComment(document.id, {
+        id: stableCommentId(21_000 + index),
+        authorId: owner.viewer.id,
+        body: `Resposta ${index}`,
+        rootId: busyRoot.id,
+      });
+    const first = await owner.conversations(document.id, { filter: 'all' });
+    assert.equal(first.conversations.length, 50);
+    assert.ok(first.nextCursor);
+    const busy = first.conversations.find((entry) => entry.root.id === busyRoot.id)!;
+    assert.equal(busy.replies.length, 3);
+    assert.equal(busy.replyCount, 54);
+    assert.ok(busy.repliesCursor);
+    const olderReplies = await owner.conversationReplies(
+      document.id,
+      busyRoot.id,
+      busy.repliesCursor!,
+    );
+    assert.equal(olderReplies.replies.length, 50);
+    assert.ok(olderReplies.nextCursor);
+    const oldestReply = await owner.conversationReplies(
+      document.id,
+      busyRoot.id,
+      olderReplies.nextCursor!,
+    );
+    assert.equal(oldestReply.replies.length, 1);
+    assert.equal(oldestReply.nextCursor, null);
+    const second = await owner.conversations(document.id, {
+      filter: 'all',
+      cursor: first.nextCursor!,
+    });
+    assert.equal(second.conversations.length, 5);
+    assert.equal(second.nextCursor, null);
+    await assert.rejects(
+      owner.conversations(document.id, {
+        filter: 'open',
+        cursor: first.nextCursor!,
+      }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
   } finally {
     sqlite.close();
   }
