@@ -28,6 +28,11 @@ const UUID =
 const EXISTING_ID = /^[0-9a-f-]{36}$/i;
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+const validUuid = (value) => typeof value === 'string' && UUID.test(value);
+const validExistingId = (value) =>
+  typeof value === 'string' && EXISTING_ID.test(value);
+const validDigest = (value) =>
+  typeof value === 'string' && HEX_DIGEST.test(value);
 
 export class CliError extends Error {}
 export class UncertainResultError extends CliError {}
@@ -69,14 +74,14 @@ export function validateOrigin(input) {
 }
 
 function validateToken(value) {
-  if (!/^mdp_[0-9a-f]{64}$/.test(value ?? ''))
+  if (typeof value !== 'string' || !/^mdp_[0-9a-f]{64}$/.test(value))
     throw new CliError(`Defina uma credencial válida em ${TOKEN_ENV}.`);
   return value;
 }
 
 function timeoutFromEnvironment(value) {
   if (value === undefined) return DEFAULT_TIMEOUT_MS;
-  if (!/^[1-9]\d*$/.test(value))
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value))
     throw new CliError(`${TIMEOUT_ENV} deve ser um número inteiro positivo.`);
   const timeout = Number(value);
   if (!Number.isSafeInteger(timeout) || timeout > 300_000)
@@ -118,7 +123,7 @@ export function parseArguments(argv) {
   if (!['publish', 'lookup', 'retry'].includes(action))
     throw new CliError('A ação deve ser publish, lookup ou retry.');
   const documentId = values.get('--document');
-  if (!UUID.test(documentId)) throw new CliError('O UUID do plano é inválido.');
+  if (!validUuid(documentId)) throw new CliError('O UUID do plano é inválido.');
   const publishOnly = ['--context', '--file', '--title', '--summary'];
   if (action === 'publish') {
     for (const required of ['--context', '--file'])
@@ -255,14 +260,14 @@ function validateContextComment(value) {
       'is_root',
       'conversation',
     ]) ||
-    !EXISTING_ID.test(value.id) ||
-    !EXISTING_ID.test(value.root_id) ||
-    !EXISTING_ID.test(value.author_id) ||
+    !validExistingId(value.id) ||
+    !validExistingId(value.root_id) ||
+    !validExistingId(value.author_id) ||
     !validText(value.author_name) ||
     !validText(value.body) ||
     !validText(value.quote) ||
     !(value.source_start === null || validInteger(value.source_start)) ||
-    !EXISTING_ID.test(value.source_revision_id) ||
+    !validExistingId(value.source_revision_id) ||
     !validDate(value.created_at) ||
     typeof value.is_root !== 'boolean' ||
     (value.is_root ? value.id !== value.root_id : value.id === value.root_id) ||
@@ -290,9 +295,9 @@ function validateContextEvent(value) {
       'reason',
       'created_at',
     ]) ||
-    !EXISTING_ID.test(value.id) ||
-    !EXISTING_ID.test(value.root_id) ||
-    !EXISTING_ID.test(value.actor_id) ||
+    !validExistingId(value.id) ||
+    !validExistingId(value.root_id) ||
+    !validExistingId(value.actor_id) ||
     !validText(value.actor_name) ||
     !validInteger(value.base_version) ||
     !validInteger(value.version, 1) ||
@@ -329,21 +334,20 @@ function validateContextRevision(value, documentId) {
       'byte_length',
       'sha256',
     ]) ||
-    !EXISTING_ID.test(value.id) ||
+    !validExistingId(value.id) ||
     value.document_id !== documentId ||
     !validInteger(value.ordinal, 1) ||
-    !EXISTING_ID.test(value.author_id) ||
+    !validExistingId(value.author_id) ||
     !validText(value.author_name) ||
     !validText(value.title) ||
     !validText(value.filename) ||
     !(
-      value.base_revision_id === null ||
-      EXISTING_ID.test(value.base_revision_id)
+      value.base_revision_id === null || validExistingId(value.base_revision_id)
     ) ||
     !nullableText(value.summary) ||
     !Array.isArray(value.considered_comment_ids) ||
     value.considered_comment_ids.length > 100 ||
-    value.considered_comment_ids.some((id) => !EXISTING_ID.test(id)) ||
+    value.considered_comment_ids.some((id) => !validExistingId(id)) ||
     [...new Set(value.considered_comment_ids)].sort(compareText).join(',') !==
       value.considered_comment_ids.join(',') ||
     !validDate(value.created_at) ||
@@ -352,7 +356,7 @@ function validateContextRevision(value, documentId) {
     value.file !== `revision-${sha256(Buffer.from(value.id, 'utf8'))}.md` ||
     !validInteger(value.byte_length) ||
     value.byte_length > MAX_MARKDOWN_BYTES ||
-    !HEX_DIGEST.test(value.sha256)
+    !validDigest(value.sha256)
   )
     throw new CliError('O contexto contém um snapshot inválido.');
   return value;
@@ -514,10 +518,10 @@ export function validateContext(value, origin, documentId) {
       'counts',
     ]) ||
     value.document.id !== documentId ||
-    !EXISTING_ID.test(value.document.id) ||
+    !validExistingId(value.document.id) ||
     !validText(value.document.title) ||
     !validText(value.document.filename) ||
-    !EXISTING_ID.test(value.document.current_revision_id) ||
+    !validExistingId(value.document.current_revision_id) ||
     !validInteger(value.document.current_revision_ordinal, 1) ||
     !exactKeys(value.document.counts, ['comments', 'events', 'revisions']) ||
     !validInteger(value.document.counts.comments) ||
@@ -553,7 +557,7 @@ export function validateContext(value, origin, documentId) {
       (!exactKeys(value.comparison.local_file, ['byteLength', 'sha256']) ||
         !validInteger(value.comparison.local_file.byteLength) ||
         value.comparison.local_file.byteLength > MAX_MARKDOWN_BYTES ||
-        !HEX_DIGEST.test(value.comparison.local_file.sha256))) ||
+        !validDigest(value.comparison.local_file.sha256))) ||
     (value.comparison.status === 'not_compared' &&
       Object.hasOwn(value.comparison, 'local_file')) ||
     (value.comparison.status !== 'not_compared' &&
@@ -628,7 +632,7 @@ function effectiveMetadata(markdown, file, titleInput, summaryInput) {
 }
 
 function canonicalReferences(ids, context) {
-  if (ids.some((id) => !EXISTING_ID.test(id)))
+  if (ids.some((id) => !validExistingId(id)))
     throw new CliError('Uma referência de comentário é inválida.');
   const references = [...new Set(ids)].sort(compareText);
   if (references.length > 100)
@@ -697,7 +701,7 @@ function validateReceipt(receipt) {
   if (
     !exactKeys(receipt, ['ordinal', 'authorId', 'createdAt', 'recordedAt']) ||
     !validInteger(receipt.ordinal, 1) ||
-    !EXISTING_ID.test(receipt.authorId) ||
+    !validExistingId(receipt.authorId) ||
     !validDate(receipt.createdAt) ||
     !validDate(receipt.recordedAt)
   )
@@ -722,8 +726,8 @@ export function validateOperation(value) {
     ]) ||
     value.version !== OPERATION_VERSION ||
     validateOrigin(value.origin) !== value.origin ||
-    !UUID.test(value.documentId) ||
-    !UUID.test(value.revisionId) ||
+    !validUuid(value.documentId) ||
+    !validUuid(value.revisionId) ||
     !exactKeys(value.payload, [
       'baseRevisionId',
       'markdown',
@@ -734,10 +738,10 @@ export function validateOperation(value) {
       'summary',
       'consideredCommentIds',
     ]) ||
-    !UUID.test(value.payload.baseRevisionId) ||
+    !validUuid(value.payload.baseRevisionId) ||
     !validText(value.payload.markdown) ||
     !value.payload.markdown.trim() ||
-    !HEX_DIGEST.test(value.payload.markdownSha256) ||
+    !validDigest(value.payload.markdownSha256) ||
     !validInteger(value.payload.byteLength, 1) ||
     value.payload.byteLength > MAX_MARKDOWN_BYTES ||
     Buffer.byteLength(value.payload.markdown, 'utf8') !==
@@ -761,11 +765,11 @@ export function validateOperation(value) {
     ) ||
     !Array.isArray(value.payload.consideredCommentIds) ||
     value.payload.consideredCommentIds.length > 100 ||
-    value.payload.consideredCommentIds.some((id) => !EXISTING_ID.test(id)) ||
+    value.payload.consideredCommentIds.some((id) => !validExistingId(id)) ||
     [...new Set(value.payload.consideredCommentIds)]
       .sort(compareText)
       .join(',') !== value.payload.consideredCommentIds.join(',') ||
-    !HEX_DIGEST.test(value.payloadSha256) ||
+    !validDigest(value.payloadSha256) ||
     operationPayloadDigest(value) !== value.payloadSha256 ||
     !validDate(value.createdAt)
   )
@@ -926,10 +930,10 @@ function validateConsideredComment(value) {
       'quote',
       'created_at',
     ]) &&
-    EXISTING_ID.test(value.id) &&
-    EXISTING_ID.test(value.root_id) &&
-    EXISTING_ID.test(value.source_revision_id) &&
-    EXISTING_ID.test(value.author_id) &&
+    validExistingId(value.id) &&
+    validExistingId(value.root_id) &&
+    validExistingId(value.source_revision_id) &&
+    validExistingId(value.author_id) &&
     validText(value.author_name) &&
     validText(value.body) &&
     validText(value.quote) &&
@@ -959,7 +963,7 @@ function validateRevisionEnvelope(value, operation) {
     revision.id !== operation.revisionId ||
     revision.document_id !== operation.documentId ||
     !validInteger(revision.ordinal, 1) ||
-    !EXISTING_ID.test(revision.author_id) ||
+    !validExistingId(revision.author_id) ||
     revision.title !== operation.payload.title ||
     revision.filename !== operation.payload.filename ||
     revision.markdown !== operation.payload.markdown ||
@@ -1132,7 +1136,7 @@ async function persistReceipt(path, operation, revision, operations) {
     await syncDirectory(dirname(path), operations);
   } catch {
     throw new UncertainResultError(
-      'A revisão foi confirmada, mas o recibo não foi persistido. Preserve a operação e use --action lookup.',
+      'A revisão foi confirmada, mas a persistência local do recibo não foi confirmada. Preserve a operação e use --action lookup.',
     );
   } finally {
     await operations.unlink(temporary).catch(() => {});

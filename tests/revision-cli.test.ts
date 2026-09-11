@@ -395,6 +395,10 @@ void test('contexto completo recusa contagens, raízes, transições, cobertura 
     },
     (value: ReturnType<typeof context>) => value.revisions.pop(),
     (value: ReturnType<typeof context>) =>
+      (value.revisions[0].sha256 = ['b'.repeat(64)] as unknown as string),
+    (value: ReturnType<typeof context>) =>
+      (value.comments[0].author_id = [authorId] as unknown as string),
+    (value: ReturnType<typeof context>) =>
       (value.origin = 'https://other.example.com'),
   ];
   for (const mutate of cases) {
@@ -727,6 +731,30 @@ void test('confirmação 2xx inválida, falha de persistência e falha de stdout
       }),
       /POST foi iniciado sem um recibo confiável.*lookup/,
     );
+  await assert.rejects(
+    run(retryArgs, environment(), {
+      fetchImpl: async () => {
+        const coerced = receipt(invalidOperation);
+        coerced.revision.author_id = [authorId] as unknown as string;
+        return json(coerced, 200);
+      },
+      stdout: async () => {},
+    }),
+    /confirmação recebida é inválida/,
+  );
+  const coercedOperation = {
+    ...invalidOperation,
+    receipt: {
+      ordinal: 3,
+      authorId: [authorId],
+      createdAt: '2026-09-11T04:00:00.000Z',
+      recordedAt: '2026-09-11T04:00:00.000Z',
+    },
+  };
+  assert.throws(
+    () => validateOperation(coercedOperation),
+    /operação é inválido/,
+  );
 
   const persistenceDirectory = await temporary(t);
   await writeFile(
@@ -759,7 +787,7 @@ void test('confirmação 2xx inválida, falha de persistência e falha de stdout
       },
       stdout: async () => {},
     }),
-    /revisão foi confirmada.*recibo não foi persistido/,
+    /revisão foi confirmada.*persistência local do recibo não foi confirmada/,
   );
   const incomplete = validateOperation(
     JSON.parse(
