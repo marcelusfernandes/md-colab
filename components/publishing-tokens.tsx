@@ -82,6 +82,13 @@ export function PublishingTokens({
   const credentialsHeading = useRef<HTMLHeadingElement>(null);
   const revokeConfirmed = useRef(false);
 
+  useEffect(
+    () => () => {
+      operation.current += 1;
+    },
+    [],
+  );
+
   function changeOpen(next: boolean) {
     operation.current += 1;
     setOpen(next);
@@ -134,7 +141,7 @@ export function PublishingTokens({
 
   async function create(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim() || busy) return;
+    if (!name.trim() || busy || pendingCreated) return;
     const documentId =
       scope === 'plan_read'
         ? planIdFromTarget(documentTarget, window.location.origin)
@@ -297,7 +304,7 @@ export function PublishingTokens({
           </DialogDescription>
           {canCreate ? (
             <form className="publishing-token-form" onSubmit={create}>
-              <fieldset disabled={!!busy}>
+              <fieldset disabled={!!busy || !!pendingCreated}>
                 <legend>Finalidade</legend>
                 <label
                   htmlFor="publishing-token-scope-publish"
@@ -346,12 +353,13 @@ export function PublishingTokens({
                   value={name}
                   maxLength={80}
                   placeholder="Ex.: agente de revisão"
-                  disabled={!!busy}
+                  disabled={!!busy || !!pendingCreated}
                   onChange={(event) => setName(event.target.value)}
                 />
                 <Button
                   disabled={
                     !!busy ||
+                    !!pendingCreated ||
                     !name.trim() ||
                     (scope === 'plan_read' && !documentTarget.trim())
                   }
@@ -375,7 +383,7 @@ export function PublishingTokens({
                     value={documentTarget}
                     maxLength={512}
                     placeholder="ID ou https://…/d/ID"
-                    disabled={!!busy}
+                    disabled={!!busy || !!pendingCreated}
                     onChange={(event) => setDocumentTarget(event.target.value)}
                   />
                   <small>
