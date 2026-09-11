@@ -19,6 +19,7 @@ type DiagnosticRoute =
   | 'session'
   | 'documents'
   | 'document'
+  | 'revisions'
   | 'comments'
   | 'conversations'
   | 'shares'
@@ -77,6 +78,8 @@ function diagnosticRoute(request: Request): DiagnosticRoute {
     if (parts[1] !== 'documents') return 'unknown';
     if (parts.length === 2) return 'documents';
     if (parts.length === 3) return 'document';
+    if (parts[3] === 'revisions' && (parts.length === 4 || parts.length === 5))
+      return 'revisions';
     if (parts[3] === 'comments' && (parts.length === 4 || parts.length === 5))
       return 'comments';
     if (
@@ -482,6 +485,31 @@ export async function handleApi(
             'Sua conta não está mais habilitada para importar este documento.',
           );
         return json({ document }, 201);
+      }
+      if (action === 'revisions' && !resourceId) {
+        if (!auth.canCreate(viewer))
+          throw new HttpError(
+            403,
+            'Sua conta pode ler e comentar este plano, mas não publicar revisões.',
+          );
+        const result = await service.createRevision(id, input);
+        const currentAuth = new AuthService(
+          values.DB,
+          authConfig(values),
+          configuredMailer,
+        );
+        const currentViewer = await currentAuth.viewer(request);
+        if (
+          !currentViewer ||
+          currentViewer.id !== viewer.id ||
+          Boolean(currentViewer.isTest) !== Boolean(viewer.isTest) ||
+          !currentAuth.canCreate(currentViewer)
+        )
+          throw new HttpError(
+            403,
+            'Sua conta não está mais habilitada para publicar esta revisão.',
+          );
+        return json({ revision: result.revision }, result.replayed ? 200 : 201);
       }
       if (action === 'comments' && !resourceId)
         return json({ comment: await service.addComment(id, input) }, 201);

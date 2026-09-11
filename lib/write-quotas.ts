@@ -2,12 +2,14 @@ export const DEFAULT_WRITE_QUOTAS = {
   ownedDocuments: 100,
   commentsPerDocument: 500,
   activeSharesPerDocument: 100,
+  revisionsPerDocument: 100,
 } as const;
 
 export type WriteQuotaEnvironment = {
   MAX_OWNED_DOCUMENTS?: string;
   MAX_COMMENTS_PER_DOCUMENT?: string;
   MAX_ACTIVE_SHARES_PER_DOCUMENT?: string;
+  MAX_REVISIONS_PER_DOCUMENT?: string;
 };
 
 type WriteQuotaName = keyof WriteQuotaEnvironment;
@@ -66,6 +68,14 @@ export function activeShareLimit(environment: WriteQuotaEnvironment) {
     environment,
     'MAX_ACTIVE_SHARES_PER_DOCUMENT',
     DEFAULT_WRITE_QUOTAS.activeSharesPerDocument,
+  );
+}
+
+export function revisionLimit(environment: WriteQuotaEnvironment) {
+  return configuredLimit(
+    environment,
+    'MAX_REVISIONS_PER_DOCUMENT',
+    DEFAULT_WRITE_QUOTAS.revisionsPerDocument,
   );
 }
 

@@ -3,6 +3,7 @@ import {
   commentLimit,
   ownedDocumentLimit,
   quotaExceeded,
+  revisionLimit,
   type WriteQuotaEnvironment,
 } from './write-quotas.ts';
 
@@ -44,7 +45,28 @@ export type DocumentRevisionRow = {
   title: string;
   filename: string;
   markdown: string;
+  base_revision_id: string | null;
+  summary: string | null;
+  considered_comment_ids: string;
   created_at: string;
+};
+export type ConsideredCommentRow = Pick<
+  CommentRow,
+  | 'id'
+  | 'root_id'
+  | 'source_revision_id'
+  | 'author_id'
+  | 'author_name'
+  | 'body'
+  | 'quote'
+  | 'created_at'
+>;
+export type DocumentRevisionReceipt = Omit<
+  DocumentRevisionRow,
+  'considered_comment_ids'
+> & {
+  considered_comment_ids: string[];
+  considered_comments: ConsideredCommentRow[];
 };
 export type CommentPagination = {
   olderCursor: string | null;
@@ -454,6 +476,7 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
   ) {
     super(message);
   }
@@ -547,6 +570,79 @@ function manualDocumentInput(
   if (input.title !== undefined) documentFields.title = input.title;
   return { id, authorId, ...documentInput(documentFields, true) };
 }
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const legacyCommentIdPattern = /^[0-9a-f-]{36}$/i;
+const compareText = (left: string, right: string) =>
+  left < right ? -1 : left > right ? 1 : 0;
+
+type RevisionInput = DocumentInput & {
+  id: string;
+  baseRevisionId: string;
+  summary: string | null;
+  consideredCommentIds: string[];
+};
+
+function revisionInput(input: Record<string, unknown>): RevisionInput {
+  if (
+    Object.keys(input).some(
+      (key) =>
+        ![
+          'id',
+          'baseRevisionId',
+          'markdown',
+          'filename',
+          'title',
+          'summary',
+          'consideredCommentIds',
+        ].includes(key),
+    )
+  )
+    throw new HttpError(400, 'A revisão contém campos desconhecidos.');
+  const id = requiredText(input.id, 'Identificador da revisão', 36);
+  const baseRevisionId = requiredText(
+    input.baseRevisionId,
+    'Revisão de base',
+    36,
+  );
+  if (input.id !== id || !uuidPattern.test(id))
+    throw new HttpError(400, 'Identificador da revisão inválido.');
+  if (input.baseRevisionId !== baseRevisionId || !uuidPattern.test(baseRevisionId))
+    throw new HttpError(400, 'Revisão de base inválida.');
+  const summary =
+    input.summary === undefined ||
+    input.summary === null ||
+    (typeof input.summary === 'string' && !input.summary.trim())
+      ? null
+      : requiredText(input.summary, 'Resumo da revisão', 2000);
+  const rawConsideredCommentIds = input.consideredCommentIds ?? [];
+  if (!Array.isArray(rawConsideredCommentIds))
+    throw new HttpError(400, 'Referências consideradas inválidas.');
+  const consideredCommentIds = Array.from(
+    new Set(
+      rawConsideredCommentIds.map((value) => {
+        if (typeof value !== 'string' || !legacyCommentIdPattern.test(value))
+          throw new HttpError(400, 'Referência de comentário inválida.');
+        return value;
+      }),
+    ),
+  ).sort(compareText);
+  if (consideredCommentIds.length > 100)
+    throw new HttpError(400, 'Selecione no máximo 100 comentários considerados.');
+  const fields: Record<string, unknown> = {
+    markdown: input.markdown,
+    filename: input.filename,
+  };
+  if (input.title !== undefined) fields.title = input.title;
+  return {
+    id,
+    baseRevisionId,
+    summary,
+    consideredCommentIds,
+    ...documentInput(fields, true),
+  };
+}
 export class DocumentService {
   constructor(
     private db: D1Database,
@@ -629,24 +725,87 @@ export class DocumentService {
       throw new HttpError(404, 'Documento indisponível para esta conta.');
     return doc;
   }
+  private async revisionRow(revisionId: string) {
+    return this.db
+      .prepare(
+        `SELECT id,document_id,ordinal,author_id,title,filename,markdown,
+           base_revision_id,summary,considered_comment_ids,created_at
+         FROM document_revisions WHERE id=?`,
+      )
+      .bind(revisionId)
+      .first<DocumentRevisionRow>();
+  }
+  private async revisionReceipt(
+    row: DocumentRevisionRow,
+  ): Promise<DocumentRevisionReceipt> {
+    let consideredCommentIds: string[];
+    try {
+      const value = JSON.parse(row.considered_comment_ids) as unknown;
+      if (
+        !Array.isArray(value) ||
+        value.length > 100 ||
+        value.some(
+          (id) => typeof id !== 'string' || !legacyCommentIdPattern.test(id),
+        ) ||
+        [...new Set(value)].sort(compareText).join(',') !== value.join(',')
+      )
+        throw new Error();
+      consideredCommentIds = value as string[];
+    } catch {
+      throw new Error('Stored revision references are invalid.');
+    }
+    let consideredComments: ConsideredCommentRow[] = [];
+    if (consideredCommentIds.length > 0) {
+      const rows = (
+        await this.db
+          .prepare(
+            `SELECT c.id,COALESCE(c.root_id,c.id) AS root_id,c.source_revision_id,
+               c.author_id,u.name AS author_name,c.body,c.quote,c.created_at
+             FROM comments c JOIN users u ON u.id=c.author_id
+             WHERE c.document_id=? AND c.id IN (SELECT value FROM json_each(?))`,
+          )
+          .bind(row.document_id, row.considered_comment_ids)
+          .all<ConsideredCommentRow>()
+      ).results;
+      const byId = new Map(rows.map((comment) => [comment.id, comment]));
+      consideredComments = consideredCommentIds.map((id) => {
+        const comment = byId.get(id);
+        if (!comment) throw new Error('Stored revision reference is unavailable.');
+        return comment;
+      });
+    }
+    const { considered_comment_ids: _storedIds, ...revision } = row;
+    return {
+      ...revision,
+      considered_comment_ids: consideredCommentIds,
+      considered_comments: consideredComments,
+    };
+  }
   async revision(id: string, revisionId: string) {
     await this.document(id);
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-        revisionId,
-      )
-    )
+    if (!uuidPattern.test(revisionId))
       throw new HttpError(400, 'Revisão inválida.');
-    const revision = await this.db
-      .prepare(
-        `SELECT id,document_id,ordinal,author_id,title,filename,markdown,created_at
-         FROM document_revisions WHERE id=? AND document_id=?`,
-      )
-      .bind(revisionId, id)
-      .first<DocumentRevisionRow>();
-    if (!revision) throw new HttpError(404, 'Revisão indisponível.');
+    const revision = await this.revisionRow(revisionId);
+    if (!revision || revision.document_id !== id)
+      throw new HttpError(404, 'Revisão indisponível.');
     await this.document(id);
-    return revision;
+    return this.revisionReceipt(revision);
+  }
+  private async initialDocumentReceipt(id: string) {
+    const receipt = await this.db
+      .prepare(
+        `SELECT d.id,d.owner_id,r.title,r.filename,r.markdown,
+           r.id AS current_revision_id,r.ordinal AS revision_ordinal,
+           r.author_id AS revision_author_id,r.created_at AS revision_created_at,
+           d.is_test,d.created_at
+         FROM documents d JOIN document_revisions r
+           ON r.id=d.id AND r.document_id=d.id AND r.ordinal=1
+         WHERE d.id=?`,
+      )
+      .bind(id)
+      .first<DocumentRow>();
+    if (!receipt) throw new Error('Initial document receipt is unavailable.');
+    return receipt;
   }
   async create(input: Record<string, unknown>) {
     const { id, authorId, markdown, filename, title } =
@@ -661,7 +820,7 @@ export class DocumentService {
       .prepare(
         `SELECT d.owner_id,d.is_test,r.title,r.filename,r.markdown
          FROM documents d LEFT JOIN document_revisions r
-           ON r.id=d.current_revision_id AND r.document_id=d.id
+           ON r.id=d.id AND r.document_id=d.id AND r.ordinal=1
          WHERE d.id=?`,
       )
       .bind(id)
@@ -684,7 +843,7 @@ export class DocumentService {
           409,
           'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
         );
-      return this.document(id);
+      return this.initialDocumentReceipt(id);
     }
     const limit = ownedDocumentLimit(this.quotaEnvironment);
     const createdAt = new Date().toISOString();
@@ -732,7 +891,7 @@ export class DocumentService {
       .prepare(
         `SELECT d.owner_id,d.is_test,r.title,r.filename,r.markdown
          FROM documents d LEFT JOIN document_revisions r
-           ON r.id=d.current_revision_id AND r.document_id=d.id
+           ON r.id=d.id AND r.document_id=d.id AND r.ordinal=1
          WHERE d.id=?`,
       )
       .bind(id)
@@ -758,7 +917,141 @@ export class DocumentService {
         409,
         'Esta importação já foi usada com outro autor, contexto ou conteúdo.',
       );
-    return this.document(id);
+    return this.initialDocumentReceipt(id);
+  }
+  async createRevision(id: string, input: Record<string, unknown>) {
+    await this.document(id, true);
+    const requested = revisionInput(input);
+    const storedIds = JSON.stringify(requested.consideredCommentIds);
+    const matches = (row: DocumentRevisionRow) =>
+      row.document_id === id &&
+      row.author_id === this.viewer.id &&
+      row.base_revision_id === requested.baseRevisionId &&
+      row.title === requested.title &&
+      row.filename === requested.filename &&
+      row.markdown === requested.markdown &&
+      row.summary === requested.summary &&
+      row.considered_comment_ids === storedIds;
+    const existing = await this.revisionRow(requested.id);
+    if (existing) {
+      if (!matches(existing))
+        throw new HttpError(
+          409,
+          'Este identificador de revisão já foi usado com outro alvo, base ou conteúdo.',
+          'revision_id_conflict',
+        );
+      await this.document(id, true);
+      return { revision: await this.revisionReceipt(existing), replayed: true };
+    }
+
+    const limit = revisionLimit(this.quotaEnvironment);
+    const createdAt = new Date().toISOString();
+    const referenceGuard =
+      requested.consideredCommentIds.length === 0
+        ? '1=1'
+        : `(SELECT count(*) FROM comments c
+             WHERE c.document_id=d.id
+               AND c.id IN (SELECT value FROM json_each(?)))=?`;
+    let inserted = false;
+    try {
+      const result = await this.db
+        .prepare(
+          `INSERT INTO document_revisions
+             (id,document_id,ordinal,author_id,title,filename,markdown,
+              base_revision_id,summary,considered_comment_ids,created_at)
+           SELECT ?,d.id,base.ordinal+1,?,?,?,?,?,?,?,?
+           FROM documents d JOIN document_revisions base
+             ON base.id=d.current_revision_id AND base.document_id=d.id
+           WHERE d.id=? AND d.owner_id=? AND d.is_test=?
+             AND d.current_revision_id=? AND base.id=?
+             AND NOT EXISTS(SELECT 1 FROM document_revisions WHERE id=?)
+             AND (SELECT count(*) FROM document_revisions WHERE document_id=d.id)<?
+             AND ${referenceGuard}`,
+        )
+        .bind(
+          requested.id,
+          this.viewer.id,
+          requested.title,
+          requested.filename,
+          requested.markdown,
+          requested.baseRevisionId,
+          requested.summary,
+          storedIds,
+          createdAt,
+          id,
+          this.viewer.id,
+          this.viewer.isTest ? 1 : 0,
+          requested.baseRevisionId,
+          requested.baseRevisionId,
+          requested.id,
+          limit,
+          ...(requested.consideredCommentIds.length === 0 ? [] : [storedIds]),
+          ...(requested.consideredCommentIds.length === 0
+            ? []
+            : [requested.consideredCommentIds.length]),
+        )
+        .run();
+      inserted = Number(result.meta?.changes ?? result.meta?.rows_written ?? 0) > 0;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes('document revision advance conflict')
+      )
+        throw error;
+    }
+
+    const persisted = await this.revisionRow(requested.id);
+    if (persisted) {
+      if (!matches(persisted))
+        throw new HttpError(
+          409,
+          'Este identificador de revisão já foi usado com outro alvo, base ou conteúdo.',
+          'revision_id_conflict',
+        );
+      await this.document(id, true);
+      return {
+        revision: await this.revisionReceipt(persisted),
+        replayed: !inserted,
+      };
+    }
+
+    const current = await this.document(id, true);
+    if (current.current_revision_id !== requested.baseRevisionId)
+      throw new HttpError(
+        409,
+        'O plano avançou desde a revisão usada como base. Atualize a base antes de criar outra tentativa.',
+        'revision_base_conflict',
+      );
+    if (requested.consideredCommentIds.length > 0) {
+      const references = await this.db
+        .prepare(
+          `SELECT count(*) AS count FROM comments
+           WHERE document_id=? AND id IN (SELECT value FROM json_each(?))`,
+        )
+        .bind(id, storedIds)
+        .first<{ count: number }>();
+      if (Number(references?.count ?? 0) !== requested.consideredCommentIds.length)
+        throw new HttpError(
+          409,
+          'Uma ou mais referências não pertencem a este plano ou não estão disponíveis.',
+          'revision_reference_conflict',
+        );
+    }
+    const count = await this.db
+      .prepare(
+        'SELECT count(*) AS count FROM document_revisions WHERE document_id=?',
+      )
+      .bind(id)
+      .first<{ count: number }>();
+    if (Number(count?.count ?? 0) >= limit)
+      throw quotaExceeded(
+        'Este plano atingiu o limite total de revisões. Peça ao operador para ampliar a configuração.',
+      );
+    throw new HttpError(
+      409,
+      'A revisão não pôde avançar a base escolhida. Atualize o plano e tente novamente.',
+      'revision_conflict',
+    );
   }
   async comments(
     id: string,
