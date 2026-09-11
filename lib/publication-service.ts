@@ -17,17 +17,25 @@ export const MAX_ACTIVE_PUBLISHING_TOKENS = 10;
 export const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const TOKEN_PREFIX = 'mdp_';
 
+export type PublishingTokenScope = 'publish' | 'plan_read';
+
 export type PublishingTokenRow = {
   id: string;
   name: string;
+  scope: PublishingTokenScope;
+  document_id: string | null;
+  document_title: string | null;
   created_at: string;
   expires_at: number;
   revoked_at: number | null;
 };
 
-type AuthenticatedToken = {
+export type AuthenticatedToken = {
   credentialId: string;
+  tokenHash: string;
   viewer: Viewer;
+  scope: PublishingTokenScope;
+  documentId: string | null;
 };
 
 type PublicationRow = {
@@ -80,37 +88,72 @@ export class PublicationService {
   async createCredential(viewer: Viewer, input: Record<string, unknown>) {
     if (viewer.isTest)
       throw new HttpError(404, 'Credenciais de publicação indisponíveis.');
-    if (Object.keys(input).some((key) => key !== 'name'))
-      throw new HttpError(400, 'Informe somente o nome da credencial.');
+    const keys = Object.keys(input).sort().join(',');
+    const scope: PublishingTokenScope =
+      keys === 'name'
+        ? 'publish'
+        : keys === 'documentId,name,scope' && input.scope === 'plan_read'
+          ? 'plan_read'
+          : (() => {
+              throw new HttpError(400, 'Finalidade da credencial inválida.');
+            })();
     const name = requiredText(input.name, 'Nome da credencial', 80);
+    const documentId =
+      scope === 'plan_read'
+        ? requiredText(input.documentId, 'Plano da credencial', 36)
+        : null;
+    if (documentId !== null && !/^[0-9a-f-]{36}$/i.test(documentId))
+      throw new HttpError(400, 'Plano da credencial inválido.');
     const id = crypto.randomUUID();
     const token = randomSecret();
     const now = this.now();
     const createdAt = new Date(now * 1000).toISOString();
     const expiresAt = now + PUBLISHING_TOKEN_SECONDS;
     const credential = await this.db
-      .prepare(`INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
-      SELECT ?,?,?,?,?,?,NULL WHERE (
+      .prepare(`INSERT INTO publishing_tokens(
+        id,user_id,name,token_hash,scope,document_id,created_at,expires_at,revoked_at
+      ) SELECT ?,?,?,?,?,?,?,?,NULL WHERE (
         SELECT count(*) FROM publishing_tokens
         WHERE user_id=? AND revoked_at IS NULL AND expires_at>?
-      )<? RETURNING id,name,created_at,expires_at,revoked_at`)
+      )<? AND (?='publish' OR EXISTS(
+        SELECT 1 FROM documents
+        WHERE id=? AND owner_id=? AND is_test=0
+      )) RETURNING id,name,scope,document_id,
+        (SELECT title FROM documents WHERE id=document_id) AS document_title,
+        created_at,expires_at,revoked_at`)
       .bind(
         id,
         viewer.id,
         name,
         await hashToken(token),
+        scope,
+        documentId,
         createdAt,
         expiresAt,
         viewer.id,
         now,
         MAX_ACTIVE_PUBLISHING_TOKENS,
+        scope,
+        documentId,
+        viewer.id,
       )
       .first<PublishingTokenRow>();
-    if (!credential)
+    if (!credential) {
+      if (scope === 'plan_read') {
+        const owned = await this.db
+          .prepare(
+            'SELECT 1 AS found FROM documents WHERE id=? AND owner_id=? AND is_test=0',
+          )
+          .bind(documentId, viewer.id)
+          .first<{ found: number }>();
+        if (!owned)
+          throw new HttpError(404, 'Plano indisponível para esta credencial.');
+      }
       throw new HttpError(
         409,
         `Revogue uma credencial antes de criar outra. O limite é ${MAX_ACTIVE_PUBLISHING_TOKENS}.`,
       );
+    }
     return { token, credential };
   }
 
@@ -120,10 +163,12 @@ export class PublicationService {
     const now = this.now();
     return (
       await this.db
-        .prepare(`SELECT id,name,created_at,expires_at,revoked_at
-        FROM publishing_tokens WHERE user_id=?
+        .prepare(`SELECT p.id,p.name,p.scope,p.document_id,d.title AS document_title,
+          p.created_at,p.expires_at,p.revoked_at
+        FROM publishing_tokens p LEFT JOIN documents d ON d.id=p.document_id
+        WHERE p.user_id=?
         ORDER BY CASE WHEN revoked_at IS NULL AND expires_at>? THEN 0 ELSE 1 END,
-        created_at DESC,id DESC LIMIT 100`)
+        p.created_at DESC,p.id DESC LIMIT 100`)
         .bind(viewer.id, now)
         .all<PublishingTokenRow>()
     ).results;
@@ -137,27 +182,39 @@ export class PublicationService {
     const now = this.now();
     const credential = await this.db
       .prepare(`UPDATE publishing_tokens SET revoked_at=COALESCE(revoked_at,?)
-      WHERE id=? AND user_id=? RETURNING id,name,created_at,expires_at,revoked_at`)
+      WHERE id=? AND user_id=? RETURNING id,name,scope,document_id,
+        (SELECT title FROM documents WHERE id=document_id) AS document_title,
+        created_at,expires_at,revoked_at`)
       .bind(now, id, viewer.id)
       .first<PublishingTokenRow>();
     if (!credential) throw new HttpError(404, 'Credencial não encontrada.');
     return credential;
   }
 
-  async authenticate(request: Request): Promise<AuthenticatedToken> {
+  async authenticate(
+    request: Request,
+    expectedScope: PublishingTokenScope = 'publish',
+  ): Promise<AuthenticatedToken> {
     const authorization = request.headers.get('authorization');
     const match = authorization?.match(/^Bearer (mdp_[0-9a-f]{64})$/);
     if (!match)
       throw new HttpError(401, 'Credencial de publicação inválida ou ausente.');
     const now = this.now();
+    const tokenHash = await hashToken(match[1]);
     const row = await this.db
-      .prepare(`SELECT p.id AS credential_id,u.id,u.email,u.name,u.test_email
+      .prepare(`SELECT p.id AS credential_id,p.scope,p.document_id,
+        u.id,u.email,u.name,u.test_email
       FROM publishing_tokens p JOIN users u ON u.id=p.user_id
+      LEFT JOIN documents d ON d.id=p.document_id
       WHERE p.token_hash=? AND p.revoked_at IS NULL AND p.expires_at>?
-      AND u.test_email IS NULL`)
-      .bind(await hashToken(match[1]), now)
+      AND u.test_email IS NULL AND p.scope=?
+      AND ((p.scope='publish' AND p.document_id IS NULL) OR
+        (p.scope='plan_read' AND d.id=p.document_id AND d.owner_id=p.user_id AND d.is_test=0))`)
+      .bind(tokenHash, now, expectedScope)
       .first<{
         credential_id: string;
+        scope: PublishingTokenScope;
+        document_id: string | null;
         id: string;
         email: string;
         name: string;
@@ -167,6 +224,9 @@ export class PublicationService {
       throw new HttpError(401, 'Credencial de publicação inválida ou ausente.');
     return {
       credentialId: row.credential_id,
+      tokenHash,
+      scope: row.scope,
+      documentId: row.document_id,
       viewer: {
         id: row.id,
         email: normalizeEmail(row.email),

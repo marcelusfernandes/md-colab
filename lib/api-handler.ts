@@ -8,6 +8,7 @@ import {
 } from './document-service.ts';
 import { ResendMailer, type Mailer } from './mailer.ts';
 import { PublicationService } from './publication-service.ts';
+import { FeedbackService } from './feedback-service.ts';
 import { WriteQuotaError } from './write-quotas.ts';
 
 type DiagnosticMethod = 'GET' | 'POST' | 'DELETE' | 'OTHER';
@@ -16,6 +17,7 @@ type DiagnosticRoute =
   | 'auth'
   | 'publications'
   | 'publishing_tokens'
+  | 'agent_feedback'
   | 'session'
   | 'documents'
   | 'document'
@@ -75,6 +77,13 @@ function diagnosticRoute(request: Request): DiagnosticRoute {
     )
       return 'publishing_tokens';
     if (parts.length === 2 && parts[1] === 'session') return 'session';
+    if (
+      parts[1] === 'agent' &&
+      parts[2] === 'documents' &&
+      parts.length >= 5 &&
+      parts.length <= 7
+    )
+      return 'agent_feedback';
     if (parts[1] !== 'documents') return 'unknown';
     if (parts.length === 2) return 'documents';
     if (parts.length === 3) return 'document';
@@ -83,7 +92,9 @@ function diagnosticRoute(request: Request): DiagnosticRoute {
     if (parts[3] === 'comments' && (parts.length === 4 || parts.length === 5))
       return 'comments';
     if (
-      (parts[3] === 'conversations' && parts.length >= 4 && parts.length <= 7) ||
+      (parts[3] === 'conversations' &&
+        parts.length >= 4 &&
+        parts.length <= 7) ||
       (parts[3] === 'conversation-changes' && parts.length === 4)
     )
       return 'conversations';
@@ -243,6 +254,31 @@ function conversationChangesQuery(parameters: URLSearchParams) {
   return parameters.get('after')!;
 }
 
+function feedbackQuery(
+  parameters: URLSearchParams,
+  options: { stampRequired: boolean; cursorAllowed: boolean },
+) {
+  const keys = [...parameters.keys()];
+  const stampCount = parameters.getAll('stamp').length;
+  if (
+    keys.some(
+      (key) => key !== 'stamp' && (!options.cursorAllowed || key !== 'cursor'),
+    ) ||
+    stampCount > 1 ||
+    (options.stampRequired && stampCount !== 1) ||
+    parameters.getAll('cursor').length > (options.cursorAllowed ? 1 : 0)
+  )
+    throw new HttpError(400, 'Parâmetros de feedback inválidos.');
+  const stamp = parameters.get('stamp');
+  if (options.stampRequired && stamp === null)
+    throw new HttpError(400, 'Informe o selo de feedback.');
+  const cursor = parameters.get('cursor');
+  return {
+    ...(stamp === null ? {} : { stamp }),
+    ...(cursor === null ? {} : { cursor }),
+  };
+}
+
 export async function handleApi(
   request: Request,
   values: Cloudflare.Env,
@@ -336,6 +372,47 @@ export async function handleApi(
         201,
       );
     }
+    if (path[0] === 'agent') {
+      if (config.testMode)
+        throw new HttpError(404, 'Leitura de feedback indisponível.');
+      if (request.method !== 'GET')
+        throw new HttpError(405, 'A API de feedback é somente leitura.');
+      const [, collection, id, action, resource, revisionId] = path;
+      if (collection !== 'documents' || !id)
+        throw new HttpError(404, 'Página não encontrada.');
+      const credential = await publishing.authenticate(request, 'plan_read');
+      const feedback = new FeedbackService(values.DB, credential);
+      if (action === 'feedback' && !resource && !revisionId) {
+        const query = feedbackQuery(url.searchParams, {
+          stampRequired: false,
+          cursorAllowed: false,
+        });
+        return json(await feedback.manifest(id, query.stamp));
+      }
+      if (
+        action === 'feedback' &&
+        (resource === 'comments' || resource === 'events') &&
+        !revisionId
+      ) {
+        const query = feedbackQuery(url.searchParams, {
+          stampRequired: true,
+          cursorAllowed: true,
+        });
+        return json(
+          resource === 'comments'
+            ? await feedback.comments(id, query.stamp!, query.cursor)
+            : await feedback.events(id, query.stamp!, query.cursor),
+        );
+      }
+      if (action === 'revisions' && resource && !revisionId) {
+        const query = feedbackQuery(url.searchParams, {
+          stampRequired: true,
+          cursorAllowed: false,
+        });
+        return json(await feedback.revision(id, resource, query.stamp!));
+      }
+      throw new HttpError(404, 'Página não encontrada.');
+    }
     const viewer = await auth.viewer(request);
     if (!viewer)
       throw new HttpError(
@@ -350,7 +427,10 @@ export async function handleApi(
         throw new HttpError(404, 'Credenciais de publicação indisponíveis.');
       const [, id] = path;
       if (request.method === 'GET' && !id)
-        return json({ credentials: await publishing.credentials(viewer) });
+        return json({
+          viewerId: viewer.id,
+          credentials: await publishing.credentials(viewer),
+        });
       if (request.method === 'POST' && !id) {
         if (!auth.canCreate(viewer))
           throw new HttpError(
@@ -364,15 +444,19 @@ export async function handleApi(
           24 * 60 * 60,
         );
         return json(
-          await publishing.createCredential(
-            viewer,
-            await inputFrom(request, 4096),
-          ),
+          {
+            viewerId: viewer.id,
+            ...(await publishing.createCredential(
+              viewer,
+              await inputFrom(request, 4096),
+            )),
+          },
           201,
         );
       }
       if (request.method === 'DELETE' && id)
         return json({
+          viewerId: viewer.id,
           credential: await publishing.revokeCredential(viewer, id),
         });
       throw new HttpError(405, 'Ação indisponível.');
@@ -423,7 +507,10 @@ export async function handleApi(
         );
       if (action === 'conversations' && !resourceId)
         return json(
-          await service.conversations(id, conversationPageQuery(url.searchParams)),
+          await service.conversations(
+            id,
+            conversationPageQuery(url.searchParams),
+          ),
         );
       if (action === 'conversations' && resourceId && !subresource)
         return json({
@@ -436,7 +523,12 @@ export async function handleApi(
             conversationChangesQuery(url.searchParams),
           ),
         );
-      if (action === 'conversations' && resourceId && subresource === 'replies' && !eventId)
+      if (
+        action === 'conversations' &&
+        resourceId &&
+        subresource === 'replies' &&
+        !eventId
+      )
         return json(
           await service.conversationReplies(
             id,
@@ -444,7 +536,11 @@ export async function handleApi(
             oneCursorQuery(url.searchParams, 'respostas'),
           ),
         );
-      if (action === 'conversations' && resourceId && subresource === 'events') {
+      if (
+        action === 'conversations' &&
+        resourceId &&
+        subresource === 'events'
+      ) {
         if (eventId)
           return json({
             event: await service.conversationEvent(id, resourceId, eventId),
@@ -526,7 +622,11 @@ export async function handleApi(
         subresource === 'events' &&
         !eventId
       ) {
-        const result = await service.addConversationEvent(id, resourceId, input);
+        const result = await service.addConversationEvent(
+          id,
+          resourceId,
+          input,
+        );
         return json({ event: result.event }, result.replayed ? 200 : 201);
       }
       if (action === 'shares' && !resourceId) {

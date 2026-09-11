@@ -45,6 +45,7 @@ const currentMigrations = [
   '0010_serious_dazzler.sql',
   '0011_tiny_valeria_richards.sql',
   '0012_previous_lifeguard.sql',
+  '0013_tiny_daredevil.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -66,6 +67,7 @@ const ids = {
   document: '00000000-0000-4000-8000-000000000201',
   comment: '00000000-0000-4000-8000-000000000301',
   credential: '00000000-0000-4000-8000-000000000401',
+  readerCredential: '00000000-0000-4000-8000-000000000402',
   publication: '00000000-0000-4000-8000-000000000501',
   revision2: '00000000-0000-4000-8000-000000000601',
   revision3: '00000000-0000-4000-8000-000000000602',
@@ -171,6 +173,10 @@ VALUES
   ('synthetic-revision-link','guest@example.test','${ids.document}',NULL,'${ids.revision2}',1900000000,NULL);
 INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
 VALUES('${ids.credential}','${ids.owner}','Revoked synthetic credential','${revokedHash}','2026-09-10T00:03:00.000Z',1900000000,1789014000);
+INSERT INTO publishing_tokens(
+  id,user_id,name,token_hash,scope,document_id,created_at,expires_at,revoked_at
+) VALUES('${ids.readerCredential}','${ids.owner}','Synthetic plan reader','reader-hash',
+  'plan_read','${ids.document}','2026-09-10T00:03:30.000Z',1900000000,NULL);
 INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
 VALUES('${ids.publication}','${ids.document}','${ids.owner}','${ids.credential}','synthetic-idempotency-hash','synthetic-payload-digest','2026-09-10T00:04:00.000Z');
 `;
@@ -202,6 +208,10 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT sequence FROM comments WHERE id='${ids.comment}') AS comment_sequence,
       (SELECT source_revision_id FROM comments WHERE id='${ids.comment}') AS comment_revision_id,
       (SELECT publishing_token_id FROM publications WHERE id='${ids.publication}') AS publication_token_id,
+      (SELECT scope FROM publishing_tokens WHERE id='${ids.credential}') AS legacy_credential_scope,
+      (SELECT document_id FROM publishing_tokens WHERE id='${ids.credential}') AS legacy_credential_document,
+      (SELECT scope FROM publishing_tokens WHERE id='${ids.readerCredential}') AS reader_credential_scope,
+      (SELECT document_id FROM publishing_tokens WHERE id='${ids.readerCredential}') AS reader_credential_document,
       (SELECT title FROM documents WHERE id='${ids.document}') AS marker,
       (SELECT current_revision_id FROM documents WHERE id='${ids.document}') AS current_revision_id,
       (SELECT base_revision_id FROM document_revisions WHERE id='${ids.revision2}') AS revision2_base,
@@ -228,7 +238,10 @@ function verifyFixture(environment, marker = 'source-marker') {
     'Share/publicacao divergentes.',
   );
   assert(row.revoked_count === 1, 'Credencial revogada ausente.');
-  assert(row.magic_links_count === 2, 'Destinos sinteticos de acesso divergentes.');
+  assert(
+    row.magic_links_count === 2,
+    'Destinos sinteticos de acesso divergentes.',
+  );
   assert(
     row.notification_events_count === 3 &&
       row.revision_events_count === 2 &&
@@ -260,6 +273,13 @@ function verifyFixture(environment, marker = 'source-marker') {
   assert(
     row.publication_token_id === ids.credential,
     'Relacao da publicacao divergente.',
+  );
+  assert(
+    row.legacy_credential_scope === 'publish' &&
+      row.legacy_credential_document === null &&
+      row.reader_credential_scope === 'plan_read' &&
+      row.reader_credential_document === ids.document,
+    'Escopo ou vinculo de credencial divergente.',
   );
   assert(row.marker === `${marker}-v3`, 'Projecao atual do banco divergente.');
   assert(
@@ -361,6 +381,9 @@ function verifyNotificationUpgrade(outputDirectory) {
      UPDATE documents SET current_revision_id='upgrade-document' WHERE id='upgrade-document';
      INSERT INTO shares(document_id,email,name,created_at)
        VALUES('upgrade-document','upgrade-guest@example.test','Guest','2026-09-10T01:00:01.000Z');
+     INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
+       VALUES('upgrade-credential','upgrade-owner','Legacy publisher','upgrade-hash',
+         '2026-09-10T01:00:01.500Z',1900000000,NULL);
      INSERT INTO comments(id,document_id,author_id,body,quote,source_revision_id,created_at) VALUES
        ('upgrade-comment-a','upgrade-document','upgrade-guest','A','','upgrade-document','2026-09-10T01:00:02.000Z'),
        ('upgrade-comment-b','upgrade-document','upgrade-guest','B','','upgrade-document','2026-09-10T01:00:03.000Z'),
@@ -404,9 +427,13 @@ function verifyNotificationUpgrade(outputDirectory) {
 
   const config = JSON.parse(readFileSync(environment.configPath, 'utf8'));
   config.d1_databases[0].migrations_dir = migrationsDirectory;
-  writeFileSync(environment.configPath, `${JSON.stringify(config, null, 2)}\n`, {
-    mode: 0o600,
-  });
+  writeFileSync(
+    environment.configPath,
+    `${JSON.stringify(config, null, 2)}\n`,
+    {
+      mode: 0o600,
+    },
+  );
   migrateLocal(environment);
   expectedLedger(environment);
   const eventAfter = executeSql(
@@ -425,7 +452,8 @@ function verifyNotificationUpgrade(outputDirectory) {
   assert(
     JSON.stringify(eventAfter) === JSON.stringify(eventBefore) &&
       JSON.stringify(deliveryAfter) === JSON.stringify(deliveryBefore) &&
-      JSON.stringify(reconciliationAfter) === JSON.stringify(reconciliationBefore),
+      JSON.stringify(reconciliationAfter) ===
+        JSON.stringify(reconciliationBefore),
     'Upgrade D1 alterou evento, entrega, geracao ou reconciliacao existente.',
   );
   assert(
@@ -440,12 +468,28 @@ function verifyNotificationUpgrade(outputDirectory) {
     foreignKeyViolations(environment).length === 0,
     'Upgrade D1 deixou violacao de FK.',
   );
+  const upgradedCredential = executeSql(
+    environment,
+    `SELECT scope,document_id,token_hash,expires_at,revoked_at
+     FROM publishing_tokens WHERE id='upgrade-credential'`,
+  ).results[0];
+  assert(
+    upgradedCredential?.scope === 'publish' &&
+      upgradedCredential.document_id === null &&
+      upgradedCredential.token_hash === 'upgrade-hash' &&
+      upgradedCredential.expires_at === 1900000000 &&
+      upgradedCredential.revoked_at === null,
+    'Upgrade D1 alterou a credencial legada.',
+  );
   const immutable = executeSql(
     environment,
     "UPDATE notification_events SET kind='revision' WHERE id='upgrade-comment-a'",
     { allowFailure: true },
   );
-  assert(!immutable.ok, 'Upgrade D1 nao protegeu evento antigo contra mutacao.');
+  assert(
+    !immutable.ok,
+    'Upgrade D1 nao protegeu evento antigo contra mutacao.',
+  );
 
   executeSql(
     environment,
@@ -473,6 +517,7 @@ function verifyNotificationUpgrade(outputDirectory) {
     preservedDeliveries: deliveryBefore.length,
     preservedReconciliations: reconciliationBefore.length,
     newRevisionEvent: revision.id,
+    legacyCredentialScope: upgradedCredential.scope,
   };
 }
 

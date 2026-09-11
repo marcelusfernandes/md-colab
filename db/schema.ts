@@ -50,7 +50,9 @@ export const documentRevisions = sqliteTable(
       (): AnySQLiteColumn => documentRevisions.id,
     ),
     summary: text('summary'),
-    consideredCommentIds: text('considered_comment_ids').notNull().default('[]'),
+    consideredCommentIds: text('considered_comment_ids')
+      .notNull()
+      .default('[]'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [
@@ -139,10 +141,7 @@ export const conversationEvents = sqliteTable(
       table.documentId,
       table.sequence,
     ),
-    index('conversation_events_root_sequence').on(
-      table.rootId,
-      table.sequence,
-    ),
+    index('conversation_events_root_sequence').on(table.rootId, table.sequence),
   ],
 );
 
@@ -169,7 +168,9 @@ export const notificationEvents = sqliteTable(
   {
     id: text('id').primaryKey(),
     kind: text('kind').notNull().default('comment'),
-    commentId: text('comment_id').unique().references(() => comments.id),
+    commentId: text('comment_id')
+      .unique()
+      .references(() => comments.id),
     revisionId: text('revision_id')
       .unique()
       .references(() => documentRevisions.id),
@@ -301,6 +302,8 @@ export const publishingTokens = sqliteTable(
       .references(() => users.id),
     name: text('name').notNull(),
     tokenHash: text('token_hash').notNull().unique(),
+    scope: text('scope').notNull().default('publish'),
+    documentId: text('document_id').references(() => documents.id),
     createdAt: text('created_at').notNull(),
     expiresAt: integer('expires_at').notNull(),
     revokedAt: integer('revoked_at'),
@@ -308,6 +311,7 @@ export const publishingTokens = sqliteTable(
   (table) => [
     index('publishing_tokens_user_created').on(table.userId, table.createdAt),
     index('publishing_tokens_expiry').on(table.expiresAt),
+    index('publishing_tokens_document').on(table.documentId),
   ],
 );
 
