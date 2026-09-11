@@ -33,7 +33,7 @@ type Props = {
   onNavigate: (revisionId: string | null) => void;
   onOpenComment: (commentId: string) => void;
   onProtectedError: (error: ApiError) => void;
-  onReloadCurrent: () => Promise<void>;
+  onReloadCurrent: () => Promise<boolean>;
   onNotice: (message: string) => void;
 };
 
@@ -329,6 +329,9 @@ export function RevisionHistory({
       diff: compareRevisionMarkdown(before.markdown, after.markdown),
     };
   }, [comparison, selected]);
+  const baseSummary = selected
+    ? revisions.find((revision) => revision.id === selected.base_revision_id)
+    : undefined;
 
   async function copyRevisionLink(id: string) {
     const url = new URL(`/d/${document.id}`, window.location.origin);
@@ -346,8 +349,7 @@ export function RevisionHistory({
     setCurrentLoading(true);
     setCurrentError('');
     try {
-      await onReloadCurrent();
-      onNavigate(null);
+      if (await onReloadCurrent()) onNavigate(null);
     } catch (cause) {
       handleReadError(cause, setCurrentError);
     } finally {
@@ -455,7 +457,9 @@ export function RevisionHistory({
           <div className="revision-snapshot-heading">
             <div>
               <strong>
-                {selected ? `Revisão ${selected.ordinal}` : 'Revisão histórica'}
+                {selected
+                  ? `Revisão visualizada: ${selected.ordinal}`
+                  : 'Revisão histórica'}
               </strong>
               <p>
                 A revisão atual protegida continua sendo{' '}
@@ -524,7 +528,7 @@ export function RevisionHistory({
                   <dt>Base explícita</dt>
                   <dd>
                     {selected.base_revision_id
-                      ? 'Snapshot ' + selected.base_revision_id
+                      ? `${baseSummary ? `Revisão ${baseSummary.ordinal} · ` : 'Snapshot '}${selected.base_revision_id}`
                       : 'Importação inicial'}
                   </dd>
                 </div>

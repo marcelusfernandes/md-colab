@@ -3551,7 +3551,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     updateCommentDestination(true, null);
   }
   async function reloadCurrentFromHistory() {
-    if (!doc || !viewer) return;
+    if (!doc || !viewer) return false;
     const request = ++currentHistoryRequest.current;
     const generation = contextGeneration.current;
     const expectedDocumentId = doc.id;
@@ -3566,12 +3566,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       activeDocumentId.current !== expectedDocumentId ||
       activeViewerId.current !== expectedViewerId
     )
-      return;
+      return false;
     const current = documentFromValue(response.document);
     if (current.id !== expectedDocumentId)
       throw new Error('O servidor retornou outro plano ao reler a revisão atual.');
     setDoc(current);
     setIsOwner(response.isOwner);
+    return true;
   }
   function showQuote(entry: CommentRow) {
     if (!doc) return;
