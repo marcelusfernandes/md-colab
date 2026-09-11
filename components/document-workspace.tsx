@@ -1891,11 +1891,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       session.isTest !== operation.isTest
     )
       return;
+    const preserveLoadedPages = list.length > 0;
+    const previousCursor = documentsNextCursor.current;
     const attempt: CollectionAttempt = {
       generation: documentsGeneration.current,
       request: ++documentsPageRequest.current,
       context: `${operation.viewerId}:${operation.isTest ? 'test' : 'email'}`,
     };
+    documentsPageInProgress.current = true;
+    setDocumentsLoadingMore(true);
     try {
       const page = documentPageFromResponse(
         await api<unknown>('documents', 'GET', undefined, {
@@ -1916,9 +1920,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         Boolean(activeViewerIsTest.current) !== operation.isTest
       )
         return;
-      setList(page.documents);
-      documentsNextCursor.current = page.nextCursor;
-      setDocumentsHasMore(page.nextCursor !== null);
+      setList((current) => mergeDocumentPages(current, page.documents));
+      documentsNextCursor.current = preserveLoadedPages
+        ? previousCursor
+        : page.nextCursor;
+      setDocumentsHasMore(documentsNextCursor.current !== null);
       setDocumentsPageError('');
     } catch (cause) {
       const currentSession = collectionSession.current;
@@ -1938,6 +1944,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setDocumentsPageError(
         `A importação inicial foi confirmada, mas não foi possível atualizar a lista atual: ${errorText(cause)}`,
       );
+    } finally {
+      if (attempt.request === documentsPageRequest.current) {
+        documentsPageInProgress.current = false;
+        setDocumentsLoadingMore(false);
+      }
     }
   }
   function confirmImportOperation(operation: ImportOperation, receipt: DocumentRow) {
@@ -3714,6 +3725,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation preserves the existing beforeunload protection. */}
               <a href={'/d/' + confirmedImport.id}>Abrir plano</a>
             </section>
+          )}
+          {list.length === 0 && documentsPageError && (
+            <p role="alert" className="form-error">
+              {documentsPageError}{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setLoading(true);
+                  void load();
+                }}
+              >
+                Tentar atualizar novamente
+              </button>
+            </p>
           )}
           {list.length === 0 ? (
             <div className="empty-document">
