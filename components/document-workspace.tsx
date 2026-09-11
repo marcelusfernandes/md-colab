@@ -2743,7 +2743,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       node.removeEventListener('pointerup', captureSelection);
       node.removeEventListener('keyup', captureSelection);
     };
-  }, [captureSelection, currentMarkdown]);
+  }, [captureSelection, doc, loading]);
   async function verifyCommentOperation(operation: CommentOperation) {
     if (
       busy ||
