@@ -133,6 +133,18 @@ void test('link permite comentar com outro e-mail; somente a sessão criadora ad
   assert.equal(comment.status, 201);
   assert.equal('sequence' in comment.body.comment!, false);
   const commentId = comment.body.comment!.id;
+  const deepGuest = f.client();
+  const deepEntered = await deepGuest.call('auth/test', 'POST', {
+    email: 'outro-rotulo@example.com',
+    documentId: id,
+    commentId,
+  });
+  assert.equal(deepEntered.body.redirect, `/d/${id}?comment=${commentId}`);
+  assert.equal(
+    (await deepGuest.call(`documents/${id}/comments/${commentId}/context`))
+      .status,
+    200,
+  );
   const lookup = await guest.call(`documents/${id}/comments/${commentId}`);
   assert.equal(lookup.status, 200);
   assert.equal(lookup.body.comment?.id, commentId);
@@ -375,7 +387,7 @@ void test('a entrada de teste rejeita solicitações de outra origem e links ine
         documentId: '//other.example.com',
       })
     ).status,
-    404,
+    400,
   );
   assert.equal(f.sqlite.prepare('SELECT count(*) n FROM users').get()?.n, 0);
 });

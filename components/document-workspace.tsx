@@ -52,6 +52,7 @@ import type {
   ConversationFilter,
   ConversationEventAction,
   ConversationEventRow,
+  DirectedCommentContext,
 } from '@/lib/document-service';
 import {
   collectionAttemptMatches,
@@ -82,10 +83,11 @@ import {
   conversationFilters,
   conversationHistoryAttemptMatches,
   conversationPageFromResponse,
+  conversationReplyPageRequestMatches,
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
   mergeConversationEventState,
-  mergeConversationReplies,
+  mergeConversationReplyPageForAttempt,
   nextConversationHistoryRequest,
 } from '@/lib/conversation-page';
 import {
@@ -97,6 +99,14 @@ import {
   updateConversationOperation,
   type ConversationOperation,
 } from '@/lib/conversation-operation';
+import {
+  commentDestination,
+  directedCommentAttemptMatches,
+  directedCommentContextFromResponse,
+  mergeDirectedConfirmedComment,
+  reconcileDirectedCommentContext,
+  visibleDirectedReplies,
+} from '@/lib/directed-comment';
 import {
   createImportOperation,
   documentFromImportResponse,
@@ -236,6 +246,21 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const sharesMutationRequest = useRef(0);
   const refreshCommentsRef = useRef<(() => Promise<void>) | null>(null);
   const refreshConversationsRef = useRef<(() => Promise<boolean>) | null>(null);
+  const refreshDirectedCommentRef = useRef<(() => Promise<boolean>) | null>(
+    null,
+  );
+  const directedCommentIdRef = useRef<string | null>(null);
+  const directedCommentRequest = useRef(0);
+  const directedCommentContextRef = useRef<DirectedCommentContext | null>(null);
+  const directedRecentWindowRef = useRef<{
+    documentId: string;
+    viewerId: string;
+    commentId: string;
+    replyIds: string[];
+  } | null>(null);
+  const collectionReplyRequest = useRef(0);
+  const directedReplyRequest = useRef(0);
+  const directedTargetElement = useRef<HTMLElement | null>(null);
   const conversationOperationRef = useRef<ConversationOperation | null>(null);
   const conversationGeneration = useRef(0);
   const conversationRequest = useRef(0);
@@ -286,15 +311,25 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   > | null>(null);
   const [commentsRefreshError, setCommentsRefreshError] = useState('');
   const [, setCommentsHistoryError] = useState('');
-  const [conversationRows, setConversationRows] = useState<ConversationRow[]>([]);
+  const [conversationRows, setConversationRows] = useState<ConversationRow[]>(
+    [],
+  );
   const [conversationFilter, setConversationFilter] =
     useState<ConversationFilter>('all');
   const [conversationsLoading, setConversationsLoading] = useState(false);
   const [conversationsLoaded, setConversationsLoaded] = useState(false);
-  const [conversationsLoadingMore, setConversationsLoadingMore] = useState(false);
+  const [conversationsLoadingMore, setConversationsLoadingMore] =
+    useState(false);
   const [conversationsError, setConversationsError] = useState('');
   const [conversationOperation, setConversationOperation] =
     useState<ConversationOperation | null>(null);
+  const [directedCommentId, setDirectedCommentId] = useState<string | null>(
+    null,
+  );
+  const [directedCommentContext, setDirectedCommentContext] =
+    useState<DirectedCommentContext | null>(null);
+  const [directedCommentLoading, setDirectedCommentLoading] = useState(false);
+  const [directedCommentError, setDirectedCommentError] = useState('');
   const [conversationDrafts, setConversationDrafts] = useState<
     Record<
       string,
@@ -321,7 +356,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const hasUnconfirmedComment =
     Boolean(comment.trim()) || Boolean(commentOperation?.body.trim());
   const hasUnconfirmedWork =
-    hasUnconfirmedComment || Boolean(importOperation) || Boolean(conversationOperation);
+    hasUnconfirmedComment ||
+    Boolean(importOperation) ||
+    Boolean(conversationOperation);
   const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
     () =>
       doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] },
@@ -336,12 +373,79 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const pendingReplyRoot = useMemo(
     () =>
       commentOperation?.rootId
-        ? comments.find((entry) => entry.id === commentOperation.rootId) ?? null
+        ? (comments.find((entry) => entry.id === commentOperation.rootId) ??
+          null)
         : null,
     [commentOperation?.rootId, comments],
   );
   const composerReplyRoot = pendingReplyRoot ?? replyRoot;
-  const composerIsReply = Boolean(composerReplyRoot || commentOperation?.rootId);
+  const composerIsReply = Boolean(
+    composerReplyRoot || commentOperation?.rootId,
+  );
+  const visibleConversationRows = useMemo(() => {
+    if (!directedCommentContext) return conversationRows;
+    const { target, conversation } = directedCommentContext;
+    return [
+      {
+        ...conversation,
+        replies:
+          target.id === conversation.root.id
+            ? conversation.replies
+            : [target, ...visibleDirectedReplies(directedCommentContext)],
+      },
+    ];
+  }, [conversationRows, directedCommentContext]);
+  const directedMode = Boolean(directedCommentId || directedCommentError);
+  const directedTargetId = directedCommentContext?.target.id;
+
+  const updateCommentDestination = useCallback(
+    (push: boolean, value?: string | null) => {
+      const parsed = commentDestination(
+        value === undefined
+          ? new URLSearchParams(window.location.search).get('comment')
+          : value,
+      );
+      directedCommentRequest.current += 1;
+      directedCommentIdRef.current = parsed.id;
+      directedCommentContextRef.current = null;
+      directedRecentWindowRef.current = null;
+      collectionReplyRequest.current += 1;
+      directedReplyRequest.current += 1;
+      setDirectedCommentId(parsed.id);
+      setDirectedCommentContext(null);
+      setDirectedCommentLoading(false);
+      setDirectedCommentError(parsed.error);
+      setBusy((current) =>
+        current.startsWith('collection-replies:') ||
+        current.startsWith('directed-replies:')
+          ? ''
+          : current,
+      );
+      if (push) {
+        const url = new URL(window.location.href);
+        if (parsed.id) url.searchParams.set('comment', parsed.id);
+        else url.searchParams.delete('comment');
+        window.history.pushState(
+          null,
+          '',
+          url.pathname + url.search + url.hash,
+        );
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() =>
+      updateCommentDestination(false),
+    );
+    const read = () => updateCommentDestination(false);
+    window.addEventListener('popstate', read);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('popstate', read);
+    };
+  }, [updateCommentDestination]);
 
   useEffect(() => {
     if (!hasUnconfirmedWork) return;
@@ -433,6 +537,17 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         current === 'comment' || current === 'comment-lookup' ? '' : current,
       );
       setComments((current) => mergeComments(current, [confirmed]));
+      const refreshDirected = directedCommentIdRef.current !== null;
+      if (refreshDirected) {
+        directedCommentRequest.current += 1;
+        setDirectedCommentLoading(false);
+      }
+      const currentDirected = directedCommentContextRef.current;
+      const nextDirected = currentDirected
+        ? mergeDirectedConfirmedComment(currentDirected, confirmed)
+        : null;
+      directedCommentContextRef.current = nextDirected;
+      setDirectedCommentContext(nextDirected);
       if (shouldClearComposer(operation, composerRevision.current)) {
         commentValue.current = '';
         setComment('');
@@ -445,6 +560,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setCommentOperation(null);
       setNotice('Comentário confirmado.');
       void refreshConversationsRef.current?.();
+      if (refreshDirected) void refreshDirectedCommentRef.current?.();
     },
     [],
   );
@@ -465,9 +581,21 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       commentsHistoryInProgress.current = false;
       commentsNextCursor.current = null;
       commentsOlderCursor.current = null;
+      directedCommentRequest.current += 1;
+      directedCommentContextRef.current = null;
+      directedRecentWindowRef.current = null;
+      collectionReplyRequest.current += 1;
+      directedReplyRequest.current += 1;
+      setDirectedCommentContext(null);
+      setDirectedCommentLoading(false);
       commentSendRequest.current += 1;
       setBusy((current) =>
-        current === 'comment' || current === 'comment-lookup' ? '' : current,
+        current === 'comment' ||
+        current === 'comment-lookup' ||
+        current.startsWith('collection-replies:') ||
+        current.startsWith('directed-replies:')
+          ? ''
+          : current,
       );
       activeDocumentId.current = null;
       setDoc(null);
@@ -526,6 +654,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
 
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
+    collectionReplyRequest.current += 1;
+    directedReplyRequest.current += 1;
+    setBusy((current) =>
+      current.startsWith('collection-replies:') ||
+      current.startsWith('directed-replies:')
+        ? ''
+        : current,
+    );
     documentsGeneration.current += 1;
     documentsPageRequest.current += 1;
     documentsPageInProgress.current = false;
@@ -683,9 +819,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         setComments(loadedComments);
         setReplyRoot(
           currentOperation?.rootId
-            ? loadedComments.find(
+            ? (loadedComments.find(
                 (entry) => entry.id === currentOperation.rootId,
-              ) ?? null
+              ) ?? null)
             : null,
         );
         setHasOlderComments(commentPage.pagination.olderCursor !== null);
@@ -942,6 +1078,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const loadConversationPage = useCallback(
     async (filter: ConversationFilter, append = false) => {
       if (!doc || !viewer) return false;
+      collectionReplyRequest.current += 1;
+      setBusy((current) =>
+        current.startsWith('collection-replies:') ? '' : current,
+      );
       const cursor = append ? conversationsNextCursor.current : null;
       if (append && !cursor) return false;
       const generation = conversationGeneration.current;
@@ -1016,6 +1156,137 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     [doc, hideProtectedContent, viewer],
   );
 
+  const loadDirectedComment = useCallback(async () => {
+    const commentId = directedCommentIdRef.current;
+    if (!doc || !viewer || !commentId) return false;
+    const attempt = {
+      documentId: doc.id,
+      commentId,
+      viewerId: viewer.id,
+      request: ++directedCommentRequest.current,
+    };
+    const isCurrent = () =>
+      mounted.current &&
+      directedCommentAttemptMatches(attempt, {
+        documentId: activeDocumentId.current,
+        commentId: directedCommentIdRef.current,
+        viewerId: activeViewerId.current,
+        request: directedCommentRequest.current,
+      });
+    setDirectedCommentLoading(true);
+    setDirectedCommentError('');
+    try {
+      const context = directedCommentContextFromResponse(
+        await api<unknown>(
+          `documents/${doc.id}/comments/${commentId}/context`,
+          'GET',
+          undefined,
+          { timeoutMs: COMMENT_REQUEST_TIMEOUT_MS },
+        ),
+        commentId,
+      );
+      if (!isCurrent()) return false;
+      const previousWindow = directedRecentWindowRef.current;
+      const previousReplyIds =
+        previousWindow?.documentId === attempt.documentId &&
+        previousWindow.viewerId === attempt.viewerId &&
+        previousWindow.commentId === attempt.commentId
+          ? previousWindow.replyIds
+          : null;
+      const reconciled = reconcileDirectedCommentContext(
+        directedCommentContextRef.current,
+        context,
+        previousReplyIds,
+      );
+      directedCommentContextRef.current = reconciled.context;
+      directedRecentWindowRef.current = {
+        documentId: attempt.documentId,
+        viewerId: attempt.viewerId,
+        commentId: attempt.commentId,
+        replyIds: context.conversation.replies.map((reply) => reply.id),
+      };
+      if (reconciled.reset) {
+        directedReplyRequest.current += 1;
+        setBusy((current) =>
+          current.startsWith('directed-replies:') ? '' : current,
+        );
+      }
+      setDirectedCommentContext(reconciled.context);
+      if (reconciled.reset)
+        setNotice(
+          'Muitas respostas novas chegaram. A lista voltou às respostas recentes; carregue as anteriores novamente.',
+        );
+      setDirectedCommentError('');
+      return true;
+    } catch (cause) {
+      if (!isCurrent()) return false;
+      if (cause instanceof ApiError && cause.status === 404) {
+        try {
+          await api<unknown>('documents/' + doc.id, 'GET', undefined, {
+            timeoutMs: COMMENT_REQUEST_TIMEOUT_MS,
+          });
+          if (!isCurrent()) return false;
+          directedCommentContextRef.current = null;
+          directedRecentWindowRef.current = null;
+          directedReplyRequest.current += 1;
+          setBusy((current) =>
+            current.startsWith('directed-replies:') ? '' : current,
+          );
+          setDirectedCommentContext(null);
+          setDirectedCommentError(
+            'Este comentário não está disponível neste documento. Você pode voltar à coleção ou tentar novamente.',
+          );
+        } catch (accessCause) {
+          if (!isCurrent()) return false;
+          if (
+            accessCause instanceof ApiError &&
+            [401, 403, 404].includes(accessCause.status)
+          )
+            hideProtectedContent(accessCause);
+          else
+            setDirectedCommentError(
+              'Não foi possível confirmar o acesso ao documento. ' +
+                errorText(accessCause),
+            );
+        }
+      } else if (cause instanceof ApiError && [401, 403].includes(cause.status))
+        hideProtectedContent(cause);
+      else
+        setDirectedCommentError(
+          'Não foi possível abrir este comentário. ' + errorText(cause),
+        );
+      return false;
+    } finally {
+      if (isCurrent()) setDirectedCommentLoading(false);
+    }
+  }, [doc, hideProtectedContent, viewer]);
+
+  useEffect(() => {
+    if (!doc || !viewer || !directedCommentId) {
+      refreshDirectedCommentRef.current = null;
+      return;
+    }
+    const refresh = () => loadDirectedComment();
+    refreshDirectedCommentRef.current = refresh;
+    void refresh();
+    return () => {
+      if (refreshDirectedCommentRef.current === refresh)
+        refreshDirectedCommentRef.current = null;
+    };
+  }, [directedCommentId, doc, loadDirectedComment, viewer]);
+
+  useEffect(() => {
+    if (!directedTargetId) return;
+    const frame = window.requestAnimationFrame(() => {
+      directedTargetElement.current?.focus({ preventScroll: true });
+      directedTargetElement.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [directedTargetId]);
+
   const chooseConversationFilter = useCallback(
     (filter: ConversationFilter) => {
       if (filter === activeConversationFilter.current) return;
@@ -1056,6 +1327,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       try {
         let cursor = initialCursor;
         let changed = false;
+        const changedRoots = new Set<string>();
         for (;;) {
           const changes = conversationChangesFromResponse(
             await api<unknown>(
@@ -1074,16 +1346,25 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           )
             return;
           if (changes.hasMore && changes.nextCursor === cursor)
-            throw new Error('O servidor retornou um feed de conversas inválido.');
+            throw new Error(
+              'O servidor retornou um feed de conversas inválido.',
+            );
           changed ||= changes.rootIds.length > 0;
+          for (const rootId of changes.rootIds) changedRoots.add(rootId);
           cursor = changes.nextCursor;
           if (!changes.hasMore) break;
         }
         let reloaded = false;
-        if (changed)
-          reloaded = await loadConversationPage(
+        if (changed) {
+          const collectionReloaded = await loadConversationPage(
             activeConversationFilter.current,
           );
+          const directedReloaded =
+            directedCommentIdRef.current && changedRoots.size > 0
+              ? await refreshDirectedCommentRef.current?.()
+              : true;
+          reloaded = collectionReloaded && directedReloaded === true;
+        }
         if (
           !active ||
           generation !== conversationGeneration.current ||
@@ -1121,7 +1402,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           conversationChangeInProgress.current = false;
       }
     };
-    const refresh = () => loadConversationPage(activeConversationFilter.current);
+    const refresh = () =>
+      loadConversationPage(activeConversationFilter.current);
     refreshConversationsRef.current = refresh;
     const timer = window.setInterval(() => void poll(), 15_000);
     window.addEventListener('focus', poll);
@@ -1879,6 +2161,23 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     setConversationRows((current) =>
       current.map((entry) => mergeConversationEventState(entry, event)),
     );
+    const currentDirected = directedCommentContextRef.current;
+    const nextDirected = currentDirected
+      ? {
+          ...currentDirected,
+          conversation: mergeConversationEventState(
+            currentDirected.conversation,
+            event,
+          ),
+        }
+      : null;
+    directedCommentContextRef.current = nextDirected;
+    setDirectedCommentContext(nextDirected);
+    if (directedCommentIdRef.current) {
+      directedCommentRequest.current += 1;
+      setDirectedCommentLoading(false);
+      void refreshDirectedCommentRef.current?.();
+    }
   }
   async function sendConversationOperation(operation: ConversationOperation) {
     if (
@@ -1959,7 +2258,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         hideProtectedContent(cause);
         return;
       }
-      const rejected = cause instanceof ApiError && [400, 409].includes(cause.status);
+      const rejected =
+        cause instanceof ApiError && [400, 409].includes(cause.status);
       storeConversationOperation(
         updateConversationOperation(
           operation,
@@ -2058,9 +2358,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         ),
       );
     } finally {
-      setBusy((current) =>
-        current === 'conversation-lookup' ? '' : current,
-      );
+      setBusy((current) => (current === 'conversation-lookup' ? '' : current));
     }
   }
   function startConversationOperation(
@@ -2131,8 +2429,39 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
   }
   async function loadConversationReplies(conversation: ConversationRow) {
-    if (!doc || !conversation.repliesCursor || busy) return;
-    setBusy(`replies:${conversation.root.id}`);
+    if (!doc || !viewer || !conversation.repliesCursor || busy) return;
+    const directedId = directedCommentIdRef.current;
+    const directedContext = directedCommentContextRef.current;
+    const origin = directedId ? 'directed' : 'collection';
+    if (
+      origin === 'directed' &&
+      (directedContext?.conversation.root.id !== conversation.root.id ||
+        directedContext.conversation.repliesCursor !==
+          conversation.repliesCursor)
+    )
+      return;
+    const requestRef =
+      origin === 'directed' ? directedReplyRequest : collectionReplyRequest;
+    const attempt = {
+      origin,
+      documentId: doc.id,
+      viewerId: viewer.id,
+      rootId: conversation.root.id,
+      cursor: conversation.repliesCursor,
+      commentId: origin === 'directed' ? directedId : null,
+      request: ++requestRef.current,
+    } as const;
+    const busyKey = `${origin}-replies:${conversation.root.id}`;
+    const requestIsCurrent = () =>
+      mounted.current &&
+      conversationReplyPageRequestMatches(attempt, {
+        origin: directedCommentIdRef.current ? 'directed' : 'collection',
+        documentId: activeDocumentId.current,
+        viewerId: activeViewerId.current,
+        commentId: directedCommentIdRef.current,
+        request: requestRef.current,
+      });
+    setBusy(busyKey);
     try {
       const page = conversationRepliesFromResponse(
         await api<unknown>(
@@ -2143,22 +2472,59 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         ),
         conversation.root.id,
       );
-      if (!mounted.current || activeDocumentId.current !== doc.id) return;
-      setConversationRows((current) =>
-        current.map((entry) =>
-          entry.root.id === conversation.root.id
-            ? mergeConversationReplies(entry, page.replies, page.nextCursor)
-            : entry,
-        ),
-      );
+      if (!requestIsCurrent()) return;
+      if (origin === 'directed') {
+        const currentDirected = directedCommentContextRef.current;
+        if (!currentDirected) return;
+        const merged = mergeConversationReplyPageForAttempt(
+          attempt,
+          {
+            origin,
+            documentId: activeDocumentId.current,
+            viewerId: activeViewerId.current,
+            rootId: currentDirected.conversation.root.id,
+            cursor: currentDirected.conversation.repliesCursor,
+            commentId: directedCommentIdRef.current,
+            request: directedReplyRequest.current,
+          },
+          currentDirected.conversation,
+          page,
+        );
+        if (merged === currentDirected.conversation) return;
+        const nextDirected = {
+          ...currentDirected,
+          conversation: merged,
+        };
+        directedCommentContextRef.current = nextDirected;
+        setDirectedCommentContext(nextDirected);
+      } else {
+        setConversationRows((current) =>
+          current.map((entry) =>
+            mergeConversationReplyPageForAttempt(
+              attempt,
+              {
+                origin,
+                documentId: activeDocumentId.current,
+                viewerId: activeViewerId.current,
+                rootId: entry.root.id,
+                cursor: entry.repliesCursor,
+                commentId: null,
+                request: collectionReplyRequest.current,
+              },
+              entry,
+              page,
+            ),
+          ),
+        );
+      }
     } catch (cause) {
+      if (!requestIsCurrent()) return;
       if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
         hideProtectedContent(cause);
       else setConversationsError(errorText(cause));
     } finally {
-      setBusy((current) =>
-        current === `replies:${conversation.root.id}` ? '' : current,
-      );
+      if (requestIsCurrent())
+        setBusy((current) => (current === busyKey ? '' : current));
     }
   }
   async function loadConversationHistory(rootId: string, append = false) {
@@ -2473,6 +2839,31 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setShareError('Não foi possível copiar. Copie o endereço da página.');
     }
   }
+  function commentLink(commentId: string) {
+    return doc
+      ? `${window.location.origin}/d/${doc.id}?comment=${encodeURIComponent(commentId)}`
+      : '';
+  }
+  async function copyCommentLink(commentId: string) {
+    if (!doc) return;
+    try {
+      await navigator.clipboard.writeText(commentLink(commentId));
+      setNotice('Link do comentário copiado.');
+    } catch {
+      setNotice('Não foi possível copiar o link do comentário.');
+    }
+  }
+  function openCommentLink(commentId: string) {
+    const sameDestination = directedCommentIdRef.current === commentId;
+    if (sameDestination) {
+      void loadDirectedComment();
+      return;
+    }
+    updateCommentDestination(true, commentId);
+  }
+  function closeCommentLink() {
+    updateCommentDestination(true, null);
+  }
   function showQuote(entry: CommentRow) {
     if (entry.source_start === null) return;
     const target = article.current?.querySelector(
@@ -2568,6 +2959,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       ) : needsLogin ? (
         <EmailLogin
           authorMode={authorMode}
+          commentId={directedCommentId ?? undefined}
           documentId={documentId}
           mode={accessMode}
         />
@@ -2830,7 +3222,44 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   Buscando novos comentários…
                 </output>
               )}
-              <div className="conversation-filters" aria-label="Filtrar conversas">
+              {directedMode && (
+                <section
+                  className="directed-comment-header"
+                  aria-label="Comentário aberto pelo link"
+                >
+                  <div>
+                    <strong>Contexto do comentário</strong>
+                    <p>
+                      {directedCommentContext
+                        ? `Lista paginada: ${directedCommentContext.conversation.replies.length} de ${directedCommentContext.conversation.replyCount} respostas carregadas. A resposta do link aparece separadamente quando necessário.`
+                        : 'A coleção continua preservada enquanto este contexto é carregado.'}
+                    </p>
+                  </div>
+                  <button type="button" onClick={closeCommentLink}>
+                    Voltar à coleção
+                  </button>
+                </section>
+              )}
+              {directedCommentError && (
+                <div className="comments-refresh-error" role="alert">
+                  <p>{directedCommentError}</p>
+                  {directedCommentId && (
+                    <button
+                      type="button"
+                      disabled={directedCommentLoading}
+                      onClick={() => void loadDirectedComment()}
+                    >
+                      Tentar abrir novamente
+                    </button>
+                  )}
+                </div>
+              )}
+              {!directedMode && (
+                <>
+                  <div
+                    className="conversation-filters"
+                    aria-label="Filtrar conversas"
+                  >
                 {conversationFilters.map((filter) => (
                   <button
                     type="button"
@@ -2850,13 +3279,17 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 )?.label ?? 'Todas'}
                 .
               </p>
-              {conversationsError && (
+                </>
+              )}
+              {!directedMode && conversationsError && (
                 <div className="comments-refresh-error" role="alert">
                   <p>{conversationsError}</p>
                   <button
                     type="button"
                     disabled={conversationsLoading}
-                    onClick={() => void loadConversationPage(conversationFilter)}
+                    onClick={() =>
+                      void loadConversationPage(conversationFilter)
+                    }
                   >
                     Tentar carregar conversas novamente
                   </button>
@@ -2893,7 +3326,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         type="button"
                         disabled={!!busy}
                         onClick={() =>
-                          void verifyConversationOperation(conversationOperation)
+                          void verifyConversationOperation(
+                            conversationOperation,
+                          )
                         }
                       >
                         Verificar agora
@@ -3078,9 +3513,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         : 'Comentar'}
                 </Button>
               </form>
-              {conversationsLoading && conversationRows.length === 0 ? (
+              {directedMode && directedCommentLoading ? (
+                <div className="comments-empty">
+                  Carregando contexto do comentário…
+                </div>
+              ) : directedMode &&
+                !directedCommentContext ? null : !directedMode &&
+                conversationsLoading &&
+                conversationRows.length === 0 ? (
                 <div className="comments-empty">Carregando conversas…</div>
-              ) : conversationsLoaded && conversationRows.length === 0 ? (
+              ) : !directedMode &&
+                conversationsLoaded &&
+                conversationRows.length === 0 ? (
                 <div className="comments-empty">
                   {conversationFilter === 'all'
                     ? 'Nenhum comentário ainda.'
@@ -3088,7 +3532,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 </div>
               ) : (
                 <div className="comments-list">
-                  {conversationRows.map((conversation) => {
+                  {visibleConversationRows.map((conversation) => {
                     const { root, replies } = conversation;
                     const draft =
                       conversationDrafts[root.id] ??
@@ -3097,8 +3541,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                     return (
                     <section className="comment-thread" key={root.id}>
                       <div className="conversation-summary">
-                        <span className={`conversation-state conversation-state-${conversation.state}`}>
-                          {conversation.state === 'open' ? 'Aberta' : 'Encerrada'}
+                          <span
+                            className={`conversation-state conversation-state-${conversation.state}`}
+                          >
+                            {conversation.state === 'open'
+                              ? 'Aberta'
+                              : 'Encerrada'}
                         </span>
                         <span>
                           {conversation.replyCount === 0
@@ -3116,7 +3564,24 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           </span>
                         )}
                       </div>
-                      <section className="comment-item">
+                        <section
+                          className={`comment-item ${directedCommentContext?.target.id === root.id ? 'comment-target' : ''}`}
+                          ref={
+                            directedCommentContext?.target.id === root.id
+                              ? directedTargetElement
+                              : undefined
+                          }
+                          tabIndex={
+                            directedCommentContext?.target.id === root.id
+                              ? -1
+                              : undefined
+                          }
+                        >
+                          {directedCommentContext?.target.id === root.id && (
+                            <strong className="comment-target-label">
+                              Comentário aberto pelo link
+                            </strong>
+                          )}
                         <div className="comment-author">
                           <span className="avatar">
                             {root.author_name.slice(0, 1).toUpperCase()}
@@ -3139,6 +3604,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           </button>
                         )}
                         <p>{root.body}</p>
+                          <div className="comment-link-actions">
                         <button
                           type="button"
                           className="comment-reply"
@@ -3153,6 +3619,21 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         >
                           Responder
                         </button>
+                            <button
+                              type="button"
+                              className="comment-reply"
+                              onClick={() => openCommentLink(root.id)}
+                            >
+                              Abrir link
+                            </button>
+                            <button
+                              type="button"
+                              className="comment-reply"
+                              onClick={() => void copyCommentLink(root.id)}
+                            >
+                              Copiar link
+                            </button>
+                          </div>
                         {isOwner && (
                           <div className="conversation-owner-controls">
                             <button
@@ -3161,7 +3642,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                               onClick={() =>
                                 startConversationOperation(
                                   conversation,
-                                  conversation.state === 'open' ? 'close' : 'reopen',
+                                    conversation.state === 'open'
+                                      ? 'close'
+                                      : 'reopen',
                                 )
                               }
                             >
@@ -3179,7 +3662,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                                     ...current,
                                     [root.id]: {
                                       ...draft,
-                                      action: event.target.value as ConversationEventAction,
+                                        action: event.target
+                                          .value as ConversationEventAction,
                                     },
                                   }))
                                 }
@@ -3225,9 +3709,24 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                       </section>
                       {replies.map((entry) => (
                         <section
-                          className="comment-item comment-reply-item"
+                            className={`comment-item comment-reply-item ${directedCommentContext?.target.id === entry.id ? 'comment-target' : ''}`}
                           key={entry.id}
+                            ref={
+                              directedCommentContext?.target.id === entry.id
+                                ? directedTargetElement
+                                : undefined
+                            }
+                            tabIndex={
+                              directedCommentContext?.target.id === entry.id
+                                ? -1
+                                : undefined
+                            }
                         >
+                            {directedCommentContext?.target.id === entry.id && (
+                              <strong className="comment-target-label">
+                                Resposta aberta pelo link
+                              </strong>
+                            )}
                           <div className="comment-author">
                             <span className="avatar">
                               {entry.author_name.slice(0, 1).toUpperCase()}
@@ -3240,6 +3739,22 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                             </div>
                           </div>
                           <p>{entry.body}</p>
+                            <div className="comment-link-actions">
+                              <button
+                                type="button"
+                                className="comment-reply"
+                                onClick={() => openCommentLink(entry.id)}
+                              >
+                                Abrir link
+                              </button>
+                              <button
+                                type="button"
+                                className="comment-reply"
+                                onClick={() => void copyCommentLink(entry.id)}
+                              >
+                                Copiar link
+                              </button>
+                            </div>
                         </section>
                       ))}
                       {conversation.repliesCursor && (
@@ -3247,7 +3762,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           type="button"
                           className="comment-reply conversation-more"
                           disabled={!!busy}
-                          onClick={() => void loadConversationReplies(conversation)}
+                            onClick={() =>
+                              void loadConversationReplies(conversation)
+                            }
                         >
                           Carregar respostas anteriores
                         </button>
@@ -3275,11 +3792,16 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                       </button>
                       {history && (
                         <div className="conversation-history">
-                          {history.error && <p role="alert">{history.error}</p>}
+                            {history.error && (
+                              <p role="alert">{history.error}</p>
+                            )}
                           {history.loading && history.events.length === 0 ? (
                             <p>Carregando histórico…</p>
                           ) : history.events.length === 0 ? (
-                            <p>Nenhuma alteração registrada. A conversa começou aberta.</p>
+                              <p>
+                                Nenhuma alteração registrada. A conversa começou
+                                aberta.
+                              </p>
                           ) : (
                             <ol>
                               {history.events.map((event) => (
@@ -3302,7 +3824,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                             <button
                               type="button"
                               disabled={history.loading}
-                              onClick={() => void loadConversationHistory(root.id, true)}
+                                onClick={() =>
+                                  void loadConversationHistory(root.id, true)
+                                }
                             >
                               Carregar histórico anterior
                             </button>
@@ -3314,13 +3838,15 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   })}
                 </div>
               )}
-              {conversationsNextCursor.current && (
+              {!directedMode && conversationsNextCursor.current && (
                 <div className="comments-pagination">
                   <p>Há mais conversas neste filtro.</p>
                   <button
                     type="button"
                     disabled={conversationsLoadingMore}
-                    onClick={() => void loadConversationPage(conversationFilter, true)}
+                    onClick={() =>
+                      void loadConversationPage(conversationFilter, true)
+                    }
                   >
                     {conversationsLoadingMore
                       ? 'Carregando conversas…'

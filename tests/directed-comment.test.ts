@@ -1,0 +1,207 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  commentDestination,
+  directedCommentAttemptMatches,
+  directedCommentContextFromResponse,
+  mergeDirectedConfirmedComment,
+  reconcileDirectedCommentContext,
+  visibleDirectedReplies,
+} from '../lib/directed-comment.ts';
+
+const rootId = '00000000-0000-4000-8000-000000000001';
+const replyId = '00000000-0000-4000-8000-000000000002';
+const comment = (id: string, root_id = rootId) => ({
+  id,
+  root_id,
+  body: id === rootId ? 'Raiz' : 'Resposta',
+  quote: id === rootId ? 'Trecho' : '',
+  source_start: id === rootId ? 4 : null,
+  created_at: '2026-09-11T00:00:00.000Z',
+  author_id: 'author',
+  author_name: 'Pessoa',
+});
+
+void test('destino aceita o contrato UUID local legado e rejeita valores de URL arbitrários', () => {
+  assert.deepEqual(commentDestination(null), { id: null, error: '' });
+  assert.equal(commentDestination(replyId).id, replyId);
+  assert.equal(commentDestination('https://example.com').id, null);
+  assert.match(commentDestination('../segredo').error, /inválido/);
+});
+
+void test('contexto valida alvo, raiz, estado e deduplica o alvo na apresentação', () => {
+  const context = directedCommentContextFromResponse(
+    {
+      target: comment(replyId),
+      conversation: {
+        root: comment(rootId),
+        replies: [comment(replyId)],
+        repliesCursor: null,
+        replyCount: 1,
+        state: 'closed',
+        decision: 'follow',
+        decisionReason: 'Aplicar depois.',
+        version: 2,
+      },
+    },
+    replyId,
+  );
+  assert.equal(context.target.id, replyId);
+  assert.deepEqual(visibleDirectedReplies(context), []);
+  assert.throws(() =>
+    directedCommentContextFromResponse(
+      {
+        ...context,
+        conversation: {
+          ...context.conversation,
+          root: comment('00000000-0000-4000-8000-000000000099'),
+        },
+      },
+      replyId,
+    ),
+  );
+});
+
+void test('resposta tardia só pertence à mesma sessão, documento, destino e sequência', () => {
+  const attempt = {
+    documentId: 'document-a',
+    commentId: replyId,
+    viewerId: 'viewer-a',
+    request: 8,
+  };
+  assert.equal(
+    directedCommentAttemptMatches(attempt, {
+      documentId: 'document-a',
+      commentId: replyId,
+      viewerId: 'viewer-a',
+      request: 8,
+    }),
+    true,
+  );
+  for (const current of [
+    {
+      documentId: 'document-b',
+      commentId: replyId,
+      viewerId: 'viewer-a',
+      request: 8,
+    },
+    {
+      documentId: 'document-a',
+      commentId: rootId,
+      viewerId: 'viewer-a',
+      request: 8,
+    },
+    {
+      documentId: 'document-a',
+      commentId: replyId,
+      viewerId: 'viewer-b',
+      request: 8,
+    },
+    {
+      documentId: 'document-a',
+      commentId: replyId,
+      viewerId: 'viewer-a',
+      request: 9,
+    },
+  ])
+    assert.equal(directedCommentAttemptMatches(attempt, current), false);
+});
+
+void test('confirmação preserva a fronteira do cursor e não reconta o alvo separado', () => {
+  const replies = Array.from({ length: 50 }, (_, index) =>
+    comment(`00000000-0000-4000-8000-${String(index + 10).padStart(12, '0')}`),
+  );
+  const target = comment(replyId);
+  const context = {
+    target,
+    conversation: {
+      root: comment(rootId),
+      replies,
+      repliesCursor: 'cursor-after-oldest-loaded',
+      replyCount: 56,
+      state: 'open' as const,
+      decision: null,
+      decisionReason: null,
+      version: 0,
+    },
+  };
+  const confirmed = comment('00000000-0000-4000-8000-000000000099');
+  const merged = mergeDirectedConfirmedComment(context, confirmed);
+  assert.equal(merged.conversation.replies.length, 51);
+  assert.equal(merged.conversation.replies[49]?.id, replies[49]?.id);
+  assert.equal(merged.conversation.replies[50]?.id, confirmed.id);
+  assert.equal(
+    merged.conversation.repliesCursor,
+    context.conversation.repliesCursor,
+  );
+  assert.equal(merged.conversation.replyCount, 57);
+
+  const replayedTarget = mergeDirectedConfirmedComment(context, target);
+  assert.equal(replayedTarget.conversation.replyCount, 56);
+  assert.equal(replayedTarget.conversation.replies.length, 50);
+  assert.equal(replayedTarget.target, target);
+});
+
+void test('refresh preserva páginas somente com sobreposição da janela autoritativa', () => {
+  const reply = (number: number) =>
+    comment(
+      `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`,
+    );
+  const context = (
+    replies: ReturnType<typeof comment>[],
+    repliesCursor: string | null,
+    replyCount: number,
+  ) => ({
+    target: comment(replyId),
+    conversation: {
+      root: comment(rootId),
+      replies,
+      repliesCursor,
+      replyCount,
+      state: 'open' as const,
+      decision: null,
+      decisionReason: null,
+      version: 0,
+    },
+  });
+  const previousRecent = Array.from({ length: 50 }, (_, index) =>
+    reply(index + 7),
+  );
+  const expanded = context(
+    [...Array.from({ length: 6 }, (_, index) => reply(index + 1)), ...previousRecent],
+    null,
+    56,
+  );
+  const freshAfterConfirmation = context(
+    Array.from({ length: 50 }, (_, index) => reply(index + 8)),
+    'fresh-cursor',
+    57,
+  );
+  const continuous = reconcileDirectedCommentContext(
+    expanded,
+    freshAfterConfirmation,
+    previousRecent.map((entry) => entry.id),
+  );
+  assert.equal(continuous.reset, false);
+  assert.equal(continuous.context.conversation.replies.length, 57);
+  assert.equal(continuous.context.conversation.repliesCursor, null);
+  assert.equal(continuous.context.conversation.replyCount, 57);
+
+  const localOnlyOverlap = mergeDirectedConfirmedComment(
+    expanded,
+    reply(106),
+  );
+  const disjointFresh = context(
+    Array.from({ length: 50 }, (_, index) => reply(index + 57)),
+    'new-window-cursor',
+    106,
+  );
+  const reset = reconcileDirectedCommentContext(
+    localOnlyOverlap,
+    disjointFresh,
+    previousRecent.map((entry) => entry.id),
+  );
+  assert.equal(reset.reset, true);
+  assert.deepEqual(reset.context, disjointFresh);
+  assert.equal(reset.context.conversation.repliesCursor, 'new-window-cursor');
+});

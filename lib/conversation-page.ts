@@ -8,6 +8,65 @@ import { commentFromValue, mergeComments } from './comment-page.ts';
 
 type MutableRef<T> = { current: T };
 
+export type ConversationReplyPageAttempt = {
+  origin: 'collection' | 'directed';
+  documentId: string;
+  viewerId: string;
+  rootId: string;
+  cursor: string;
+  commentId: string | null;
+  request: number;
+};
+
+export function conversationReplyPageRequestMatches(
+  attempt: ConversationReplyPageAttempt,
+  current: {
+    origin: 'collection' | 'directed';
+    documentId: string | null | undefined;
+    viewerId: string | null | undefined;
+    commentId: string | null;
+    request: number;
+  },
+) {
+  return (
+    attempt.origin === current.origin &&
+    attempt.documentId === current.documentId &&
+    attempt.viewerId === current.viewerId &&
+    attempt.commentId === current.commentId &&
+    attempt.request === current.request
+  );
+}
+
+export function conversationReplyPageAttemptMatches(
+  attempt: ConversationReplyPageAttempt,
+  current: {
+    origin: 'collection' | 'directed';
+    documentId: string | null | undefined;
+    viewerId: string | null | undefined;
+    rootId: string | null | undefined;
+    cursor: string | null | undefined;
+    commentId: string | null;
+    request: number;
+  },
+) {
+  return (
+    conversationReplyPageRequestMatches(attempt, current) &&
+    attempt.rootId === current.rootId &&
+    attempt.cursor === current.cursor
+  );
+}
+
+export function mergeConversationReplyPageForAttempt(
+  attempt: ConversationReplyPageAttempt,
+  current: Parameters<typeof conversationReplyPageAttemptMatches>[1],
+  conversation: ConversationRow,
+  page: { replies: ConversationRow['replies']; nextCursor: string | null },
+) {
+  return conversationReplyPageAttemptMatches(attempt, current)
+    ? mergeConversationReplies(conversation, page.replies, page.nextCursor)
+    : conversation;
+}
+
 export function invalidateConversationLifecycle(
   generation: MutableRef<number>,
   pageRequest: MutableRef<number>,

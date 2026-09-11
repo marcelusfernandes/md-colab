@@ -1,0 +1,1 @@
+ALTER TABLE `magic_links` ADD `comment_id` text REFERENCES comments(id);
