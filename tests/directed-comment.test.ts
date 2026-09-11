@@ -5,6 +5,7 @@ import {
   directedCommentAttemptMatches,
   directedCommentContextFromResponse,
   mergeDirectedConfirmedComment,
+  reconcileDirectedCommentContext,
   visibleDirectedReplies,
 } from '../lib/directed-comment.ts';
 
@@ -127,8 +128,8 @@ void test('confirmação preserva a fronteira do cursor e não reconta o alvo se
   const confirmed = comment('00000000-0000-4000-8000-000000000099');
   const merged = mergeDirectedConfirmedComment(context, confirmed);
   assert.equal(merged.conversation.replies.length, 51);
-  assert.equal(merged.conversation.replies[0]?.id, confirmed.id);
-  assert.equal(merged.conversation.replies[50]?.id, replies[49]?.id);
+  assert.equal(merged.conversation.replies[49]?.id, replies[49]?.id);
+  assert.equal(merged.conversation.replies[50]?.id, confirmed.id);
   assert.equal(
     merged.conversation.repliesCursor,
     context.conversation.repliesCursor,
@@ -137,6 +138,70 @@ void test('confirmação preserva a fronteira do cursor e não reconta o alvo se
 
   const replayedTarget = mergeDirectedConfirmedComment(context, target);
   assert.equal(replayedTarget.conversation.replyCount, 56);
-  assert.equal(replayedTarget.conversation.replies.length, 51);
+  assert.equal(replayedTarget.conversation.replies.length, 50);
   assert.equal(replayedTarget.target, target);
+});
+
+void test('refresh preserva páginas somente com sobreposição da janela autoritativa', () => {
+  const reply = (number: number) =>
+    comment(
+      `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`,
+    );
+  const context = (
+    replies: ReturnType<typeof comment>[],
+    repliesCursor: string | null,
+    replyCount: number,
+  ) => ({
+    target: comment(replyId),
+    conversation: {
+      root: comment(rootId),
+      replies,
+      repliesCursor,
+      replyCount,
+      state: 'open' as const,
+      decision: null,
+      decisionReason: null,
+      version: 0,
+    },
+  });
+  const previousRecent = Array.from({ length: 50 }, (_, index) =>
+    reply(index + 7),
+  );
+  const expanded = context(
+    [...Array.from({ length: 6 }, (_, index) => reply(index + 1)), ...previousRecent],
+    null,
+    56,
+  );
+  const freshAfterConfirmation = context(
+    Array.from({ length: 50 }, (_, index) => reply(index + 8)),
+    'fresh-cursor',
+    57,
+  );
+  const continuous = reconcileDirectedCommentContext(
+    expanded,
+    freshAfterConfirmation,
+    previousRecent.map((entry) => entry.id),
+  );
+  assert.equal(continuous.reset, false);
+  assert.equal(continuous.context.conversation.replies.length, 57);
+  assert.equal(continuous.context.conversation.repliesCursor, null);
+  assert.equal(continuous.context.conversation.replyCount, 57);
+
+  const localOnlyOverlap = mergeDirectedConfirmedComment(
+    expanded,
+    reply(106),
+  );
+  const disjointFresh = context(
+    Array.from({ length: 50 }, (_, index) => reply(index + 57)),
+    'new-window-cursor',
+    106,
+  );
+  const reset = reconcileDirectedCommentContext(
+    localOnlyOverlap,
+    disjointFresh,
+    previousRecent.map((entry) => entry.id),
+  );
+  assert.equal(reset.reset, true);
+  assert.deepEqual(reset.context, disjointFresh);
+  assert.equal(reset.context.conversation.repliesCursor, 'new-window-cursor');
 });

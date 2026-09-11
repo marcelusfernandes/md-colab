@@ -103,6 +103,7 @@ import {
   directedCommentAttemptMatches,
   directedCommentContextFromResponse,
   mergeDirectedConfirmedComment,
+  reconcileDirectedCommentContext,
   visibleDirectedReplies,
 } from '@/lib/directed-comment';
 import {
@@ -249,6 +250,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   );
   const directedCommentIdRef = useRef<string | null>(null);
   const directedCommentRequest = useRef(0);
+  const directedCommentContextRef = useRef<DirectedCommentContext | null>(null);
+  const directedRecentWindowRef = useRef<{
+    documentId: string;
+    viewerId: string;
+    commentId: string;
+    replyIds: string[];
+  } | null>(null);
   const directedTargetElement = useRef<HTMLElement | null>(null);
   const conversationOperationRef = useRef<ConversationOperation | null>(null);
   const conversationGeneration = useRef(0);
@@ -396,6 +404,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       );
       directedCommentRequest.current += 1;
       directedCommentIdRef.current = parsed.id;
+      directedCommentContextRef.current = null;
+      directedRecentWindowRef.current = null;
       setDirectedCommentId(parsed.id);
       setDirectedCommentContext(null);
       setDirectedCommentLoading(false);
@@ -521,9 +531,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         directedCommentRequest.current += 1;
         setDirectedCommentLoading(false);
       }
-      setDirectedCommentContext((current) =>
-        current ? mergeDirectedConfirmedComment(current, confirmed) : current,
-      );
+      const currentDirected = directedCommentContextRef.current;
+      const nextDirected = currentDirected
+        ? mergeDirectedConfirmedComment(currentDirected, confirmed)
+        : null;
+      directedCommentContextRef.current = nextDirected;
+      setDirectedCommentContext(nextDirected);
       if (shouldClearComposer(operation, composerRevision.current)) {
         commentValue.current = '';
         setComment('');
@@ -558,6 +571,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       commentsNextCursor.current = null;
       commentsOlderCursor.current = null;
       directedCommentRequest.current += 1;
+      directedCommentContextRef.current = null;
+      directedRecentWindowRef.current = null;
       setDirectedCommentContext(null);
       setDirectedCommentLoading(false);
       commentSendRequest.current += 1;
@@ -1141,7 +1156,30 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         commentId,
       );
       if (!isCurrent()) return false;
-      setDirectedCommentContext(context);
+      const previousWindow = directedRecentWindowRef.current;
+      const previousReplyIds =
+        previousWindow?.documentId === attempt.documentId &&
+        previousWindow.viewerId === attempt.viewerId &&
+        previousWindow.commentId === attempt.commentId
+          ? previousWindow.replyIds
+          : null;
+      const reconciled = reconcileDirectedCommentContext(
+        directedCommentContextRef.current,
+        context,
+        previousReplyIds,
+      );
+      directedCommentContextRef.current = reconciled.context;
+      directedRecentWindowRef.current = {
+        documentId: attempt.documentId,
+        viewerId: attempt.viewerId,
+        commentId: attempt.commentId,
+        replyIds: context.conversation.replies.map((reply) => reply.id),
+      };
+      setDirectedCommentContext(reconciled.context);
+      if (reconciled.reset)
+        setNotice(
+          'Muitas respostas novas chegaram. A lista voltou às respostas recentes; carregue as anteriores novamente.',
+        );
       setDirectedCommentError('');
       return true;
     } catch (cause) {
@@ -1152,6 +1190,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             timeoutMs: COMMENT_REQUEST_TIMEOUT_MS,
           });
           if (!isCurrent()) return false;
+          directedCommentContextRef.current = null;
+          directedRecentWindowRef.current = null;
           setDirectedCommentContext(null);
           setDirectedCommentError(
             'Este comentário não está disponível neste documento. Você pode voltar à coleção ou tentar novamente.',
@@ -2081,17 +2121,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     setConversationRows((current) =>
       current.map((entry) => mergeConversationEventState(entry, event)),
     );
-    setDirectedCommentContext((current) =>
-      current
-        ? {
-            ...current,
-            conversation: mergeConversationEventState(
-              current.conversation,
-              event,
-            ),
-          }
-        : current,
-    );
+    const currentDirected = directedCommentContextRef.current;
+    const nextDirected = currentDirected
+      ? {
+          ...currentDirected,
+          conversation: mergeConversationEventState(
+            currentDirected.conversation,
+            event,
+          ),
+        }
+      : null;
+    directedCommentContextRef.current = nextDirected;
+    setDirectedCommentContext(nextDirected);
     if (directedCommentIdRef.current) {
       directedCommentRequest.current += 1;
       setDirectedCommentLoading(false);
@@ -2368,18 +2409,19 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
             : entry,
         ),
       );
-      setDirectedCommentContext((current) => {
-        if (!current || current.conversation.root.id !== conversation.root.id)
-          return current;
-        return {
-          ...current,
+      const currentDirected = directedCommentContextRef.current;
+      if (currentDirected?.conversation.root.id === conversation.root.id) {
+        const nextDirected = {
+          ...currentDirected,
           conversation: mergeConversationReplies(
-            current.conversation,
+            currentDirected.conversation,
             page.replies,
             page.nextCursor,
           ),
         };
-      });
+        directedCommentContextRef.current = nextDirected;
+        setDirectedCommentContext(nextDirected);
+      }
     } catch (cause) {
       if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
         hideProtectedContent(cause);

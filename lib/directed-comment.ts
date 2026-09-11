@@ -1,5 +1,5 @@
 import type { CommentRow, DirectedCommentContext } from './document-service.ts';
-import { commentFromValue } from './comment-page.ts';
+import { commentFromValue, mergeComments } from './comment-page.ts';
 import { conversationRepliesFromResponse } from './conversation-page.ts';
 
 export const commentDestinationPattern = /^[0-9a-f-]{36}$/i;
@@ -101,26 +101,64 @@ export function mergeDirectedConfirmedComment(
 ): DirectedCommentContext {
   if (context.conversation.root.id !== confirmed.root_id) return context;
   const isRoot = confirmed.id === context.conversation.root.id;
+  const isTarget = context.target.id === confirmed.id;
+  const isLoadedReply = context.conversation.replies.some(
+    (reply) => reply.id === confirmed.id,
+  );
   const alreadyPresent =
-    isRoot ||
-    context.target.id === confirmed.id ||
-    context.conversation.replies.some((reply) => reply.id === confirmed.id);
+    isRoot || isTarget || isLoadedReply;
   return {
     target: context.target.id === confirmed.id ? confirmed : context.target,
     conversation: {
       ...context.conversation,
       root: isRoot ? confirmed : context.conversation.root,
-      replies: isRoot
+      replies: isRoot || (isTarget && !isLoadedReply)
         ? context.conversation.replies
-        : [
-            confirmed,
-            ...context.conversation.replies.filter(
-              (reply) => reply.id !== confirmed.id,
-            ),
-          ],
+        : mergeComments(context.conversation.replies, [confirmed]),
       replyCount: alreadyPresent
         ? context.conversation.replyCount
         : context.conversation.replyCount + 1,
     },
+  };
+}
+
+export function reconcileDirectedCommentContext(
+  current: DirectedCommentContext | null,
+  fresh: DirectedCommentContext,
+  previousRecentReplyIds: readonly string[] | null,
+) {
+  if (
+    !current ||
+    !previousRecentReplyIds ||
+    current.target.id !== fresh.target.id ||
+    current.conversation.root.id !== fresh.conversation.root.id
+  )
+    return { context: fresh, reset: false };
+  const freshIds = new Set(
+    fresh.conversation.replies.map((reply) => reply.id),
+  );
+  const hasAuthoritativeOverlap = previousRecentReplyIds.some((id) =>
+    freshIds.has(id),
+  );
+  if (!hasAuthoritativeOverlap)
+    return {
+      context: fresh,
+      reset: current.conversation.replies.some(
+        (reply) => !freshIds.has(reply.id),
+      ),
+    };
+  return {
+    context: {
+      ...fresh,
+      conversation: {
+        ...fresh.conversation,
+        replies: mergeComments(
+          current.conversation.replies,
+          fresh.conversation.replies,
+        ),
+        repliesCursor: current.conversation.repliesCursor,
+      },
+    },
+    reset: false,
   };
 }
