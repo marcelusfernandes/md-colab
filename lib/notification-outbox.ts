@@ -25,7 +25,9 @@ type DeliveryCandidate = {
   idempotency_key: string | null;
   payload: string | null;
   document_id: string;
-  comment_id: string;
+  kind: 'comment' | 'revision';
+  comment_id: string | null;
+  revision_id: string | null;
 };
 
 type PersistedPayload = {
@@ -89,6 +91,15 @@ function payloadFor(
   appOrigin: string,
   from: string,
 ): PersistedPayload {
+  if (candidate.kind === 'revision') {
+    const link = `${appOrigin}/d/${candidate.document_id}?revision=${candidate.revision_id}`;
+    return {
+      from,
+      to: [candidate.recipient_email],
+      subject: 'Nova revisão em um plano compartilhado',
+      text: `Há uma nova revisão em um plano ao qual você tem acesso.\n\n${link}\n\nAbrir este aviso apenas mostra a revisão publicada. Nenhuma decisão é alterada e o plano não é executado.`,
+    };
+  }
   const link = `${appOrigin}/d/${candidate.document_id}?comment=${candidate.comment_id}`;
   return {
     from,
@@ -131,7 +142,7 @@ async function nextCandidate(db: D1Database, now: number) {
     .prepare(
       `SELECT d.id,d.event_id,d.recipient_id,d.recipient_email,d.status,d.attempts,
          d.first_attempt_at,d.uncertain,d.idempotency_key,d.payload,
-         e.document_id,e.comment_id
+         e.document_id,e.kind,e.comment_id,e.revision_id
        FROM notification_deliveries d
        JOIN notification_events e ON e.id=d.event_id
        WHERE (d.status='pending' AND d.available_at<=?)
@@ -390,7 +401,8 @@ export async function drainNotifications(
     }
 
     const idempotencyKey =
-      candidate.idempotency_key ?? `comment-notification/${candidate.id}`;
+      candidate.idempotency_key ??
+      `${candidate.kind}-notification/${candidate.id}`;
     const payload =
       candidate.payload ??
       JSON.stringify(payloadFor(candidate, appOrigin!, from!));

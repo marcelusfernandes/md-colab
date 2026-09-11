@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 12);
+  assert.equal(first.applied.length, 13);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    12,
+    13,
   );
   restarted.sqlite.close();
 
@@ -275,12 +275,42 @@ void test('revision backfill preserves comment, conversation, cursor and outbox 
       '2026-09-10T00:00:03.000Z'
     );
   `);
+  const originalDeliveryId = String(
+    sqlite.prepare('SELECT id FROM notification_deliveries').get()?.id,
+  );
+  sqlite
+    .prepare(
+      `UPDATE notification_deliveries SET status='blocked',available_at=17,
+         attempts=3,first_attempt_at=11,uncertain=1,
+         idempotency_key='frozen-key-1',payload='{"frozen":"payload-1"}',
+         last_error_code='uncertain_timeout',last_error_at=16
+       WHERE id=?`,
+    )
+    .run(originalDeliveryId);
+  sqlite
+    .prepare(
+      `INSERT INTO notification_reconciliations(
+         action_id,delivery_id,operator_id,evidence,note,result_delivery_id,created_at
+       ) VALUES('action',?,'operator','confirmed_not_delivered','Provider rejected.',
+         'retry-delivery','2026-09-10T00:00:04.000Z')`,
+    )
+    .run(originalDeliveryId);
+  sqlite
+    .prepare(
+      `UPDATE notification_deliveries SET status='leased',available_at=23,
+         lease_token='frozen-lease',lease_expires_at=91,attempts=2,
+         first_attempt_at=22,uncertain=1,idempotency_key='frozen-key-2',
+         payload='{"frozen":"payload-2"}',last_error_code='provider_network',
+         last_error_at=24 WHERE id='retry-delivery'`,
+    )
+    .run();
   const tables = [
     'comments',
     'conversation_changes',
     'conversation_events',
     'notification_events',
     'notification_deliveries',
+    'notification_reconciliations',
   ];
   const before = new Map(
     tables.map((table) => [
@@ -293,7 +323,9 @@ void test('revision backfill preserves comment, conversation, cursor and outbox 
     const columns =
       table === 'comments'
         ? 'sequence,id,document_id,author_id,body,quote,source_start,created_at,root_id'
-        : '*';
+        : table === 'notification_events'
+          ? 'id,comment_id,document_id,root_id,actor_id,created_at'
+          : '*';
     const previous =
       table === 'comments'
         ? JSON.stringify(
@@ -313,6 +345,13 @@ void test('revision backfill preserves comment, conversation, cursor and outbox 
       `${table} mudou durante o backfill`,
     );
   }
+  assert.deepEqual(
+    sqlite
+      .prepare('SELECT kind,revision_id FROM notification_events ORDER BY id')
+      .all()
+      .map((row) => ({ ...row })),
+    [{ kind: 'comment', revision_id: null }],
+  );
   assert.equal(
     sqlite
       .prepare(
@@ -460,6 +499,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0009_slimy_kingpin',
     '0010_serious_dazzler',
     '0011_tiny_valeria_richards',
+    '0012_previous_lifeguard',
   ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
@@ -483,6 +523,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0009_slimy_kingpin',
     '0010_serious_dazzler',
     '0011_tiny_valeria_richards',
+    '0012_previous_lifeguard',
   ]);
   assert.throws(
     () => openPersistentD1(restorePath),

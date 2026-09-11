@@ -1,4 +1,5 @@
 import {
+  check,
   sqliteTable,
   text,
   integer,
@@ -7,6 +8,7 @@ import {
   uniqueIndex,
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -166,20 +168,27 @@ export const notificationEvents = sqliteTable(
   'notification_events',
   {
     id: text('id').primaryKey(),
-    commentId: text('comment_id')
-      .notNull()
+    kind: text('kind').notNull().default('comment'),
+    commentId: text('comment_id').unique().references(() => comments.id),
+    revisionId: text('revision_id')
       .unique()
-      .references(() => comments.id),
+      .references(() => documentRevisions.id),
     documentId: text('document_id')
       .notNull()
       .references(() => documents.id),
-    rootId: text('root_id').notNull(),
+    rootId: text('root_id'),
     actorId: text('actor_id')
       .notNull()
       .references(() => users.id),
     createdAt: text('created_at').notNull(),
   },
-  (table) => [index('notification_events_document').on(table.documentId)],
+  (table) => [
+    index('notification_events_document').on(table.documentId),
+    check(
+      'notification_events_target',
+      sql`(${table.kind} = 'comment' AND ${table.commentId} IS NOT NULL AND ${table.rootId} IS NOT NULL AND ${table.revisionId} IS NULL) OR (${table.kind} = 'revision' AND ${table.commentId} IS NULL AND ${table.rootId} IS NULL AND ${table.revisionId} IS NOT NULL)`,
+    ),
+  ],
 );
 
 export const notificationDeliveries = sqliteTable(

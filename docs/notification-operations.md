@@ -1,9 +1,13 @@
 # Operação da outbox de avisos
 
-Comentários em documentos autenticados criam um evento e um snapshot dos
-destinatários na mesma transação. O comentário não depende do provedor: Node drena
-a outbox no processo existente, e Workers usa o handler `scheduled` do export
-default. O cron versionado só se torna ativo quando esse artefato é publicado.
+Comentários em documentos autenticados e novas revisões criam um evento e um
+snapshot dos destinatários na mesma transação da escrita. Uma revisão inclui cada
+identidade verificada que já escreveu um comentário ou resposta no plano, exceto o
+publicador, desde que o acesso ainda esteja ativo. Convites que nunca contribuíram,
+identidades de teste e acessos revogados ficam fora; contribuições ou concessões
+posteriores não alteram o snapshot. A escrita não depende do provedor: Node drena a
+outbox no processo existente, e Workers usa o handler `scheduled` do export default.
+O cron versionado só se torna ativo quando esse artefato é publicado.
 `ACCESS_MODE=test`, documentos de teste e identidades declaradas no teste nunca
 produzem envio externo.
 
@@ -20,6 +24,14 @@ como rejeição conhecida. Por isso, ao retomar depois de 24 horas, o cutoff pod
 bloquear conservadoramente mesmo quando a última resposta registrada foi uma
 rejeição como 429. Os diagnósticos da outbox ajudam a investigar; isoladamente,
 eles não provam envio nem não entrega.
+
+Eventos têm `kind` igual a `comment` ou `revision`. A inspeção expõe
+`comment_id` e `revision_id` como destinos exclusivos e mantém os demais campos do
+envelope. O aviso contém somente texto genérico e um link direto
+`/d/:document?comment=:comment` ou `/d/:document?revision=:revision`; não inclui o
+Markdown, citação, título, nome de arquivo, resumo, credencial de publicação ou
+token de login. Eventos são imutáveis. Entregas e reconciliações conservam seus
+estados, gerações, leases, incerteza e payload/chave congelados.
 
 ## Ativação e verificação
 
