@@ -27,7 +27,8 @@
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "feedback:markdown": "node scripts/md-colab-feedback.mjs",
-    "publish:markdown": "node scripts/md-colab-publish.mjs"
+    "publish:markdown": "node scripts/md-colab-publish.mjs",
+    "revise:markdown": "node scripts/md-colab-revise.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",
