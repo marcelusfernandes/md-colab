@@ -1007,16 +1007,24 @@ a:focus-visible {
 .quote-composer {
   position: relative;
 }
+.quote-composer > p,
 .quote-composer .selected-quote {
-  padding-right: 32px;
+  padding-right: 56px;
+}
+.quote-composer .selected-quote {
   max-height: 200px;
   overflow-y: auto;
 }
 .quote-composer > button {
   position: absolute;
-  top: 7px;
-  right: 6px;
+  top: 4px;
+  right: 4px;
+  min-width: 44px;
+  min-height: 44px;
   padding: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .markdown-document .comment-anchor {
   background: #fff4d4;
