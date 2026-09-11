@@ -87,22 +87,11 @@ function pauseConcurrentDocumentInserts(db: D1Database) {
     release = resolve;
   });
   const controlled = Object.create(db) as D1Database;
-  controlled.prepare = (sql: string) => {
-    const statement = db.prepare(sql);
-    if (!sql.startsWith('INSERT INTO documents')) return statement;
-    return {
-      bind(...values: unknown[]) {
-        const bound = statement.bind(...values);
-        return {
-          async run() {
-            arrivals += 1;
-            if (arrivals === 2) release();
-            await gate;
-            return bound.run();
-          },
-        };
-      },
-    } as unknown as D1PreparedStatement;
+  controlled.batch = async <T = unknown>(statements: D1PreparedStatement[]) => {
+    arrivals += 1;
+    if (arrivals === 2) release();
+    await gate;
+    return db.batch<T>(statements);
   };
   return { controlled, arrivals: () => arrivals };
 }
@@ -1321,20 +1310,9 @@ void test('falha inesperada após INSERT confirmado não é convertida em sucess
       filename: 'incerto.md',
     };
     const ambiguous = Object.create(db) as D1Database;
-    ambiguous.prepare = (sql: string) => {
-      const statement = db.prepare(sql);
-      if (!sql.startsWith('INSERT INTO documents')) return statement;
-      return {
-        bind(...values: unknown[]) {
-          const bound = statement.bind(...values);
-          return {
-            async run() {
-              await bound.run();
-              throw new Error('transport failed after commit');
-            },
-          };
-        },
-      } as unknown as D1PreparedStatement;
+    ambiguous.batch = async <T = unknown>(statements: D1PreparedStatement[]) => {
+      await db.batch<T>(statements);
+      throw new Error('transport failed after commit');
     };
     const uncertain = new DocumentService(ambiguous, { ...owner.viewer });
     await assert.rejects(

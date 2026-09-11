@@ -393,6 +393,8 @@ export async function handleApi(
           isOwner: document.owner_id === viewer.id,
         });
       }
+      if (action === 'revisions' && resourceId && !subresource)
+        return json({ revision: await service.revision(id, resourceId) });
       if (action === 'comments' && resourceId && !subresource)
         return json({ comment: await service.comment(id, resourceId) });
       if (

@@ -107,22 +107,11 @@ function pauseAfterDocumentInsert(db: D1Database) {
     resume = resolve;
   });
   const controlled = Object.create(db) as D1Database;
-  controlled.prepare = (sql: string) => {
-    const statement = db.prepare(sql);
-    if (!sql.startsWith('INSERT INTO documents')) return statement;
-    return {
-      bind(...values: unknown[]) {
-        const bound = statement.bind(...values);
-        return {
-          async run() {
-            const result = await bound.run();
-            inserted();
-            await resumePromise;
-            return result;
-          },
-        };
-      },
-    } as unknown as D1PreparedStatement;
+  controlled.batch = async <T = unknown>(statements: D1PreparedStatement[]) => {
+    const result = await db.batch<T>(statements);
+    inserted();
+    await resumePromise;
+    return result;
   };
   return { controlled, inserted: insertedPromise, resume };
 }

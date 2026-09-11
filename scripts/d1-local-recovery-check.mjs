@@ -40,6 +40,7 @@ const currentMigrations = [
   '0006_hesitant_dazzler.sql',
   '0007_nifty_iron_man.sql',
   '0008_lethal_ultron.sql',
+  '0009_slimy_kingpin.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -51,6 +52,7 @@ const currentTables = [
   'notification_deliveries',
   'notification_events',
   'notification_reconciliations',
+  'document_revisions',
 ].sort();
 
 const ids = {
@@ -114,12 +116,15 @@ INSERT INTO users(id,email,name,test_email) VALUES
 ('${ids.stranger}','stranger@example.test','Stranger',NULL);
 INSERT INTO documents(id,owner_id,title,filename,markdown,is_test,created_at)
 VALUES('${ids.document}','${ids.owner}','${marker}','plan.md','# Synthetic plan',0,'2026-09-10T00:00:00.000Z');
+INSERT INTO document_revisions(id,document_id,ordinal,author_id,title,filename,markdown,created_at)
+VALUES('${ids.document}','${ids.document}',1,'${ids.owner}','${marker}','plan.md','# Synthetic plan','2026-09-10T00:00:00.000Z');
+UPDATE documents SET current_revision_id='${ids.document}' WHERE id='${ids.document}';
 INSERT INTO shares(document_id,email,name,created_at)
 VALUES('${ids.document}','guest@example.test','Guest','2026-09-10T00:01:00.000Z');
-INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
-VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'2026-09-10T00:02:00.000Z');
-INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
-VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'2026-09-10T00:02:00.000Z')
+INSERT INTO comments(id,document_id,author_id,body,quote,source_start,source_revision_id,created_at)
+VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'${ids.document}','2026-09-10T00:02:00.000Z');
+INSERT INTO comments(id,document_id,author_id,body,quote,source_start,source_revision_id,created_at)
+VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'${ids.document}','2026-09-10T00:02:00.000Z')
 ON CONFLICT(id) DO NOTHING;
 INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
 VALUES('${ids.credential}','${ids.owner}','Revoked synthetic credential','${revokedHash}','2026-09-10T00:03:00.000Z',1900000000,1789014000);
@@ -134,6 +139,7 @@ function verifyFixture(environment, marker = 'source-marker') {
     `SELECT
       (SELECT count(*) FROM users) AS users_count,
       (SELECT count(*) FROM documents) AS documents_count,
+      (SELECT count(*) FROM document_revisions) AS revisions_count,
       (SELECT count(*) FROM comments) AS comments_count,
       (SELECT count(*) FROM shares) AS shares_count,
       (SELECT count(*) FROM publications) AS publications_count,
@@ -141,6 +147,7 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT owner_id FROM documents WHERE id='${ids.document}') AS owner_id,
       (SELECT author_id FROM comments WHERE id='${ids.comment}') AS comment_author_id,
       (SELECT sequence FROM comments WHERE id='${ids.comment}') AS comment_sequence,
+      (SELECT source_revision_id FROM comments WHERE id='${ids.comment}') AS comment_revision_id,
       (SELECT publishing_token_id FROM publications WHERE id='${ids.publication}') AS publication_token_id,
       (SELECT title FROM documents WHERE id='${ids.document}') AS marker,
       EXISTS(SELECT 1 FROM shares WHERE document_id='${ids.document}' AND email='guest@example.test') AS guest_grant,
@@ -153,6 +160,7 @@ function verifyFixture(environment, marker = 'source-marker') {
     row.documents_count === 1 && row.comments_count === 1,
     'Plano/comentario divergentes.',
   );
+  assert(row.revisions_count === 1, 'Snapshot inicial divergente.');
   assert(
     row.shares_count === 1 && row.publications_count === 1,
     'Share/publicacao divergentes.',
@@ -166,6 +174,10 @@ function verifyFixture(environment, marker = 'source-marker') {
   assert(
     Number.isSafeInteger(row.comment_sequence) && row.comment_sequence > 0,
     'Sequencia persistida do comentario divergente.',
+  );
+  assert(
+    row.comment_revision_id === ids.document,
+    'Origem do comentario divergente.',
   );
   assert(
     row.publication_token_id === ids.credential,
@@ -199,8 +211,8 @@ function verifyNextCommentSequence(environment) {
   const nextId = '00000000-0000-4000-8000-000000000302';
   executeSql(
     environment,
-    `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at)
-     VALUES('${nextId}','${ids.document}','${ids.owner}','After restore','',NULL,'2026-09-10T00:05:00.000Z')`,
+    `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,source_revision_id,created_at)
+     VALUES('${nextId}','${ids.document}','${ids.owner}','After restore','',NULL,'${ids.document}','2026-09-10T00:05:00.000Z')`,
   );
   const next = executeSql(
     environment,
@@ -420,6 +432,20 @@ export function run(outputValue) {
     executeSql(legacy, 'SELECT count(*) AS count FROM notification_events')
       .results[0]?.count === 0,
     'A migracao criou avisos retroativos para comentarios legados.',
+  );
+  assert(
+    executeSql(
+      legacy,
+      `SELECT count(*) AS count FROM comments
+       WHERE source_revision_id='legacy-document'`,
+    ).results[0]?.count === 3 &&
+      executeSql(
+        legacy,
+        `SELECT count(*) AS count FROM document_revisions
+         WHERE id='legacy-document' AND document_id='legacy-document' AND ordinal=1
+           AND markdown='# Legacy'`,
+      ).results[0]?.count === 1,
+    'A migracao nao vinculou comentarios ao snapshot inicial real.',
   );
 
   const partial = createEnvironment(join(outputDirectory, 'negative-partial'));

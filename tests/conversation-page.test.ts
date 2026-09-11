@@ -20,6 +20,7 @@ const root = {
   body: 'Crítica',
   quote: '',
   source_start: null,
+  source_revision_id: '00000000-0000-4000-8000-000000000010',
   created_at: '2026-09-10T12:00:00.000Z',
   author_id: 'guest',
   author_name: 'Revisor',

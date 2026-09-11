@@ -143,9 +143,10 @@ aceita somente uma raiz do mesmo plano. Respostas não recebem uma nova citaçã
 offset: elas preservam o contexto publicado pela raiz. Não há aninhamento além
 desse nível.
 
-Esta entrega preserva IDs, citações e offsets no comentário atual. A associação
-explícita desses registros à revisão imutável original será feita pela migração
-de #5; não há `source_revision_id` nem uma revisão persistida nesta versão.
+Cada plano tem um snapshot inicial imutável, e `source_revision_id` preserva a
+revisão vista por cada raiz e suas respostas. A API autoriza a leitura de uma
+revisão pelo plano. Publicar uma nova revisão e expor histórico ou diff ficam
+para as próximas fatias de #5; o envelope legado de publicação continua igual.
 
 O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
 conversa idênticos. A listagem continua paginada pela sequência persistida; quando
