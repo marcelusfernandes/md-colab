@@ -990,6 +990,13 @@ a:focus-visible {
   flex-basis: 100%;
   margin: 0;
 }
+.collection-refresh-note {
+  display: block;
+  margin: 14px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
 .document-row {
   display: flex;
   align-items: center;

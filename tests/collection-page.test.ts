@@ -129,6 +129,26 @@ void test('refresh corrente invalida página tardia e preserva cem cards e curso
   assert.equal(merged[0]?.comment_count, 7);
 });
 
+void test('janela fresca sem o head anterior reinicia na página e cursor do servidor', () => {
+  const loaded = [summary('document-old', '2026-09-10T12:00:00.000Z')];
+  const fresh = Array.from({ length: 50 }, (_, index) =>
+    summary(
+      `document-new-${(50 - index).toString().padStart(3, '0')}`,
+      '2026-09-11T12:00:00.000Z',
+    ),
+  );
+  const hasContinuousWindow = fresh.some(
+    (entry) => entry.id === loaded[0]?.id,
+  );
+  const visible = hasContinuousWindow
+    ? mergeDocumentPages(loaded, fresh)
+    : fresh;
+  const cursor = hasContinuousWindow ? null : 'server-next-page';
+  assert.equal(hasContinuousWindow, false);
+  assert.deepEqual(visible, fresh);
+  assert.equal(cursor, 'server-next-page');
+});
+
 void test('mutações alteram apenas o grant confirmado e preservam os demais carregados', () => {
   const old = share('old@example.com', '2026-09-10T11:00:00.000Z');
   const added = share('new@example.com', '2026-09-10T12:00:00.000Z');

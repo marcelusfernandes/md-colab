@@ -364,7 +364,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [confirmedImport, setConfirmedImport] = useState<Pick<
     DocumentRow,
     'id' | 'filename'
-  > | null>(null);
+  > & { collectionNotice?: string } | null>(null);
   const [commentsRefreshError, setCommentsRefreshError] = useState('');
   const [, setCommentsHistoryError] = useState('');
   const [conversationRows, setConversationRows] = useState<ConversationRow[]>(
@@ -1891,7 +1891,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       session.isTest !== operation.isTest
     )
       return;
-    const preserveLoadedPages = list.length > 0;
+    const loadedHeadId = list[0]?.id;
     const previousCursor = documentsNextCursor.current;
     const attempt: CollectionAttempt = {
       generation: documentsGeneration.current,
@@ -1920,12 +1920,30 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         Boolean(activeViewerIsTest.current) !== operation.isTest
       )
         return;
-      setList((current) => mergeDocumentPages(current, page.documents));
-      documentsNextCursor.current = preserveLoadedPages
+      const hasContinuousWindow =
+        loadedHeadId !== undefined &&
+        page.documents.some((entry) => entry.id === loadedHeadId);
+      setList((current) =>
+        hasContinuousWindow
+          ? mergeDocumentPages(current, page.documents)
+          : page.documents,
+      );
+      documentsNextCursor.current = hasContinuousWindow
         ? previousCursor
         : page.nextCursor;
       setDocumentsHasMore(documentsNextCursor.current !== null);
       setDocumentsPageError('');
+      setConfirmedImport((current) =>
+        current
+          ? {
+              ...current,
+              collectionNotice:
+                loadedHeadId !== undefined && !hasContinuousWindow
+                  ? 'A lista mudou durante a confirmação. Voltamos à primeira página para que nenhum plano intermediário seja ignorado.'
+                  : undefined,
+            }
+          : current,
+      );
     } catch (cause) {
       const currentSession = collectionSession.current;
       if (
@@ -3725,6 +3743,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation preserves the existing beforeunload protection. */}
               <a href={'/d/' + confirmedImport.id}>Abrir plano</a>
             </section>
+          )}
+          {confirmedImport?.collectionNotice && (
+            <output className="collection-refresh-note">
+              {confirmedImport.collectionNotice}
+            </output>
           )}
           {list.length === 0 && documentsPageError && (
             <p role="alert" className="form-error">
