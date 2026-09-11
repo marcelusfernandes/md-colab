@@ -165,6 +165,13 @@ pendente. Ao publicar uma revisão, os contribuidores anteriores ainda autorizad
 recebem um link para aquele snapshot; o envelope legado de publicação continua
 igual.
 
+Antes de formatar a revisão atual ou um snapshot de origem, o leitor mede o texto
+linearmente. Linhas acima de 16 KiB UTF-8, blocos contínuos acima de 1.024 linhas
+ou 64 KiB e documentos acima de 10.000 linhas são mostrados como Markdown bruto
+somente leitura. Esse painel preserva e copia o texto completo, mantém links e
+imagens inativos e não transforma sua seleção em uma nova citação. Comentários
+gerais, respostas e citações já salvas continuam disponíveis.
+
 O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
 conversa idênticos. A listagem continua paginada pela sequência persistida; quando
 uma página contém resposta cuja raiz ficou fora dela, a resposta JSON inclui essa
@@ -342,6 +349,8 @@ o provedor falha. Solicitações de links têm limites por e-mail e endereço de
 - Títulos têm âncoras estáveis e links de seção navegam no próprio documento.
   Links e imagens que dependem de recursos não publicados são explicados no leitor;
   recursos locais não são buscados nem enviados.
+- Markdown acima do orçamento de formatação permanece inteiro em um painel de
+  texto bruto rolável e copiável, sem executar as passagens GFM pesadas.
 - Documentos e comentários persistidos em SQLite/D1.
 - Compartilhamento por nome opcional e e-mail, com convite e reenvio.
 - Comentários gerais ou em trechos selecionados, com autor e data.

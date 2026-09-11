@@ -21,6 +21,10 @@ import {
   warningMessage,
 } from '@/lib/markdown-analysis.mjs';
 import {
+  markdownRenderPreflight,
+  prepareMarkdownRender,
+} from '@/lib/markdown-render-preflight.mjs';
+import {
   FileText,
   Upload,
   Share2,
@@ -149,6 +153,7 @@ import { documentDestination } from '@/lib/revision-history';
 const COMMENT_REQUEST_TIMEOUT_MS = 30_000;
 const IMPORT_REQUEST_TIMEOUT_MS = 30_000;
 const COLLECTION_REQUEST_TIMEOUT_MS = 30_000;
+const EMPTY_MARKDOWN_ANALYSIS = { headingIds: {}, references: [] };
 const compareText = (left: string, right: string) =>
   left < right ? -1 : left > right ? 1 : 0;
 async function markdownFileText(file: File) {
@@ -243,6 +248,73 @@ function markdownComponents(headingIds: Record<number, string>): Components {
     );
   };
   return components;
+}
+
+function RawMarkdownFallback({ markdown }: { markdown: string }) {
+  const markdownRef = useRef(markdown);
+  const copyRequest = useRef(0);
+  const [copyResult, setCopyResult] = useState<{
+    markdown: string;
+    message: string;
+  } | null>(null);
+  useEffect(() => {
+    markdownRef.current = markdown;
+    copyRequest.current += 1;
+  }, [markdown]);
+
+  async function copyMarkdown() {
+    const request = ++copyRequest.current;
+    const expectedMarkdown = markdown;
+    try {
+      await navigator.clipboard.writeText(expectedMarkdown);
+      if (
+        request === copyRequest.current &&
+        markdownRef.current === expectedMarkdown
+      )
+        setCopyResult({
+          markdown: expectedMarkdown,
+          message: 'Markdown original copiado.',
+        });
+    } catch {
+      if (
+        request === copyRequest.current &&
+        markdownRef.current === expectedMarkdown
+      )
+        setCopyResult({
+          markdown: expectedMarkdown,
+          message: 'Não foi possível copiar o Markdown original.',
+        });
+    }
+  }
+
+  return (
+    <div className="markdown-raw-fallback">
+      <div className="markdown-raw-heading">
+        <div role="note">
+          <strong>Visualização formatada simplificada</strong>
+          <p>
+            Este Markdown ultrapassa o limite seguro da leitura formatada. O
+            conteúdo original completo aparece abaixo, sem ativar links ou
+            imagens. Selecionar este texto não cria uma citação.
+          </p>
+        </div>
+        <button type="button" onClick={() => void copyMarkdown()}>
+          <Copy size={14} /> Copiar Markdown original
+        </button>
+      </div>
+      {copyResult?.markdown === markdown && (
+        <output>{copyResult.message}</output>
+      )}
+      <textarea
+        className="markdown-raw-source"
+        aria-label="Markdown original em texto bruto"
+        readOnly
+        spellCheck={false}
+        value={markdown}
+        wrap="off"
+      />
+    </div>
+  );
 }
 
 export function DocumentWorkspace({ documentId }: { documentId?: string }) {
@@ -425,10 +497,23 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     Boolean(revisionOperation) ||
     Boolean(revisionSummary.trim()) ||
     consideredCommentIds.length > 0;
-  const markdownAnalysis = useMemo<ReturnType<typeof analyzeMarkdown>>(
+  const currentMarkdown = doc?.markdown;
+  const currentMarkdownRender = useMemo(
     () =>
-      doc ? analyzeMarkdown(doc.markdown) : { headingIds: {}, references: [] },
-    [doc],
+      currentMarkdown === undefined
+        ? null
+        : prepareMarkdownRender(currentMarkdown, analyzeMarkdown),
+    [currentMarkdown],
+  );
+  const markdownAnalysis: ReturnType<typeof analyzeMarkdown> =
+    currentMarkdownRender?.analysis ?? EMPTY_MARKDOWN_ANALYSIS;
+  const originMarkdown = originRevision?.markdown;
+  const originMarkdownPreflight = useMemo(
+    () =>
+      originMarkdown === undefined
+        ? null
+        : markdownRenderPreflight(originMarkdown),
+    [originMarkdown],
   );
   const loadedDocumentId = doc?.id;
   const renderedMarkdownComponents = useMemo(
@@ -2608,7 +2693,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     });
   }
   const captureSelection = useCallback(() => {
-    if (busy === 'comment' || composerIsReply) return;
+    if (
+      currentMarkdownRender?.preflight.mode === 'raw' ||
+      busy === 'comment' ||
+      composerIsReply
+    )
+      return;
     const selection = window.getSelection();
     if (
       !selection ||
@@ -2638,7 +2728,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       anchor === undefined || anchor === null ? null : Number(anchor),
     );
     composerRevision.current += 1;
-  }, [busy, composerIsReply, doc?.current_revision_id]);
+  }, [
+    busy,
+    composerIsReply,
+    currentMarkdownRender?.preflight.mode,
+    doc?.current_revision_id,
+  ]);
   useEffect(() => {
     const node = article.current;
     if (!node) return;
@@ -2648,7 +2743,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       node.removeEventListener('pointerup', captureSelection);
       node.removeEventListener('keyup', captureSelection);
     };
-  }, [captureSelection, doc]);
+  }, [captureSelection, currentMarkdown]);
   async function verifyCommentOperation(operation: CommentOperation) {
     if (
       busy ||
@@ -3577,6 +3672,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   function showQuote(entry: CommentRow) {
     if (!doc) return;
     if (
+      currentMarkdownRender?.preflight.mode === 'raw' ||
       entry.source_revision_id !== doc.current_revision_id ||
       entry.source_start === null
     ) {
@@ -4119,7 +4215,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   </p>
                 </div>
                 <div className="origin-revision-actions">
-                  {originRevision && (
+                  {originRevision && originMarkdownPreflight?.mode === 'gfm' && (
                     <button
                       type="button"
                       onClick={() =>
@@ -4152,13 +4248,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
               {originRevision && (
                 <>
                   <article className="markdown-document origin-markdown">
-                    <Markdown
-                      components={originMarkdownComponents}
-                      remarkPlugins={[remarkGfm]}
-                      skipHtml
-                    >
-                      {originRevision.markdown}
-                    </Markdown>
+                    {originMarkdownPreflight?.mode === 'raw' ? (
+                      <RawMarkdownFallback
+                        key={originRevision.id}
+                        markdown={originRevision.markdown}
+                      />
+                    ) : (
+                      <Markdown
+                        components={originMarkdownComponents}
+                        remarkPlugins={[remarkGfm]}
+                        skipHtml
+                      >
+                        {originRevision.markdown}
+                      </Markdown>
+                    )}
                   </article>
                   {originRevision.considered_comments.length > 0 && (
                     <div className="origin-considered-comments">
@@ -4184,7 +4287,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           )}
           <div className="reading-layout">
             <article ref={article} className="markdown-document">
-              {markdownAnalysis.references.length > 0 && (
+              {currentMarkdownRender?.preflight.mode === 'gfm' &&
+                markdownAnalysis.references.length > 0 && (
                 <aside
                   className="markdown-reference-warning"
                   aria-label="Referências não publicadas"
@@ -4204,13 +4308,20 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   </ul>
                 </aside>
               )}
-              <Markdown
-                remarkPlugins={[remarkGfm]}
-                components={renderedMarkdownComponents}
-                skipHtml
-              >
-                {doc.markdown}
-              </Markdown>
+              {currentMarkdownRender?.preflight.mode === 'raw' ? (
+                <RawMarkdownFallback
+                  key={doc.current_revision_id}
+                  markdown={doc.markdown}
+                />
+              ) : (
+                <Markdown
+                  remarkPlugins={[remarkGfm]}
+                  components={renderedMarkdownComponents}
+                  skipHtml
+                >
+                  {doc.markdown}
+                </Markdown>
+              )}
             </article>
             <aside className="comments-panel" aria-label="Comentários">
               <h2>
