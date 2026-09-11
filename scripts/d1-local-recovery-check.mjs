@@ -36,12 +36,21 @@ const currentMigrations = [
   '0002_link_test_mode.sql',
   '0003_pink_blazing_skull.sql',
   '0004_polite_mandrill.sql',
+  '0005_first_apocalypse.sql',
+  '0006_hesitant_dazzler.sql',
+  '0007_nifty_iron_man.sql',
+  '0008_lethal_ultron.sql',
 ];
 const currentTables = [
   'd1_migrations',
   ...legacyTables,
   'publications',
   'publishing_tokens',
+  'conversation_changes',
+  'conversation_events',
+  'notification_deliveries',
+  'notification_events',
+  'notification_reconciliations',
 ].sort();
 
 const ids = {
@@ -268,9 +277,20 @@ export function run(outputValue) {
     includeSchema: false,
     tables: currentTables,
   });
+  const schemaSql = readFileSync(schemaExportPath, 'utf8');
+  const firstTrigger = schemaSql.indexOf('CREATE TRIGGER');
+  assert(
+    firstTrigger > 0,
+    'Export de schema nao contem os triggers esperados.',
+  );
+  const restoreSchemaPath = join(outputDirectory, 'restore-schema.sql');
+  const restoreTriggersPath = join(outputDirectory, 'restore-triggers.sql');
+  privateFile(restoreSchemaPath, schemaSql.slice(0, firstTrigger));
+  privateFile(restoreTriggersPath, schemaSql.slice(firstTrigger));
   const destination = createEnvironment(join(outputDirectory, 'restored'));
-  executeFile(destination, schemaExportPath);
+  executeFile(destination, restoreSchemaPath);
   executeFile(destination, dataExportPath);
+  executeFile(destination, restoreTriggersPath);
   const restoredCounts = verifyFixture(destination);
   expectedLedger(destination);
   assert(
@@ -396,6 +416,11 @@ export function run(outputValue) {
     foreignKeyViolations(legacy).length === 0,
     'FK do legado atualizado falhou.',
   );
+  assert(
+    executeSql(legacy, 'SELECT count(*) AS count FROM notification_events')
+      .results[0]?.count === 0,
+    'A migracao criou avisos retroativos para comentarios legados.',
+  );
 
   const partial = createEnvironment(join(outputDirectory, 'negative-partial'));
   applyFilesManually(partial, currentMigrations.slice(0, 1));
@@ -485,7 +510,7 @@ export function run(outputValue) {
       'altered-is_test-default',
     ],
     legacyAdoptedThrough: currentMigrations[2],
-    legacyUpgradedThrough: currentMigrations[4],
+    legacyUpgradedThrough: currentMigrations.at(-1),
   };
   const summaryPath = join(outputDirectory, 'verification.json');
   privateFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);

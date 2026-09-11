@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 8);
+  assert.equal(first.applied.length, 9);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    8,
+    9,
   );
   restarted.sqlite.close();
 
@@ -325,6 +325,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0005_first_apocalypse',
     '0006_hesitant_dazzler',
     '0007_nifty_iron_man',
+    '0008_lethal_ultron',
   ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
@@ -344,6 +345,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0005_first_apocalypse',
     '0006_hesitant_dazzler',
     '0007_nifty_iron_man',
+    '0008_lethal_ultron',
   ]);
   assert.throws(
     () => openPersistentD1(restorePath),

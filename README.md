@@ -98,11 +98,23 @@ restore sanitizado, permissões e proxy confiável, siga o
   padrão `100`.
 - `RESEND_API_KEY`: chave do serviço de envio.
 - `MAIL_FROM`: endereço remetente em domínio verificado no serviço.
+- `NOTIFICATION_DRAIN_LIMIT`: máximo de entregas examinadas por ciclo; padrão `10`.
+- `NOTIFICATION_DRAIN_INTERVAL_MS`: intervalo do runner Node; padrão `30000`.
+- `NOTIFICATION_LEASE_SECONDS`: duração do lease; padrão `60` e mínimo `15`.
+- `NOTIFICATION_RETRY_BASE_SECONDS`: base exponencial de retry; padrão `30`.
 
 O adaptador usa a [API oficial do Resend](https://resend.com/docs/api-reference/emails/send-email).
 Para enviar a convidados, configure um remetente autorizado no serviço. As
 variáveis da hospedagem são independentes de `.env.local` e precisam ser
 configuradas como valores de execução; a chave deve ser um segredo.
+
+Comentários confirmados gravam os avisos no mesmo commit e não aguardam o Resend.
+O processo Node inicia um drain limitado automaticamente; o Worker exporta um
+handler `scheduled` e inclui o cron de um minuto no artefato. Publicar a mudança é
+uma operação separada e é o que ativa esse cron no ambiente remoto. Em
+`ACCESS_MODE=test`, nenhum desses runners envia avisos. Consulte o
+[runbook da outbox](docs/notification-operations.md) para inspeção, bloqueios e
+reconciliação explícita.
 
 Na entrada em `/documentos`, `APP_AUTHOR_MODE=open` permite que qualquer
 pessoa solicite seu

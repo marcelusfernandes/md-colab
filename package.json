@@ -22,6 +22,8 @@
     "db:node": "node --experimental-transform-types scripts/node-db.ts",
     "qa:node:fixture": "node --experimental-transform-types scripts/node-qa-fixture.ts",
     "test:node:smoke": "node scripts/node-runtime-smoke.mjs",
+    "test:node:notifications": "node --experimental-transform-types scripts/node-notification-runtime-smoke.ts",
+    "notification:ops": "node --experimental-transform-types scripts/notification-ops.ts",
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "check": "tsc --noEmit",
     "publish:markdown": "node scripts/md-colab-publish.mjs"

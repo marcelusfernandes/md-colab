@@ -1,4 +1,16 @@
 import { HttpError } from './document-service.ts';
+import {
+  ResendNotificationTransport,
+  type NotificationEmail,
+  type NotificationSendResult,
+} from './notification-transport.ts';
+
+export {
+  NotificationSendError,
+  type NotificationEmail,
+  type NotificationSendResult,
+  type NotificationTransport,
+} from './notification-transport.ts';
 
 export type AccessEmail = {
   to: string;
@@ -57,5 +69,14 @@ export class ResendMailer implements Mailer {
         502,
         'Não foi possível confirmar o envio do e-mail. Tente novamente.',
       );
+  }
+
+  async sendNotification(
+    message: NotificationEmail,
+  ): Promise<NotificationSendResult> {
+    return new ResendNotificationTransport(
+      this.apiKey,
+      this.transport,
+    ).sendNotification(message);
   }
 }
