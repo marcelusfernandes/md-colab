@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
+  access,
   chmod,
   mkdtemp,
   mkdir,
@@ -8,6 +9,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import {
@@ -22,6 +24,12 @@ import { test, type TestContext } from 'node:test';
 
 const cli = fileURLToPath(
   new URL('../scripts/md-colab-publish.mjs', import.meta.url),
+);
+const holdMissingOperation = fileURLToPath(
+  new URL('./fixtures/hold-missing-operation.mjs', import.meta.url),
+);
+const failOperationReadAfterStat = fileURLToPath(
+  new URL('./fixtures/fail-operation-read-after-stat.mjs', import.meta.url),
 );
 const token = `mdp_${'a'.repeat(64)}`;
 const otherToken = `mdp_${'b'.repeat(64)}`;
@@ -48,6 +56,8 @@ function runCli({
   selectedToken = token,
   title,
   timeout = '1000',
+  preload,
+  testEnvironment = {},
 }: {
   file: string;
   operation: string;
@@ -55,8 +65,11 @@ function runCli({
   selectedToken?: string;
   title?: string;
   timeout?: string;
+  preload?: string;
+  testEnvironment?: Record<string, string>;
 }): Promise<CliResult> {
   const args = [
+    ...(preload ? ['--import', preload] : []),
     cli,
     '--file',
     file,
@@ -72,6 +85,7 @@ function runCli({
         ...process.env,
         MD_COLAB_PUBLISH_TOKEN: selectedToken,
         MD_COLAB_PUBLISH_TIMEOUT_MS: timeout,
+        ...testEnvironment,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -158,7 +172,7 @@ async function startIdempotentServer() {
     string,
     { body: string; result: ReturnType<typeof publication> }
   >();
-  return startServer((_request, response, body, _index, origin) => {
+  const server = await startServer((_request, response, body, _index, origin) => {
     const key = _request.headers['idempotency-key'] as string;
     const serialized = JSON.stringify(body);
     const previous = byKey.get(key);
@@ -171,6 +185,21 @@ async function startIdempotentServer() {
     byKey.set(key, { body: serialized, result });
     return sendJson(response, 201, result);
   });
+  return { ...server, uniquePublications: () => byKey.size };
+}
+
+async function waitForFile(path: string) {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      await access(path);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (Date.now() > deadline) throw new Error('Test child did not become ready.');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 void test('quota 409 usa orientação fixa e preserva operação sem confiar no corpo', async (t) => {
@@ -330,6 +359,100 @@ void test('two processes starting together share the same idempotency key', asyn
   assert.equal(server.records.length, 2);
   assert.equal(server.records[0].key, server.records[1].key);
   assert.deepEqual(JSON.parse(first.stdout), JSON.parse(second.stdout));
+});
+
+void test('initial ENOENT converges on the operation published by another process', async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markdown = join(directory, 'plan.md');
+  const operation = join(directory, 'operation.json');
+  const ready = join(directory, 'missing-ready');
+  const release = join(directory, 'missing-release');
+  await writeFile(markdown, '# Deterministic concurrent plan\n');
+  const server = await startIdempotentServer();
+  t.after(server.close);
+
+  const delayed = runCli({
+    file: markdown,
+    operation,
+    origin: server.origin,
+    preload: holdMissingOperation,
+    testEnvironment: {
+      MD_TEST_OPERATION_PATH: operation,
+      MD_TEST_OPERATION_READY: ready,
+      MD_TEST_OPERATION_RELEASE: release,
+    },
+  });
+  await waitForFile(ready);
+  let winner: CliResult | null = null;
+  let stateAfterWinner = '';
+  try {
+    winner = await runCli({
+      file: markdown,
+      operation,
+      origin: server.origin,
+    });
+    stateAfterWinner = await readFile(operation, 'utf8');
+  } finally {
+    await writeFile(release, 'winner completed\n');
+  }
+  const resumed = await delayed;
+
+  assert(winner);
+  assert.equal(winner.code, 0, winner.stderr);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(server.records.length, 2);
+  assert.equal(server.records[0].key, server.records[1].key);
+  assert.deepEqual(server.records[0].body, server.records[1].body);
+  assert.equal(server.uniquePublications(), 1);
+  assert.deepEqual(JSON.parse(winner.stdout), JSON.parse(resumed.stdout));
+  assert.equal(await readFile(operation, 'utf8'), stateAfterWinner);
+});
+
+void test('operation read failures after a successful stat never recreate or publish', async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markdown = join(directory, 'plan.md');
+  const operation = join(directory, 'operation.json');
+  await writeFile(markdown, '# Strict operation read\n');
+  const server = await startIdempotentServer();
+  t.after(server.close);
+
+  const created = await runCli({
+    file: markdown,
+    operation,
+    origin: server.origin,
+  });
+  assert.equal(created.code, 0, created.stderr);
+  const completeState = await readFile(operation, 'utf8');
+
+  const ioFailure = await runCli({
+    file: markdown,
+    operation,
+    origin: server.origin,
+    preload: failOperationReadAfterStat,
+    testEnvironment: {
+      MD_TEST_OPERATION_PATH: operation,
+      MD_TEST_OPERATION_READ_FAULT: 'EIO',
+    },
+  });
+  assert.equal(ioFailure.code, 1);
+  assert.match(ioFailure.stderr, /não foi sobrescrito/i);
+  assert.equal(server.records.length, 1);
+  assert.equal(await readFile(operation, 'utf8'), completeState);
+
+  const disappeared = await runCli({
+    file: markdown,
+    operation,
+    origin: server.origin,
+    preload: failOperationReadAfterStat,
+    testEnvironment: {
+      MD_TEST_OPERATION_PATH: operation,
+      MD_TEST_OPERATION_READ_FAULT: 'ENOENT',
+    },
+  });
+  assert.equal(disappeared.code, 1);
+  assert.match(disappeared.stderr, /não foi sobrescrito/i);
+  assert.equal(server.records.length, 1);
+  await assert.rejects(access(operation), { code: 'ENOENT' });
 });
 
 void test('a lost response preserves state and manual retry recovers the remote result', async (t) => {
@@ -519,6 +642,46 @@ void test('malformed state, failed state creation and invalid receipt never send
       await runCli({
         file: markdown,
         operation: malformed,
+        origin: server.origin,
+      })
+    ).code,
+    1,
+  );
+  assert.equal(server.records.length, 0);
+
+  const symlinkTarget = join(directory, 'symlink-target.json');
+  const linkedOperation = join(directory, 'linked-operation.json');
+  await writeFile(symlinkTarget, await readFile(malformed));
+  await symlink(symlinkTarget, linkedOperation);
+  assert.equal(
+    (
+      await runCli({
+        file: markdown,
+        operation: linkedOperation,
+        origin: server.origin,
+      })
+    ).code,
+    1,
+  );
+  const oversized = join(directory, 'oversized-operation.json');
+  await writeFile(oversized, Buffer.alloc(64 * 1024 + 1, 0x61));
+  assert.equal(
+    (
+      await runCli({
+        file: markdown,
+        operation: oversized,
+        origin: server.origin,
+      })
+    ).code,
+    1,
+  );
+  const operationDirectory = join(directory, 'operation-directory');
+  await mkdir(operationDirectory);
+  assert.equal(
+    (
+      await runCli({
+        file: markdown,
+        operation: operationDirectory,
         origin: server.origin,
       })
     ).code,
