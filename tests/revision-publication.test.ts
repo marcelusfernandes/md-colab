@@ -200,6 +200,14 @@ void test('duas publicações na mesma base produzem um avanço e um conflito', 
       .get(f.document.id)?.count,
     2,
   );
+  assert.equal(
+    f.sqlite
+      .prepare(
+        "SELECT count(*) AS count FROM notification_events WHERE document_id=? AND kind='revision'",
+      )
+      .get(f.document.id)?.count,
+    1,
+  );
 });
 
 void test('referência ausente ou alheia falha sem snapshot nem avanço', async (t) => {
@@ -226,6 +234,14 @@ void test('referência ausente ou alheia falha sem snapshot nem avanço', async 
     assert.equal(await f.service.revision(f.document.id, request.id as string).catch(() => null), null);
   }
   assert.equal((await f.service.document(f.document.id)).current_revision_id, f.document.id);
+  assert.equal(
+    f.sqlite
+      .prepare(
+        "SELECT count(*) AS count FROM notification_events WHERE document_id=? AND kind='revision'",
+      )
+      .get(f.document.id)?.count,
+    0,
+  );
 });
 
 void test('cota conta a inicial e trigger impede snapshot sem avanço CAS', async (t) => {
@@ -269,6 +285,14 @@ void test('cota conta a inicial e trigger impede snapshot sem avanço CAS', asyn
       .prepare('SELECT count(*) AS count FROM document_revisions WHERE document_id=?')
       .get(f.document.id)?.count,
     2,
+  );
+  assert.equal(
+    f.sqlite
+      .prepare(
+        "SELECT count(*) AS count FROM notification_events WHERE document_id=? AND kind='revision'",
+      )
+      .get(f.document.id)?.count,
+    1,
   );
 });
 

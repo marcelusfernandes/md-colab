@@ -126,7 +126,7 @@ export async function inspectNotifications(
     inspection.deliveryId ? 1 : limit + 1,
   ];
   const query = db.prepare(
-    `SELECT d.id,d.event_id,e.document_id,e.comment_id,d.recipient_id,
+    `SELECT d.id,d.event_id,e.kind,e.document_id,e.comment_id,e.revision_id,d.recipient_id,
        d.recipient_email,d.generation,d.retry_of_id,d.status,d.available_at,
        d.lease_expires_at,d.attempts,d.first_attempt_at,d.uncertain,
        d.idempotency_key,d.provider_id,d.last_error_code,d.last_error_at,

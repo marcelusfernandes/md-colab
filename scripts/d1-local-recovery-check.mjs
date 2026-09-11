@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -43,6 +44,7 @@ const currentMigrations = [
   '0009_slimy_kingpin.sql',
   '0010_serious_dazzler.sql',
   '0011_tiny_valeria_richards.sql',
+  '0012_previous_lifeguard.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -138,6 +140,31 @@ INSERT INTO document_revisions
   (id,document_id,ordinal,author_id,title,filename,markdown,base_revision_id,summary,considered_comment_ids,created_at)
 VALUES
   ('${ids.revision3}','${ids.document}',3,'${ids.owner}','${marker}-v3','plan-v3.md','# Synthetic v3','${ids.revision2}',NULL,'[]','2026-09-10T00:02:45.000Z');
+UPDATE notification_deliveries
+SET status='sent',available_at=10,attempts=2,first_attempt_at=7,uncertain=1,
+  idempotency_key='frozen-comment-key',payload='{"frozen":"comment"}',
+  provider_id='provider-comment',last_error_code=NULL,last_error_at=NULL
+WHERE event_id='${ids.comment}';
+UPDATE notification_deliveries
+SET status='blocked',available_at=20,attempts=3,first_attempt_at=11,uncertain=1,
+  idempotency_key='frozen-revision-key-1',payload='{"frozen":"revision-1"}',
+  last_error_code='uncertain_timeout',last_error_at=19
+WHERE event_id='revision:${ids.revision2}';
+INSERT INTO notification_reconciliations
+  (action_id,delivery_id,operator_id,evidence,note,result_delivery_id,created_at)
+SELECT 'synthetic-reconciliation',id,'synthetic-operator','confirmed_not_delivered',
+  'Provider confirmed no delivery.','synthetic-retry-delivery','2026-09-10T00:02:50.000Z'
+FROM notification_deliveries WHERE event_id='revision:${ids.revision2}';
+UPDATE notification_deliveries
+SET status='leased',available_at=30,lease_token='frozen-lease',lease_expires_at=90,
+  attempts=2,first_attempt_at=29,uncertain=1,idempotency_key='frozen-revision-key-2',
+  payload='{"frozen":"revision-2"}',last_error_code='provider_network',last_error_at=31
+WHERE id='synthetic-retry-delivery';
+UPDATE notification_deliveries
+SET status='pending',available_at=40,attempts=1,first_attempt_at=39,uncertain=1,
+  idempotency_key='frozen-revision-key-3',payload='{"frozen":"revision-3"}',
+  last_error_code='provider_timeout',last_error_at=41
+WHERE event_id='revision:${ids.revision3}';
 INSERT INTO magic_links(token_hash,email,document_id,comment_id,revision_id,expires_at,used_at)
 VALUES
   ('synthetic-comment-link','guest@example.test','${ids.document}','${ids.comment}',NULL,1900000000,NULL),
@@ -161,6 +188,15 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT count(*) FROM publications) AS publications_count,
       (SELECT count(*) FROM publishing_tokens WHERE revoked_at IS NOT NULL) AS revoked_count,
       (SELECT count(*) FROM magic_links) AS magic_links_count,
+      (SELECT count(*) FROM notification_events) AS notification_events_count,
+      (SELECT count(*) FROM notification_events WHERE kind='revision') AS revision_events_count,
+      (SELECT count(*) FROM notification_deliveries) AS notification_deliveries_count,
+      (SELECT count(*) FROM notification_reconciliations) AS notification_reconciliations_count,
+      (SELECT idempotency_key FROM notification_deliveries WHERE id='synthetic-retry-delivery') AS retry_key,
+      (SELECT payload FROM notification_deliveries WHERE id='synthetic-retry-delivery') AS retry_payload,
+      (SELECT lease_token FROM notification_deliveries WHERE id='synthetic-retry-delivery') AS retry_lease,
+      (SELECT uncertain FROM notification_deliveries WHERE id='synthetic-retry-delivery') AS retry_uncertain,
+      (SELECT generation FROM notification_deliveries WHERE id='synthetic-retry-delivery') AS retry_generation,
       (SELECT owner_id FROM documents WHERE id='${ids.document}') AS owner_id,
       (SELECT author_id FROM comments WHERE id='${ids.comment}') AS comment_author_id,
       (SELECT sequence FROM comments WHERE id='${ids.comment}') AS comment_sequence,
@@ -193,6 +229,21 @@ function verifyFixture(environment, marker = 'source-marker') {
   );
   assert(row.revoked_count === 1, 'Credencial revogada ausente.');
   assert(row.magic_links_count === 2, 'Destinos sinteticos de acesso divergentes.');
+  assert(
+    row.notification_events_count === 3 &&
+      row.revision_events_count === 2 &&
+      row.notification_deliveries_count === 4 &&
+      row.notification_reconciliations_count === 1,
+    'Cadeia sintetica de avisos divergente.',
+  );
+  assert(
+    row.retry_key === 'frozen-revision-key-2' &&
+      row.retry_payload === '{"frozen":"revision-2"}' &&
+      row.retry_lease === 'frozen-lease' &&
+      row.retry_uncertain === 1 &&
+      row.retry_generation === 2,
+    'Payload, chave, lease, incerteza ou geracao congelada divergente.',
+  );
   assert(row.owner_id === ids.owner, 'Propriedade do plano divergente.');
   assert(
     row.comment_author_id === ids.guest,
@@ -287,6 +338,144 @@ function alteredDefaultMigration(outputDirectory) {
   return path;
 }
 
+function verifyNotificationUpgrade(outputDirectory) {
+  const prefixPath = join(outputDirectory, 'notification-prefix-migrations');
+  mkdirSync(prefixPath, { recursive: true, mode: 0o700 });
+  for (const file of currentMigrations.slice(0, -1))
+    copyFileSync(join(migrationsDirectory, file), join(prefixPath, file));
+  const environment = createEnvironment(
+    join(outputDirectory, 'notification-upgrade'),
+    prefixPath,
+  );
+  applyMigrations(environment);
+  expectedLedger(environment, currentMigrations.slice(0, -1));
+  executeSql(
+    environment,
+    `INSERT INTO users(id,email,name,test_email) VALUES
+       ('upgrade-owner','upgrade-owner@example.test','Owner',NULL),
+       ('upgrade-guest','upgrade-guest@example.test','Guest',NULL);
+     INSERT INTO documents(id,owner_id,title,filename,markdown,is_test,created_at)
+       VALUES('upgrade-document','upgrade-owner','Plan','plan.md','# v1',0,'2026-09-10T01:00:00.000Z');
+     INSERT INTO document_revisions(id,document_id,ordinal,author_id,title,filename,markdown,created_at)
+       VALUES('upgrade-document','upgrade-document',1,'upgrade-owner','Plan','plan.md','# v1','2026-09-10T01:00:00.000Z');
+     UPDATE documents SET current_revision_id='upgrade-document' WHERE id='upgrade-document';
+     INSERT INTO shares(document_id,email,name,created_at)
+       VALUES('upgrade-document','upgrade-guest@example.test','Guest','2026-09-10T01:00:01.000Z');
+     INSERT INTO comments(id,document_id,author_id,body,quote,source_revision_id,created_at) VALUES
+       ('upgrade-comment-a','upgrade-document','upgrade-guest','A','','upgrade-document','2026-09-10T01:00:02.000Z'),
+       ('upgrade-comment-b','upgrade-document','upgrade-guest','B','','upgrade-document','2026-09-10T01:00:03.000Z'),
+       ('upgrade-comment-c','upgrade-document','upgrade-guest','C','','upgrade-document','2026-09-10T01:00:04.000Z'),
+       ('upgrade-comment-d','upgrade-document','upgrade-guest','D','','upgrade-document','2026-09-10T01:00:05.000Z');
+     UPDATE notification_deliveries SET status='sent',attempts=1,first_attempt_at=10,
+       uncertain=1,idempotency_key='upgrade-sent-key',payload='{"frozen":"sent"}',
+       provider_id='upgrade-provider' WHERE event_id='upgrade-comment-a';
+     UPDATE notification_deliveries SET status='blocked',attempts=2,first_attempt_at=11,
+       uncertain=1,idempotency_key='upgrade-blocked-key',payload='{"frozen":"blocked"}',
+       last_error_code='uncertain_timeout',last_error_at=12 WHERE event_id='upgrade-comment-b';
+     INSERT INTO notification_reconciliations
+       (action_id,delivery_id,operator_id,evidence,note,result_delivery_id,created_at)
+     SELECT 'upgrade-action',id,'upgrade-operator','confirmed_not_delivered',
+       'Provider rejected.','upgrade-retry','2026-09-10T01:00:06.000Z'
+     FROM notification_deliveries WHERE event_id='upgrade-comment-b';
+     UPDATE notification_deliveries SET status='leased',available_at=31,
+       lease_token='upgrade-lease',lease_expires_at=91,attempts=3,first_attempt_at=30,
+       uncertain=1,idempotency_key='upgrade-retry-key',payload='{"frozen":"retry"}',
+       last_error_code='provider_network',last_error_at=32 WHERE id='upgrade-retry';
+     UPDATE notification_deliveries SET status='suppressed',last_error_code='access_revoked',
+       last_error_at=41 WHERE event_id='upgrade-comment-c';
+     UPDATE notification_deliveries SET status='pending',available_at=51,attempts=1,
+       first_attempt_at=50,uncertain=1,idempotency_key='upgrade-pending-key',
+       payload='{"frozen":"pending"}',last_error_code='provider_timeout',last_error_at=52
+       WHERE event_id='upgrade-comment-d'`,
+  );
+  const eventBefore = executeSql(
+    environment,
+    `SELECT id,comment_id,document_id,root_id,actor_id,created_at
+     FROM notification_events ORDER BY id`,
+  ).results;
+  const deliveryBefore = executeSql(
+    environment,
+    'SELECT * FROM notification_deliveries ORDER BY event_id,generation',
+  ).results;
+  const reconciliationBefore = executeSql(
+    environment,
+    'SELECT * FROM notification_reconciliations ORDER BY action_id',
+  ).results;
+
+  const config = JSON.parse(readFileSync(environment.configPath, 'utf8'));
+  config.d1_databases[0].migrations_dir = migrationsDirectory;
+  writeFileSync(environment.configPath, `${JSON.stringify(config, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  migrateLocal(environment);
+  expectedLedger(environment);
+  const eventAfter = executeSql(
+    environment,
+    `SELECT id,comment_id,document_id,root_id,actor_id,created_at
+     FROM notification_events ORDER BY id`,
+  ).results;
+  const deliveryAfter = executeSql(
+    environment,
+    'SELECT * FROM notification_deliveries ORDER BY event_id,generation',
+  ).results;
+  const reconciliationAfter = executeSql(
+    environment,
+    'SELECT * FROM notification_reconciliations ORDER BY action_id',
+  ).results;
+  assert(
+    JSON.stringify(eventAfter) === JSON.stringify(eventBefore) &&
+      JSON.stringify(deliveryAfter) === JSON.stringify(deliveryBefore) &&
+      JSON.stringify(reconciliationAfter) === JSON.stringify(reconciliationBefore),
+    'Upgrade D1 alterou evento, entrega, geracao ou reconciliacao existente.',
+  );
+  assert(
+    executeSql(
+      environment,
+      `SELECT count(*) AS count FROM notification_events
+       WHERE kind='comment' AND revision_id IS NULL`,
+    ).results[0]?.count === 4,
+    'Upgrade D1 nao classificou os eventos antigos como comentario.',
+  );
+  assert(
+    foreignKeyViolations(environment).length === 0,
+    'Upgrade D1 deixou violacao de FK.',
+  );
+  const immutable = executeSql(
+    environment,
+    "UPDATE notification_events SET kind='revision' WHERE id='upgrade-comment-a'",
+    { allowFailure: true },
+  );
+  assert(!immutable.ok, 'Upgrade D1 nao protegeu evento antigo contra mutacao.');
+
+  executeSql(
+    environment,
+    `INSERT INTO document_revisions
+       (id,document_id,ordinal,author_id,title,filename,markdown,base_revision_id,summary,considered_comment_ids,created_at)
+     VALUES('upgrade-revision','upgrade-document',2,'upgrade-owner','Plan v2','plan-v2.md','# v2',
+       'upgrade-document',NULL,'[]','2026-09-10T01:00:07.000Z')`,
+  );
+  const revision = executeSql(
+    environment,
+    `SELECT e.id,e.kind,e.comment_id,e.revision_id,d.recipient_id,d.generation
+     FROM notification_events e JOIN notification_deliveries d ON d.event_id=e.id
+     WHERE e.id='revision:upgrade-revision'`,
+  ).results[0];
+  assert(
+    revision?.kind === 'revision' &&
+      revision.comment_id === null &&
+      revision.revision_id === 'upgrade-revision' &&
+      revision.recipient_id === 'upgrade-guest' &&
+      revision.generation === 1,
+    'Upgrade D1 nao enfileirou a nova revisao para o contribuidor anterior.',
+  );
+  return {
+    previousEvents: eventBefore.length,
+    preservedDeliveries: deliveryBefore.length,
+    preservedReconciliations: reconciliationBefore.length,
+    newRevisionEvent: revision.id,
+  };
+}
+
 export function run(outputValue) {
   const outputDirectory = resolveNewEvidenceDirectory(outputValue);
   mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
@@ -367,6 +556,7 @@ export function run(outputValue) {
     'Dados allowlisted divergiram no roundtrip.',
   );
   const restoredSequence = verifyNextCommentSequence(destination);
+  const notificationUpgrade = verifyNotificationUpgrade(outputDirectory);
 
   const legacy = createEnvironment(join(outputDirectory, 'legacy-0002'));
   applyFilesManually(legacy, currentMigrations.slice(0, 3));
@@ -584,6 +774,7 @@ export function run(outputValue) {
     fixture: fixtureCounts,
     restoredFixture: restoredCounts,
     restoredSequence,
+    notificationUpgrade,
     ledger: currentMigrations,
     negatives: [
       'partial',

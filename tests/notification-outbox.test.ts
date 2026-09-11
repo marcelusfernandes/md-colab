@@ -62,17 +62,19 @@ async function fixture() {
   return { sqlite, db, owner, guest, other, document };
 }
 
-function comment(
+async function comment(
   service: DocumentService,
   documentId: string,
   body: string,
   rootId?: string,
 ) {
+  const document = await service.document(documentId);
   return service.addComment(documentId, {
     id: crypto.randomUUID(),
     authorId: service.viewer.id,
     body,
     ...(rootId ? { rootId } : {}),
+    ...(!rootId ? { sourceRevisionId: document.current_revision_id } : {}),
   });
 }
 
@@ -92,12 +94,29 @@ async function rows(db: D1Database) {
   return (
     await db
       .prepare(
-        `SELECT d.*,e.comment_id,e.document_id FROM notification_deliveries d
+        `SELECT d.*,e.kind,e.comment_id,e.revision_id,e.document_id FROM notification_deliveries d
          JOIN notification_events e ON e.id=d.event_id
          ORDER BY d.created_at,d.id`,
       )
       .all<Record<string, unknown>>()
   ).results;
+}
+
+async function revision(
+  owner: DocumentService,
+  documentId: string,
+  id = crypto.randomUUID(),
+) {
+  const current = await owner.document(documentId);
+  return owner.createRevision(documentId, {
+    id,
+    baseRevisionId: current.current_revision_id,
+    title: 'Título novo que não pode vazar',
+    filename: 'revisao-privada.md',
+    markdown: '# Revisão\n\nConteúdo novo que não pode vazar.',
+    summary: 'Resumo privado que não pode vazar.',
+    consideredCommentIds: [],
+  });
 }
 
 void test('snapshot atômico escolhe somente owner e autores prévios com acesso', async () => {
@@ -193,6 +212,250 @@ void test('falha no snapshot reverte o comentário e não cria evento órfão', 
           .first<{ count: number }>()
       )?.count,
       0,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('republicação cria evento único e fotografa somente contribuidores atuais', async () => {
+  const { sqlite, db, owner, guest, other, document } = await fixture();
+  try {
+    const firstComment = await comment(guest, document.id, 'Primeira crítica');
+    await comment(guest, document.id, 'Segunda crítica');
+    const published = await revision(owner, document.id, firstComment.id);
+    assert.equal(published.replayed, false);
+
+    const event = await db
+      .prepare(
+        `SELECT id,kind,comment_id,revision_id,document_id,root_id,actor_id
+         FROM notification_events WHERE revision_id=?`,
+      )
+      .bind(firstComment.id)
+      .first<Record<string, unknown>>();
+    assert.ok(event);
+    assert.deepEqual({ ...event }, {
+      id: `revision:${firstComment.id}`,
+      kind: 'revision',
+      comment_id: null,
+      revision_id: firstComment.id,
+      document_id: document.id,
+      root_id: null,
+      actor_id: owner.viewer.id,
+    });
+    assert.deepEqual(
+      (await rows(db))
+        .filter((row) => row.event_id === event.id)
+        .map((row) => row.recipient_id),
+      [guest.viewer.id],
+    );
+
+    const replay = await owner.createRevision(document.id, {
+      id: firstComment.id,
+      baseRevisionId: document.current_revision_id,
+      title: 'Título novo que não pode vazar',
+      filename: 'revisao-privada.md',
+      markdown: '# Revisão\n\nConteúdo novo que não pode vazar.',
+      summary: 'Resumo privado que não pode vazar.',
+      consideredCommentIds: [],
+    });
+    assert.equal(replay.replayed, true);
+    assert.equal(
+      (await rows(db)).filter((row) => row.event_id === event.id).length,
+      1,
+    );
+
+    await comment(other, document.id, 'Crítica posterior');
+    assert.equal(
+      (await rows(db)).filter((row) => row.event_id === event.id).length,
+      1,
+    );
+    await owner.revoke(document.id, guest.viewer.email);
+    const second = await revision(owner, document.id);
+    assert.deepEqual(
+      (await rows(db))
+        .filter((row) => row.revision_id === second.revision.id)
+        .map((row) => row.recipient_id),
+      [other.viewer.id],
+    );
+    await owner.share(document.id, {
+      email: guest.viewer.email,
+      name: guest.viewer.name,
+    });
+    const third = await revision(owner, document.id);
+    assert.deepEqual(
+      (await rows(db))
+        .filter((row) => row.revision_id === third.revision.id)
+        .map((row) => String(row.recipient_id))
+        .sort(),
+      [guest.viewer.id, other.viewer.id].sort(),
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('falha no snapshot de destinatários reverte revisão, evento e avanço', async () => {
+  const { sqlite, owner, guest, document } = await fixture();
+  try {
+    await comment(guest, document.id, 'Crítica anterior');
+    sqlite.exec(`CREATE TRIGGER fail_revision_notification
+      BEFORE INSERT ON notification_deliveries
+      FOR EACH ROW WHEN NEW.event_id LIKE 'revision:%'
+      BEGIN SELECT RAISE(ABORT,'synthetic revision notification failure'); END;`);
+    const revisionId = crypto.randomUUID();
+    await assert.rejects(
+      revision(owner, document.id, revisionId),
+      /synthetic revision notification failure/,
+    );
+    assert.equal((await owner.document(document.id)).current_revision_id, document.id);
+    assert.equal(
+      sqlite
+        .prepare('SELECT count(*) AS count FROM document_revisions WHERE id=?')
+        .get(revisionId)?.count,
+      0,
+    );
+    assert.equal(
+      sqlite
+        .prepare('SELECT count(*) AS count FROM notification_events WHERE revision_id=?')
+        .get(revisionId)?.count,
+      0,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('dreno distingue comentário e revisão sem incluir conteúdo privado', async () => {
+  const { sqlite, db, owner, guest, document } = await fixture();
+  try {
+    const created = await comment(guest, document.id, 'Corpo secreto');
+    const published = await revision(owner, document.id);
+    const transport = new ControlledTransport();
+    const result = await drainNotifications(env(db), { transport, limit: 10 });
+    assert.equal(result.sent, 2);
+    assert.equal(transport.messages.length, 2);
+    const commentMessage = transport.messages.find((message) =>
+      message.payload.includes(`?comment=${created.id}`),
+    );
+    const revisionMessage = transport.messages.find((message) =>
+      message.payload.includes(`?revision=${published.revision.id}`),
+    );
+    assert.ok(commentMessage);
+    assert.ok(revisionMessage);
+    assert.ok(commentMessage.idempotencyKey.startsWith('comment-notification/'));
+    assert.ok(revisionMessage.idempotencyKey.startsWith('revision-notification/'));
+    for (const message of transport.messages) {
+      assert.equal(message.payload.includes('Título novo'), false);
+      assert.equal(message.payload.includes('Resumo privado'), false);
+      assert.equal(message.payload.includes('Conteúdo novo'), false);
+      assert.equal(message.payload.includes('Corpo secreto'), false);
+    }
+
+    const inspected = await inspectNotifications(db, { status: 'sent' });
+    assert.deepEqual(
+      inspected.deliveries
+        .map((delivery) => ({
+          kind: delivery.kind,
+          comment_id: delivery.comment_id,
+          revision_id: delivery.revision_id,
+        }))
+        .sort((left, right) => String(left.kind).localeCompare(String(right.kind))),
+      [
+        { kind: 'comment', comment_id: created.id, revision_id: null },
+        {
+          kind: 'revision',
+          comment_id: null,
+          revision_id: published.revision.id,
+        },
+      ],
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('revogação durante envio de revisão vence o ACK tardio e o regrant', async () => {
+  const { sqlite, db, owner, guest, document } = await fixture();
+  try {
+    await comment(guest, document.id, 'Crítica anterior');
+    const published = await revision(owner, document.id);
+    await db
+      .prepare("UPDATE notification_deliveries SET status='sent' WHERE event_id NOT LIKE 'revision:%'")
+      .run();
+    let release!: (value: NotificationSendResult) => void;
+    const held = new Promise<NotificationSendResult>((resolve) => {
+      release = resolve;
+    });
+    const transport = new ControlledTransport();
+    transport.send = () => held;
+    const draining = drainNotifications(env(db), { transport });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      (await rows(db)).find((row) => row.revision_id === published.revision.id)
+        ?.status,
+      'leased',
+    );
+
+    await owner.revoke(document.id, guest.viewer.email);
+    release({ providerId: 'accepted-after-revocation' });
+    const result = await draining;
+    const suppressed = (await rows(db)).find(
+      (row) => row.revision_id === published.revision.id,
+    );
+    assert.equal(result.suppressed, 1);
+    assert.equal(suppressed?.status, 'suppressed');
+    assert.equal(suppressed?.provider_id, null);
+
+    await owner.share(document.id, {
+      email: guest.viewer.email,
+      name: guest.viewer.name,
+    });
+    const afterRegrant = new ControlledTransport();
+    assert.equal(
+      (await drainNotifications(env(db), { transport: afterRegrant })).examined,
+      0,
+    );
+    assert.equal(afterRegrant.messages.length, 0);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('evento persistido é imutável e exige destino exclusivo', async () => {
+  const { sqlite, owner, guest, document } = await fixture();
+  try {
+    const created = await comment(guest, document.id, 'Crítica');
+    assert.throws(
+      () =>
+        sqlite
+          .prepare("UPDATE notification_events SET kind='revision' WHERE id=?")
+          .run(created.id),
+      /notification events are immutable/,
+    );
+    assert.throws(
+      () => sqlite.prepare('DELETE FROM notification_events WHERE id=?').run(created.id),
+      /notification events are immutable/,
+    );
+    assert.throws(
+      () =>
+        sqlite
+          .prepare(
+            `INSERT INTO notification_events
+             (id,kind,comment_id,revision_id,document_id,root_id,actor_id,created_at)
+             VALUES(?,?,?,?,?,?,?,?)`,
+          )
+          .run(
+            'invalid-target',
+            'revision',
+            created.id,
+            document.id,
+            document.id,
+            created.id,
+            owner.viewer.id,
+            new Date().toISOString(),
+          ),
+      /notification_events_target/,
     );
   } finally {
     sqlite.close();
