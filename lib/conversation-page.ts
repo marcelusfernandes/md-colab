@@ -37,6 +37,16 @@ export function conversationHistoryAttemptMatches(
   return attempt.documentId === documentId && attempt.request === request;
 }
 
+export function nextConversationHistoryRequest(
+  sequence: MutableRef<number>,
+  requests: Map<string, number>,
+  rootId: string,
+) {
+  sequence.current += 1;
+  requests.set(rootId, sequence.current);
+  return sequence.current;
+}
+
 function cursor(value: unknown, nullable = false) {
   return (
     (nullable && value === null) ||

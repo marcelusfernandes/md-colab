@@ -85,6 +85,7 @@ import {
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
   mergeConversationReplies,
+  nextConversationHistoryRequest,
 } from '@/lib/conversation-page';
 import {
   conversationEventFromResponse,
@@ -240,6 +241,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const conversationChangeRequest = useRef(0);
   const conversationChangeInProgress = useRef(false);
   const conversationHistoryRequests = useRef(new Map<string, number>());
+  const conversationHistoryRequestSequence = useRef(0);
   const conversationsNextCursor = useRef<string | null>(null);
   const conversationsChangeCursor = useRef<string | null>(null);
   const activeConversationFilter = useRef<ConversationFilter>('all');
@@ -1913,9 +1915,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         return;
       const confirmed = conversationEventFromResponse(result, operation);
       applyConversationEvent(confirmed);
-      conversationHistoryRequests.current.set(
+      nextConversationHistoryRequest(
+        conversationHistoryRequestSequence,
+        conversationHistoryRequests.current,
         operation.rootId,
-        (conversationHistoryRequests.current.get(operation.rootId) ?? 0) + 1,
       );
       setConversationHistories((current) => {
         const history = current[operation.rootId];
@@ -2008,9 +2011,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       }
       const confirmed = conversationEventFromResponse(result, operation);
       applyConversationEvent(confirmed);
-      conversationHistoryRequests.current.set(
+      nextConversationHistoryRequest(
+        conversationHistoryRequestSequence,
+        conversationHistoryRequests.current,
         operation.rootId,
-        (conversationHistoryRequests.current.get(operation.rootId) ?? 0) + 1,
       );
       setConversationHistories((current) => {
         const history = current[operation.rootId];
@@ -2163,9 +2167,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     const attempt = {
       documentId: doc.id,
       rootId,
-      request: (conversationHistoryRequests.current.get(rootId) ?? 0) + 1,
+      request: nextConversationHistoryRequest(
+        conversationHistoryRequestSequence,
+        conversationHistoryRequests.current,
+        rootId,
+      ),
     };
-    conversationHistoryRequests.current.set(rootId, attempt.request);
     const current = conversationHistories[rootId];
     const cursor = append ? current?.nextCursor : null;
     if (append && !cursor) return;
@@ -3252,9 +3259,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                         disabled={history?.loading}
                         onClick={() => {
                           if (history) {
-                            conversationHistoryRequests.current.set(
+                            nextConversationHistoryRequest(
+                              conversationHistoryRequestSequence,
+                              conversationHistoryRequests.current,
                               root.id,
-                              (conversationHistoryRequests.current.get(root.id) ?? 0) + 1,
                             );
                             setConversationHistories((current) => {
                               const next = { ...current };

@@ -7,6 +7,7 @@ import {
   conversationPageFromResponse,
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
+  nextConversationHistoryRequest,
 } from '../lib/conversation-page.ts';
 
 const root = {
@@ -126,5 +127,23 @@ void test('poll só consome mudança depois de recarregar o estado observado', (
       reloaded: false,
     }),
     'cursor-novo',
+  );
+});
+
+void test('histórico não reutiliza identidade de request depois de limpar o contexto', () => {
+  const sequence = { current: 0 };
+  const requests = new Map<string, number>();
+  const first = nextConversationHistoryRequest(sequence, requests, root.id);
+  requests.clear();
+  const second = nextConversationHistoryRequest(sequence, requests, root.id);
+  assert.equal(first, 1);
+  assert.equal(second, 2);
+  assert.equal(
+    conversationHistoryAttemptMatches(
+      { documentId: 'document-a', rootId: root.id, request: first },
+      'document-a',
+      requests.get(root.id),
+    ),
+    false,
   );
 });
