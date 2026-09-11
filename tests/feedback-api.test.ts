@@ -8,7 +8,7 @@ const origin = 'https://docs.example.com';
 type Credential = {
   id: string;
   name: string;
-  scope: 'publish' | 'plan_read';
+  scope: 'publish' | 'plan_read' | 'plan_revise';
   document_id: string | null;
   document_title: string | null;
   created_at: string;
@@ -83,6 +83,44 @@ function fixture() {
     );
   }
   return { db, sqlite, values, call, login, credential, agent };
+}
+
+function interceptRevisionInsert(
+  db: D1Database,
+  mutation: (phase: 'before' | 'after') => void,
+  phase: 'before' | 'after' = 'before',
+) {
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property !== 'prepare')
+        return Reflect.get(target, property, receiver);
+      return (sql: string) => {
+        const statement = target.prepare(sql);
+        if (!sql.includes('INSERT INTO document_revisions')) return statement;
+        return new Proxy(statement, {
+          get(prepared, preparedProperty, preparedReceiver) {
+            if (preparedProperty !== 'bind')
+              return Reflect.get(prepared, preparedProperty, preparedReceiver);
+            return (...values: unknown[]) => {
+              const bound = prepared.bind(...values);
+              return new Proxy(bound, {
+                get(final, finalProperty, finalReceiver) {
+                  if (finalProperty !== 'run')
+                    return Reflect.get(final, finalProperty, finalReceiver);
+                  return async <T>() => {
+                    if (phase === 'before') mutation('before');
+                    const result = await final.run<T>();
+                    if (phase === 'after') mutation('after');
+                    return result;
+                  };
+                },
+              });
+            };
+          },
+        });
+      };
+    },
+  }) as D1Database;
 }
 
 function uuid(index: number, version = 4) {
@@ -758,4 +796,458 @@ void test('mudança entre leitura e resposta invalida selo ou autorização', as
     .run(reader.credential.id);
   releaseRevocation();
   assert.equal((await revokePending).status, 401);
+});
+
+void test('plan_revise publica, relê recibo exato e preserva as permissões dos outros escopos', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const ownerCookie = await f.login();
+  const { documentId, publish } = await createPlan(f, ownerCookie);
+  const reader = await f.credential(ownerCookie, {
+    name: 'Somente leitura',
+    scope: 'plan_read',
+    documentId,
+  });
+  const reviser = await f.credential(ownerCookie, {
+    name: 'Republicação',
+    scope: 'plan_revise',
+    documentId,
+  });
+  assert.equal(reviser.credential.scope, 'plan_revise');
+  assert.equal(reviser.credential.document_id, documentId);
+  const other = await createPlan(f, ownerCookie);
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${other.documentId}/revisions/${other.documentId}`,
+        reviser.token,
+      )
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${other.documentId}/revisions`,
+        'POST',
+        {
+          id: crypto.randomUUID(),
+          baseRevisionId: other.documentId,
+          markdown: '# Outro plano\n',
+          filename: 'outro.md',
+          consideredCommentIds: [],
+        },
+        '',
+        { Authorization: `Bearer ${reviser.token}` },
+      )
+    ).status,
+    401,
+  );
+
+  const current = f.sqlite
+    .prepare('SELECT owner_id,current_revision_id FROM documents WHERE id=?')
+    .get(documentId) as { owner_id: string; current_revision_id: string };
+  const insertComment = f.sqlite.prepare(
+    `INSERT INTO comments(
+      id,document_id,author_id,body,quote,source_start,source_revision_id,root_id,created_at
+    ) VALUES(?,?,?,?,?,?,?,?,?)`,
+  );
+  const references = Array.from({ length: 100 }, (_, index) =>
+    uuid(300 + index),
+  );
+  for (const [index, id] of references.entries())
+    insertComment.run(
+      id,
+      documentId,
+      current.owner_id,
+      `Referência ${index + 1}`,
+      '',
+      null,
+      current.current_revision_id,
+      null,
+      new Date(Date.UTC(2026, 8, 11, 4, 0, index)).toISOString(),
+    );
+  const revisionId = crypto.randomUUID();
+  const request = {
+    id: revisionId,
+    baseRevisionId: current.current_revision_id,
+    markdown: '# Revisão do agente\n\nConteúdo considerado.\n',
+    filename: 'revisao-agente.md',
+    title: 'Revisão do agente',
+    summary: 'Considera cem referências exatas.',
+    consideredCommentIds: [...references].reverse(),
+  };
+  const post = await f.call(
+    `agent/documents/${documentId}/revisions`,
+    'POST',
+    request,
+    '',
+    { Authorization: `Bearer ${reviser.token}` },
+  );
+  assert.equal(post.status, 201);
+  const receipt = (
+    (await post.json()) as {
+      revision: {
+        id: string;
+        ordinal: number;
+        considered_comment_ids: string[];
+        considered_comments: Array<{ id: string }>;
+      };
+    }
+  ).revision;
+  assert.equal(receipt.id, revisionId);
+  assert.equal(receipt.ordinal, 2);
+  assert.deepEqual(receipt.considered_comment_ids, [...references].sort());
+  assert.deepEqual(
+    receipt.considered_comments.map((comment) => comment.id),
+    [...references].sort(),
+  );
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${documentId}/revisions`,
+        'POST',
+        request,
+        '',
+        { Authorization: `Bearer ${reviser.token}` },
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${documentId}/revisions`,
+        'POST',
+        request,
+        '',
+        { Authorization: `Bearer ${reader.token}` },
+      )
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${documentId}/revisions/${revisionId}`,
+        'GET',
+        undefined,
+        '',
+        { Authorization: `Bearer ${reader.token}` },
+      )
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${documentId}/revisions/${revisionId}`,
+        'GET',
+        undefined,
+        '',
+        { Authorization: `Bearer ${publish.token}` },
+      )
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await f.call(
+        'publications',
+        'POST',
+        { markdown: '# Não permitido', filename: 'nao.md' },
+        '',
+        {
+          Authorization: `Bearer ${reviser.token}`,
+          'Idempotency-Key': 'revise-cannot-create-plan',
+        },
+      )
+    ).status,
+    401,
+  );
+
+  const manifest = (await (
+    await f.agent(`agent/documents/${documentId}/feedback`, reviser.token)
+  ).json()) as { stamp: string };
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${documentId}/revisions/${revisionId}?stamp=${manifest.stamp}`,
+        reviser.token,
+      )
+    ).status,
+    200,
+  );
+  const replacement = await f.credential(ownerCookie, {
+    name: 'Republicação substituta',
+    scope: 'plan_revise',
+    documentId,
+  });
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${documentId}/revisions/${revisionId}?stamp=${manifest.stamp}`,
+        replacement.token,
+      )
+    ).status,
+    400,
+  );
+  const exact = await f.agent(
+    `agent/documents/${documentId}/revisions/${revisionId}`,
+    replacement.token,
+  );
+  assert.equal(exact.status, 200);
+  assert.deepEqual(
+    ((await exact.json()) as { revision: unknown }).revision,
+    receipt,
+  );
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${documentId}/revisions/${crypto.randomUUID()}`,
+        replacement.token,
+      )
+    ).status,
+    404,
+  );
+  for (const suffix of ['?stamp=', '?cursor=', '?x=1', '?stamp=a&stamp=b'])
+    assert.equal(
+      (
+        await f.agent(
+          `agent/documents/${documentId}/revisions/${revisionId}${suffix}`,
+          replacement.token,
+        )
+      ).status,
+      400,
+    );
+});
+
+void test('plan_revise exige canCreate no POST, mas mantém leitura do recibo sem essa capacidade', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const ownerCookie = await f.login();
+  const { documentId } = await createPlan(f, ownerCookie);
+  const reviser = await f.credential(ownerCookie, {
+    name: 'Republicação controlada',
+    scope: 'plan_revise',
+    documentId,
+  });
+  const current = f.sqlite
+    .prepare('SELECT current_revision_id FROM documents WHERE id=?')
+    .get(documentId) as { current_revision_id: string };
+  const request = {
+    id: crypto.randomUUID(),
+    baseRevisionId: current.current_revision_id,
+    markdown: '# Segunda\n',
+    filename: 'segunda.md',
+    consideredCommentIds: [],
+  };
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${documentId}/revisions`,
+        'POST',
+        request,
+        '',
+        { Authorization: `Bearer ${reviser.token}` },
+      )
+    ).status,
+    201,
+  );
+  f.values.APP_OWNER_EMAIL = undefined;
+  assert.equal(
+    (
+      await f.call(
+        `agent/documents/${documentId}/revisions`,
+        'POST',
+        request,
+        '',
+        { Authorization: `Bearer ${reviser.token}` },
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${documentId}/revisions/${request.id}`,
+        reviser.token,
+      )
+    ).status,
+    200,
+  );
+});
+
+void test('guarda atômica de plan_revise bloqueia mudanças antes do INSERT e trata commit sem ACK como incerto', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const ownerCookie = await f.login();
+  const { documentId } = await createPlan(f, ownerCookie);
+  const reviser = await f.credential(ownerCookie, {
+    name: 'Interleavings',
+    scope: 'plan_revise',
+    documentId,
+  });
+  const stored = f.sqlite
+    .prepare(
+      'SELECT token_hash,expires_at,user_id FROM publishing_tokens WHERE id=?',
+    )
+    .get(reviser.credential.id) as {
+    token_hash: string;
+    expires_at: number;
+    user_id: string;
+  };
+  const currentRevision = () =>
+    (
+      f.sqlite
+        .prepare('SELECT current_revision_id FROM documents WHERE id=?')
+        .get(documentId) as { current_revision_id: string }
+    ).current_revision_id;
+  const payload = () => ({
+    id: crypto.randomUUID(),
+    baseRevisionId: currentRevision(),
+    markdown: '# Concorrência\n',
+    filename: 'concorrencia.md',
+    consideredCommentIds: [],
+  });
+  const send = (input: ReturnType<typeof payload>, db: D1Database) =>
+    f.call(
+      `agent/documents/${documentId}/revisions`,
+      'POST',
+      input,
+      '',
+      { Authorization: `Bearer ${reviser.token}` },
+      { ...f.values, DB: db },
+    );
+  const assertAbsent = (id: string) => {
+    assert.equal(
+      (
+        f.sqlite
+          .prepare(
+            'SELECT count(*) AS count FROM document_revisions WHERE id=?',
+          )
+          .get(id) as { count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      (
+        f.sqlite
+          .prepare(
+            'SELECT count(*) AS count FROM notification_events WHERE revision_id=?',
+          )
+          .get(id) as { count: number }
+      ).count,
+      0,
+    );
+  };
+
+  const mutations: Array<{
+    mutate: () => void;
+    restore: () => void;
+  }> = [
+    {
+      mutate: () => {
+        f.sqlite
+          .prepare('UPDATE publishing_tokens SET revoked_at=1 WHERE id=?')
+          .run(reviser.credential.id);
+      },
+      restore: () => {
+        f.sqlite
+          .prepare('UPDATE publishing_tokens SET revoked_at=NULL WHERE id=?')
+          .run(reviser.credential.id);
+      },
+    },
+    {
+      mutate: () => {
+        f.sqlite
+          .prepare('UPDATE publishing_tokens SET expires_at=0 WHERE id=?')
+          .run(reviser.credential.id);
+      },
+      restore: () => {
+        f.sqlite
+          .prepare('UPDATE publishing_tokens SET expires_at=? WHERE id=?')
+          .run(stored.expires_at, reviser.credential.id);
+      },
+    },
+    {
+      mutate: () => {
+        f.sqlite
+          .prepare('UPDATE publishing_tokens SET token_hash=? WHERE id=?')
+          .run('f'.repeat(64), reviser.credential.id);
+      },
+      restore: () => {
+        f.sqlite
+          .prepare('UPDATE publishing_tokens SET token_hash=? WHERE id=?')
+          .run(stored.token_hash, reviser.credential.id);
+      },
+    },
+  ];
+  for (const entry of mutations) {
+    const request = payload();
+    const controlled = interceptRevisionInsert(f.db, entry.mutate);
+    assert.equal((await send(request, controlled)).status, 401);
+    assertAbsent(request.id);
+    entry.restore();
+  }
+
+  const otherUserId = crypto.randomUUID();
+  f.sqlite
+    .prepare(`INSERT INTO users(id,email,name,test_email) VALUES(?,?,?,?)`)
+    .run(otherUserId, 'other@example.com', 'Outra', null);
+  const ownershipRequest = payload();
+  const changedOwner = interceptRevisionInsert(f.db, () => {
+    f.sqlite
+      .prepare('UPDATE documents SET owner_id=? WHERE id=?')
+      .run(otherUserId, documentId);
+  });
+  assert.equal((await send(ownershipRequest, changedOwner)).status, 401);
+  assertAbsent(ownershipRequest.id);
+  f.sqlite
+    .prepare('UPDATE documents SET owner_id=? WHERE id=?')
+    .run(stored.user_id, documentId);
+
+  const committed = payload();
+  const revokeAfterCommit = interceptRevisionInsert(
+    f.db,
+    () => {
+      f.sqlite
+        .prepare('UPDATE publishing_tokens SET revoked_at=1 WHERE id=?')
+        .run(reviser.credential.id);
+    },
+    'after',
+  );
+  assert.equal((await send(committed, revokeAfterCommit)).status, 401);
+  assert.equal(
+    (
+      f.sqlite
+        .prepare('SELECT count(*) AS count FROM document_revisions WHERE id=?')
+        .get(committed.id) as { count: number }
+    ).count,
+    1,
+  );
+  assert.equal(
+    (
+      f.sqlite
+        .prepare(
+          'SELECT count(*) AS count FROM notification_events WHERE revision_id=?',
+        )
+        .get(committed.id) as { count: number }
+    ).count,
+    1,
+  );
+  const replacement = await f.credential(ownerCookie, {
+    name: 'Recuperação',
+    scope: 'plan_revise',
+    documentId,
+  });
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${documentId}/revisions/${committed.id}`,
+        replacement.token,
+      )
+    ).status,
+    200,
+  );
 });

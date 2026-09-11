@@ -65,7 +65,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
   const opened = openNodeSqlite(database, { create: true });
   const first = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(first.pending, []);
-  assert.equal(first.applied.length, 14);
+  assert.equal(first.applied.length, 15);
   const second = migrateNodeDatabase(opened.sqlite);
   assert.deepEqual(second.applied, first.applied);
   opened.sqlite.close();
@@ -75,7 +75,7 @@ void test('Node migration ledger persists, is idempotent, and rejects unknown st
     restarted.sqlite
       .prepare('SELECT count(*) AS count FROM _md_colab_migrations')
       .get()?.count,
-    14,
+    15,
   );
   restarted.sqlite.close();
 
@@ -409,6 +409,10 @@ void test('restore is isolated and invalidates snapshot access artifacts', async
       VALUES('comment','doc','guest','Review','',NULL,'2026-09-10T00:00:02Z');
     INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
       VALUES('credential','owner','CLI','hash','2026-09-10T00:00:00Z',9999999999,NULL);
+    INSERT INTO publishing_tokens(id,user_id,name,token_hash,scope,document_id,created_at,expires_at,revoked_at)
+      VALUES
+        ('reader','owner','Reader','reader-hash','plan_read','doc','2026-09-10T00:00:00Z',9999999999,NULL),
+        ('reviser','owner','Reviser','reviser-hash','plan_revise','doc','2026-09-10T00:00:00Z',9999999999,NULL);
     INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
       VALUES('publication','doc','owner','credential','key','payload','2026-09-10T00:00:03Z');
     INSERT INTO sessions(token_hash,user_id,expires_at)
@@ -431,7 +435,7 @@ void test('restore is isolated and invalidates snapshot access artifacts', async
     now: 42,
   });
   assert.equal(result.revokedShares, 1);
-  assert.equal(result.revokedCredentials, 1);
+  assert.equal(result.revokedCredentials, 3);
   assert.equal(statSync(restorePath).mode & 0o777, 0o600);
   assert.equal(
     result.sha256,
@@ -452,14 +456,22 @@ void test('restore is isolated and invalidates snapshot access artifacts', async
     42,
   );
   assert.deepEqual(
-    {
-      ...(restored.sqlite
-        .prepare(
-          "SELECT scope,document_id FROM publishing_tokens WHERE id='credential'",
-        )
-        .get() as Record<string, unknown>),
-    },
-    { scope: 'publish', document_id: null },
+    restored.sqlite
+      .prepare(
+        'SELECT id,scope,document_id,revoked_at FROM publishing_tokens ORDER BY id',
+      )
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      { id: 'credential', scope: 'publish', document_id: null, revoked_at: 42 },
+      { id: 'reader', scope: 'plan_read', document_id: 'doc', revoked_at: 42 },
+      {
+        id: 'reviser',
+        scope: 'plan_revise',
+        document_id: 'doc',
+        revoked_at: 42,
+      },
+    ],
   );
   assert.equal(
     restored.sqlite.prepare('SELECT count(*) AS count FROM publications').get()
@@ -511,6 +523,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0011_tiny_valeria_richards',
     '0012_previous_lifeguard',
     '0013_tiny_daredevil',
+    '0014_plan_revise',
   ]);
   const upgraded = openNodeSqlite(activePath);
   migrateNodeDatabase(upgraded.sqlite);
@@ -536,6 +549,7 @@ void test('a verified pre-upgrade backup restores separately and requires explic
     '0011_tiny_valeria_richards',
     '0012_previous_lifeguard',
     '0013_tiny_daredevil',
+    '0014_plan_revise',
   ]);
   assert.throws(
     () => openPersistentD1(restorePath),

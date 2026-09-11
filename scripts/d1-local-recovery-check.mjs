@@ -46,6 +46,7 @@ const currentMigrations = [
   '0011_tiny_valeria_richards.sql',
   '0012_previous_lifeguard.sql',
   '0013_tiny_daredevil.sql',
+  '0014_plan_revise.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -68,6 +69,7 @@ const ids = {
   comment: '00000000-0000-4000-8000-000000000301',
   credential: '00000000-0000-4000-8000-000000000401',
   readerCredential: '00000000-0000-4000-8000-000000000402',
+  reviserCredential: '00000000-0000-4000-8000-000000000403',
   publication: '00000000-0000-4000-8000-000000000501',
   revision2: '00000000-0000-4000-8000-000000000601',
   revision3: '00000000-0000-4000-8000-000000000602',
@@ -177,6 +179,10 @@ INSERT INTO publishing_tokens(
   id,user_id,name,token_hash,scope,document_id,created_at,expires_at,revoked_at
 ) VALUES('${ids.readerCredential}','${ids.owner}','Synthetic plan reader','reader-hash',
   'plan_read','${ids.document}','2026-09-10T00:03:30.000Z',1900000000,NULL);
+INSERT INTO publishing_tokens(
+  id,user_id,name,token_hash,scope,document_id,created_at,expires_at,revoked_at
+) VALUES('${ids.reviserCredential}','${ids.owner}','Synthetic plan reviser','reviser-hash',
+  'plan_revise','${ids.document}','2026-09-10T00:03:40.000Z',1900000000,NULL);
 INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
 VALUES('${ids.publication}','${ids.document}','${ids.owner}','${ids.credential}','synthetic-idempotency-hash','synthetic-payload-digest','2026-09-10T00:04:00.000Z');
 `;
@@ -212,6 +218,8 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT document_id FROM publishing_tokens WHERE id='${ids.credential}') AS legacy_credential_document,
       (SELECT scope FROM publishing_tokens WHERE id='${ids.readerCredential}') AS reader_credential_scope,
       (SELECT document_id FROM publishing_tokens WHERE id='${ids.readerCredential}') AS reader_credential_document,
+      (SELECT scope FROM publishing_tokens WHERE id='${ids.reviserCredential}') AS reviser_credential_scope,
+      (SELECT document_id FROM publishing_tokens WHERE id='${ids.reviserCredential}') AS reviser_credential_document,
       (SELECT title FROM documents WHERE id='${ids.document}') AS marker,
       (SELECT current_revision_id FROM documents WHERE id='${ids.document}') AS current_revision_id,
       (SELECT base_revision_id FROM document_revisions WHERE id='${ids.revision2}') AS revision2_base,
@@ -278,7 +286,9 @@ function verifyFixture(environment, marker = 'source-marker') {
     row.legacy_credential_scope === 'publish' &&
       row.legacy_credential_document === null &&
       row.reader_credential_scope === 'plan_read' &&
-      row.reader_credential_document === ids.document,
+      row.reader_credential_document === ids.document &&
+      row.reviser_credential_scope === 'plan_revise' &&
+      row.reviser_credential_document === ids.document,
     'Escopo ou vinculo de credencial divergente.',
   );
   assert(row.marker === `${marker}-v3`, 'Projecao atual do banco divergente.');

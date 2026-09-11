@@ -376,14 +376,76 @@ export async function handleApi(
     if (path[0] === 'agent') {
       if (config.testMode)
         throw new HttpError(404, 'Leitura de feedback indisponível.');
-      if (request.method !== 'GET')
-        throw new HttpError(405, 'A API de feedback é somente leitura.');
       const [, collection, id, action, resource, revisionId] = path;
       if (collection !== 'documents' || !id)
         throw new HttpError(404, 'Página não encontrada.');
-      const credential = await publishing.authenticate(request, 'plan_read');
-      const feedback = new FeedbackService(values.DB, credential);
+      if (request.method === 'POST') {
+        if (action !== 'revisions' || resource || revisionId)
+          throw new HttpError(405, 'Ação de agente indisponível.');
+        if ([...url.searchParams.keys()].length > 0)
+          throw new HttpError(400, 'Parâmetros de revisão inválidos.');
+        const credential = await publishing.authenticate(
+          request,
+          'plan_revise',
+        );
+        if (credential.documentId !== id)
+          throw new HttpError(
+            401,
+            'Credencial de publicação inválida ou ausente.',
+          );
+        if (!auth.canCreate(credential.viewer))
+          throw new HttpError(
+            403,
+            'Sua conta não está habilitada para publicar revisões.',
+          );
+        const service = new DocumentService(
+          values.DB,
+          credential.viewer,
+          values,
+        );
+        const result = await service.createRevision(
+          id,
+          await inputFrom(request, 2 * 1024 * 1024),
+          {
+            credentialId: credential.credentialId,
+            tokenHash: credential.tokenHash,
+          },
+        );
+        const currentPublishing = new PublicationService(
+          values.DB,
+          authConfig(values),
+          undefined,
+          values,
+        );
+        const currentCredential = await currentPublishing.authenticate(
+          request,
+          'plan_revise',
+        );
+        const currentAuth = new AuthService(
+          values.DB,
+          authConfig(values),
+          configuredMailer,
+        );
+        if (
+          currentCredential.credentialId !== credential.credentialId ||
+          currentCredential.viewer.id !== credential.viewer.id ||
+          currentCredential.documentId !== credential.documentId ||
+          !currentAuth.canCreate(currentCredential.viewer)
+        )
+          throw new HttpError(
+            403,
+            'Sua conta não está mais habilitada para publicar esta revisão.',
+          );
+        return json({ revision: result.revision }, result.replayed ? 200 : 201);
+      }
+      if (request.method !== 'GET')
+        throw new HttpError(405, 'Ação de agente indisponível.');
       if (action === 'feedback' && !resource && !revisionId) {
+        const credential = await publishing.authenticate(request, [
+          'plan_read',
+          'plan_revise',
+        ]);
+        const feedback = new FeedbackService(values.DB, credential);
         const query = feedbackQuery(url.searchParams, {
           stampRequired: false,
           cursorAllowed: false,
@@ -395,6 +457,11 @@ export async function handleApi(
         (resource === 'comments' || resource === 'events') &&
         !revisionId
       ) {
+        const credential = await publishing.authenticate(request, [
+          'plan_read',
+          'plan_revise',
+        ]);
+        const feedback = new FeedbackService(values.DB, credential);
         const query = feedbackQuery(url.searchParams, {
           stampRequired: true,
           cursorAllowed: true,
@@ -406,11 +473,55 @@ export async function handleApi(
         );
       }
       if (action === 'revisions' && resource && !revisionId) {
-        const query = feedbackQuery(url.searchParams, {
-          stampRequired: true,
-          cursorAllowed: false,
-        });
-        return json(await feedback.revision(id, resource, query.stamp!));
+        if (url.searchParams.has('stamp')) {
+          const credential = await publishing.authenticate(request, [
+            'plan_read',
+            'plan_revise',
+          ]);
+          const feedback = new FeedbackService(values.DB, credential);
+          const query = feedbackQuery(url.searchParams, {
+            stampRequired: true,
+            cursorAllowed: false,
+          });
+          return json(await feedback.revision(id, resource, query.stamp!));
+        }
+        if ([...url.searchParams.keys()].length > 0)
+          throw new HttpError(400, 'Parâmetros de recibo inválidos.');
+        const credential = await publishing.authenticate(
+          request,
+          'plan_revise',
+        );
+        if (credential.documentId !== id)
+          throw new HttpError(
+            401,
+            'Credencial de publicação inválida ou ausente.',
+          );
+        const service = new DocumentService(
+          values.DB,
+          credential.viewer,
+          values,
+        );
+        const receipt = await service.revision(id, resource);
+        const currentPublishing = new PublicationService(
+          values.DB,
+          authConfig(values),
+          undefined,
+          values,
+        );
+        const currentCredential = await currentPublishing.authenticate(
+          request,
+          'plan_revise',
+        );
+        if (
+          currentCredential.credentialId !== credential.credentialId ||
+          currentCredential.viewer.id !== credential.viewer.id ||
+          currentCredential.documentId !== credential.documentId
+        )
+          throw new HttpError(
+            401,
+            'Credencial de publicação inválida ou ausente.',
+          );
+        return json({ revision: receipt });
       }
       throw new HttpError(404, 'Página não encontrada.');
     }
