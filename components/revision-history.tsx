@@ -78,13 +78,16 @@ export function RevisionHistory({
   );
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [selectionError, setSelectionError] = useState('');
+  const [selectionRetry, setSelectionRetry] = useState(0);
   const [comparisonId, setComparisonId] = useState<string | null>(null);
   const [comparison, setComparison] = useState<DocumentRevisionReceipt | null>(
     null,
   );
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState('');
+  const [comparisonRetry, setComparisonRetry] = useState(0);
   const [currentLoading, setCurrentLoading] = useState(false);
+  const [currentError, setCurrentError] = useState('');
 
   const handleReadError = useCallback(
     (cause: unknown, setMessage: (message: string) => void) => {
@@ -95,6 +98,27 @@ export function RevisionHistory({
       setMessage(errorText(cause));
     },
     [onProtectedError],
+  );
+
+  const handleSnapshotReadError = useCallback(
+    async (
+      cause: unknown,
+      isCurrent: () => boolean,
+      setMessage: (message: string) => void,
+    ) => {
+      if (!(cause instanceof ApiError) || cause.status !== 404) {
+        if (isCurrent()) handleReadError(cause, setMessage);
+        return;
+      }
+      try {
+        await api<unknown>(`documents/${document.id}`);
+        if (isCurrent())
+          setMessage('Esta revisão não está disponível neste plano.');
+      } catch (accessCause) {
+        if (isCurrent()) handleReadError(accessCause, setMessage);
+      }
+    },
+    [document.id, handleReadError],
   );
 
   const loadHistory = useCallback(
@@ -187,6 +211,7 @@ export function RevisionHistory({
     setComparisonId(null);
     setComparison(null);
     setComparisonError('');
+    setCurrentError('');
     void loadHistory('initial');
   }, [context, loadHistory]);
 
@@ -199,6 +224,7 @@ export function RevisionHistory({
     setComparisonId(null);
     setComparison(null);
     setComparisonError('');
+    setCurrentError('');
     if (!revisionId) {
       setSelected(null);
       setSelectionLoading(false);
@@ -207,48 +233,37 @@ export function RevisionHistory({
     }
     setSelectionLoading(true);
     void (async () => {
+      const isCurrent = () =>
+        revisionReadMatches(
+          attempt,
+          selectionRequest.current,
+          contextRef.current,
+          revisionId,
+        );
       try {
         const receipt = revisionFromResponse(
           await api<unknown>(
             `documents/${document.id}/revisions/${revisionId}`,
           ),
         );
-        if (
-          !revisionReadMatches(
-            attempt,
-            selectionRequest.current,
-            contextRef.current,
-            revisionId,
-          )
-        )
-          return;
+        if (!isCurrent()) return;
         if (receipt.document_id !== document.id || receipt.id !== revisionId)
           throw new Error('O servidor retornou outro snapshot de revisão.');
         setSelected(receipt);
         setComparisonId(receipt.base_revision_id);
       } catch (cause) {
-        if (
-          revisionReadMatches(
-            attempt,
-            selectionRequest.current,
-            contextRef.current,
-            revisionId,
-          )
-        )
-          handleReadError(cause, setSelectionError);
+        await handleSnapshotReadError(cause, isCurrent, setSelectionError);
       } finally {
-        if (
-          revisionReadMatches(
-            attempt,
-            selectionRequest.current,
-            contextRef.current,
-            revisionId,
-          )
-        )
-          setSelectionLoading(false);
+        if (isCurrent()) setSelectionLoading(false);
       }
     })();
-  }, [context, document.id, handleReadError, revisionId]);
+  }, [
+    context,
+    document.id,
+    handleSnapshotReadError,
+    revisionId,
+    selectionRetry,
+  ]);
 
   useEffect(() => {
     const request = ++comparisonRequest.current;
@@ -268,49 +283,39 @@ export function RevisionHistory({
     const attempt = { request, context, revisionId: comparisonId };
     setComparisonLoading(true);
     void (async () => {
+      const isCurrent = () =>
+        revisionReadMatches(
+          attempt,
+          comparisonRequest.current,
+          contextRef.current,
+          comparisonId,
+        );
       try {
         const receipt = revisionFromResponse(
           await api<unknown>(
             `documents/${document.id}/revisions/${comparisonId}`,
           ),
         );
-        if (
-          !revisionReadMatches(
-            attempt,
-            comparisonRequest.current,
-            contextRef.current,
-            comparisonId,
-          )
-        )
-          return;
+        if (!isCurrent()) return;
         if (receipt.document_id !== document.id || receipt.id !== comparisonId)
           throw new Error(
             'O servidor retornou outro snapshot para comparação.',
           );
         setComparison(receipt);
       } catch (cause) {
-        if (
-          revisionReadMatches(
-            attempt,
-            comparisonRequest.current,
-            contextRef.current,
-            comparisonId,
-          )
-        )
-          handleReadError(cause, setComparisonError);
+        await handleSnapshotReadError(cause, isCurrent, setComparisonError);
       } finally {
-        if (
-          revisionReadMatches(
-            attempt,
-            comparisonRequest.current,
-            contextRef.current,
-            comparisonId,
-          )
-        )
-          setComparisonLoading(false);
+        if (isCurrent()) setComparisonLoading(false);
       }
     })();
-  }, [comparisonId, context, document.id, handleReadError, selected]);
+  }, [
+    comparisonId,
+    comparisonRetry,
+    context,
+    document.id,
+    handleSnapshotReadError,
+    selected,
+  ]);
 
   const orderedComparison = useMemo(() => {
     if (!selected || !comparison) return null;
@@ -339,12 +344,12 @@ export function RevisionHistory({
   async function returnCurrent() {
     if (currentLoading) return;
     setCurrentLoading(true);
-    setSelectionError('');
+    setCurrentError('');
     try {
       await onReloadCurrent();
       onNavigate(null);
     } catch (cause) {
-      handleReadError(cause, setSelectionError);
+      handleReadError(cause, setCurrentError);
     } finally {
       setCurrentLoading(false);
     }
@@ -477,6 +482,14 @@ export function RevisionHistory({
               </button>
             </div>
           </div>
+          {currentError && (
+            <p role="alert" className="form-error">
+              {currentError}{' '}
+              <button type="button" onClick={() => void returnCurrent()}>
+                Tentar novamente
+              </button>
+            </p>
+          )}
           {selectionLoading && (
             <p>
               <LoaderCircle className="spin" size={16} /> Carregando snapshot
@@ -485,7 +498,15 @@ export function RevisionHistory({
           )}
           {selectionError && (
             <p role="alert" className="form-error">
-              {selectionError}
+              {selectionError}{' '}
+              {revisionId && (
+                <button
+                  type="button"
+                  onClick={() => setSelectionRetry((value) => value + 1)}
+                >
+                  Tentar novamente
+                </button>
+              )}
             </p>
           )}
           {selected && (
@@ -572,7 +593,13 @@ export function RevisionHistory({
                 )}
                 {comparisonError && (
                   <p role="alert" className="form-error">
-                    {comparisonError}
+                    {comparisonError}{' '}
+                    <button
+                      type="button"
+                      onClick={() => setComparisonRetry((value) => value + 1)}
+                    >
+                      Tentar novamente
+                    </button>
                   </p>
                 )}
                 {orderedComparison && (
