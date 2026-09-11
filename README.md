@@ -152,8 +152,12 @@ resumo e indicar raízes ou respostas consideradas para publicar uma revisão
 sobre a base que viu. Conflitos preservam a tentativa e exigem atualizar a base
 e publicar de novo explicitamente; um UUID identifica o recibo exato. Críticas
 antigas abrem o snapshot de origem em um painel somente leitura. Histórico e
-diff entre revisões, links próprios de revisão e novos avisos ficam para as
-próximas fatias de #5; o envelope legado de publicação continua igual.
+metadados são paginados; cada snapshot pode ser aberto por um link próprio e
+comparado localmente, linha a linha, com outra revisão carregada. Comparações
+grandes exibem um limite explícito e mantêm os dois originais acessíveis. Abrir,
+comparar ou atualizar o histórico não altera rascunho, referência ou publicação
+pendente. Novos avisos sobre críticas antigas ficam para a próxima fatia de #5;
+o envelope legado de publicação continua igual.
 
 O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
 conversa idênticos. A listagem continua paginada pela sequência persistida; quando
@@ -377,6 +381,7 @@ identidades forjadas, origem da solicitação e recuperação de falha de envio.
 ## Organização
 
 - `components/document-workspace.tsx`: importação, leitura, compartilhamento e comentários.
+- `components/revision-history.tsx`: histórico, snapshots exatos e comparação local limitada.
 - `components/email-login.tsx`: solicitação de link e confirmação de acesso.
 - `lib/document-service.ts`: consultas e permissões por documento.
 - `lib/auth-service.ts`: links de acesso, sessões e limites.
@@ -385,4 +390,4 @@ identidades forjadas, origem da solicitação e recuperação de falha de envio.
 - `app/api/[...path]/route.ts`: integração da API com o ambiente hospedado.
 - `db/schema.ts` e `drizzle/`: schema e migrações.
 
-MCP, editor, versionamento e funcionalidades de IA ficam para outra etapa.
+MCP, editor e funcionalidades de IA ficam para outra etapa.

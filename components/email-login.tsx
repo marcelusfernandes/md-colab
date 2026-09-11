@@ -8,11 +8,15 @@ export function EmailLogin({
   authorMode = 'allowlist',
   commentId,
   documentId,
+  revisionId,
+  destinationError,
   mode = 'email',
 }: {
   authorMode?: 'allowlist' | 'open';
   commentId?: string;
   documentId?: string;
+  revisionId?: string;
+  destinationError?: string;
   mode?: 'email' | 'test';
 }) {
   const [email, setEmail] = useState('');
@@ -31,6 +35,7 @@ export function EmailLogin({
           email,
           documentId,
           commentId,
+          revisionId,
         });
         window.location.assign(result.redirect);
         return;
@@ -39,6 +44,7 @@ export function EmailLogin({
         email,
         documentId,
         commentId,
+        revisionId,
       });
       setMessage(result.message);
     } catch (e) {
@@ -67,6 +73,11 @@ export function EmailLogin({
               : 'Informe seu e-mail para acessar seus planos e os compartilhados com você. Você receberá um link para entrar, sem senha.'}
       </p>
       <form className="login-form" onSubmit={(event) => void submit(event)}>
+        {destinationError && (
+          <p role="alert" className="form-error">
+            {destinationError}
+          </p>
+        )}
         <label htmlFor="login-email">Seu e-mail</label>
         <input
           id="login-email"
