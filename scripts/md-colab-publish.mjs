@@ -257,19 +257,32 @@ function validateOperation(value) {
   return value;
 }
 
-async function readOperation(operationPath) {
+function unreadableOperation() {
+  return new CliError(
+    'O arquivo de operação é inválido e não foi sobrescrito.',
+  );
+}
+
+async function readOperationFromStat(operationPath, stat) {
   try {
-    const stat = await lstat(operationPath);
     if (!stat.isFile() || stat.size > MAX_STATE_BYTES)
       throw new CliError('O arquivo de operação é inválido.');
     const source = await readFile(operationPath, 'utf8');
     return validateOperation(JSON.parse(source));
   } catch (error) {
     if (error instanceof CliError) throw error;
-    throw new CliError(
-      'O arquivo de operação é inválido e não foi sobrescrito.',
-    );
+    throw unreadableOperation();
   }
+}
+
+async function readOperation(operationPath) {
+  let stat;
+  try {
+    stat = await lstat(operationPath);
+  } catch {
+    throw unreadableOperation();
+  }
+  return readOperationFromStat(operationPath, stat);
 }
 
 async function syncDirectory(directory) {
@@ -355,18 +368,15 @@ async function createOperationExclusive(operationPath, operation) {
 }
 
 async function loadOrCreateOperation(operationPath, operation) {
+  let stat;
   try {
-    return await readOperation(operationPath);
+    stat = await lstat(operationPath);
   } catch (error) {
-    if (!(error instanceof CliError)) throw error;
-    try {
-      await lstat(operationPath);
-      throw error;
-    } catch (statError) {
-      if (statError?.code !== 'ENOENT') throw error;
-    }
+    if (error?.code === 'ENOENT')
+      return createOperationExclusive(operationPath, operation);
+    throw unreadableOperation();
   }
-  return createOperationExclusive(operationPath, operation);
+  return readOperationFromStat(operationPath, stat);
 }
 
 function assertOperationMatches(operation, input) {
