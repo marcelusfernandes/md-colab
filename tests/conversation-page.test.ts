@@ -5,9 +5,11 @@ import {
   conversationChangesFromResponse,
   conversationHistoryAttemptMatches,
   conversationPageFromResponse,
+  conversationReplyPageRequestMatches,
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
   mergeConversationEventState,
+  mergeConversationReplyPageForAttempt,
   nextConversationHistoryRequest,
 } from '../lib/conversation-page.ts';
 import type { ConversationEventRow, ConversationRow } from '../lib/document-service.ts';
@@ -174,4 +176,99 @@ void test('lookup de evento antigo não regride estado canônico mais novo', () 
     }).version,
     3,
   );
+});
+
+void test('página dirigida tardia não atravessa reset, sessão ou janela da coleção', async () => {
+  const reply = {
+    ...root,
+    id: '00000000-0000-4000-8000-000000000002',
+    root_id: root.id,
+  };
+  const conversation = (repliesCursor: string) =>
+    ({
+      root,
+      replies: [],
+      repliesCursor,
+      replyCount: 210,
+      state: 'open',
+      decision: null,
+      decisionReason: null,
+      version: 0,
+    }) as ConversationRow;
+  const attempt = {
+    origin: 'directed' as const,
+    documentId: 'document-a',
+    viewerId: 'viewer-a',
+    rootId: root.id,
+    cursor: 'cursor-before-101',
+    commentId: reply.id,
+    request: 7,
+  };
+  let current = conversation('cursor-before-101');
+  let currentRequest = 7;
+  let releasePage!: (page: {
+    replies: (typeof reply)[];
+    nextCursor: string;
+  }) => void;
+  const response = new Promise<{ replies: typeof reply[]; nextCursor: string }>(
+    (resolve) => {
+      releasePage = resolve;
+    },
+  );
+  const pending = response.then((page) => {
+    current = mergeConversationReplyPageForAttempt(
+      attempt,
+      {
+        origin: 'directed',
+        documentId: 'document-a',
+        viewerId: 'viewer-a',
+        rootId: current.root.id,
+        cursor: current.repliesCursor,
+        commentId: reply.id,
+        request: currentRequest,
+      },
+      current,
+      page,
+    );
+  });
+  current = conversation('cursor-before-161');
+  currentRequest += 1;
+  releasePage({ replies: [reply], nextCursor: 'cursor-before-51' });
+  await pending;
+  assert.equal(current.repliesCursor, 'cursor-before-161');
+  assert.deepEqual(current.replies, []);
+
+  const collection = conversation('cursor-before-151');
+  assert.equal(
+    mergeConversationReplyPageForAttempt(
+      attempt,
+      {
+        origin: 'collection',
+        documentId: 'document-a',
+        viewerId: 'viewer-a',
+        rootId: root.id,
+        cursor: collection.repliesCursor,
+        commentId: null,
+        request: attempt.request,
+      },
+      collection,
+      { replies: [reply], nextCursor: 'cursor-before-51' },
+    ),
+    collection,
+  );
+
+  let surfacedError = '';
+  await Promise.reject(new Error('late failure')).catch((cause) => {
+    if (
+      conversationReplyPageRequestMatches(attempt, {
+        origin: 'directed',
+        documentId: 'document-a',
+        viewerId: 'viewer-b',
+        commentId: '00000000-0000-4000-8000-000000000003',
+        request: attempt.request + 1,
+      })
+    )
+      surfacedError = String(cause);
+  });
+  assert.equal(surfacedError, '');
 });

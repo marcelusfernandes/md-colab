@@ -83,10 +83,11 @@ import {
   conversationFilters,
   conversationHistoryAttemptMatches,
   conversationPageFromResponse,
+  conversationReplyPageRequestMatches,
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
   mergeConversationEventState,
-  mergeConversationReplies,
+  mergeConversationReplyPageForAttempt,
   nextConversationHistoryRequest,
 } from '@/lib/conversation-page';
 import {
@@ -257,6 +258,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     commentId: string;
     replyIds: string[];
   } | null>(null);
+  const collectionReplyRequest = useRef(0);
+  const directedReplyRequest = useRef(0);
   const directedTargetElement = useRef<HTMLElement | null>(null);
   const conversationOperationRef = useRef<ConversationOperation | null>(null);
   const conversationGeneration = useRef(0);
@@ -406,10 +409,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       directedCommentIdRef.current = parsed.id;
       directedCommentContextRef.current = null;
       directedRecentWindowRef.current = null;
+      collectionReplyRequest.current += 1;
+      directedReplyRequest.current += 1;
       setDirectedCommentId(parsed.id);
       setDirectedCommentContext(null);
       setDirectedCommentLoading(false);
       setDirectedCommentError(parsed.error);
+      setBusy((current) =>
+        current.startsWith('collection-replies:') ||
+        current.startsWith('directed-replies:')
+          ? ''
+          : current,
+      );
       if (push) {
         const url = new URL(window.location.href);
         if (parsed.id) url.searchParams.set('comment', parsed.id);
@@ -573,11 +584,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       directedCommentRequest.current += 1;
       directedCommentContextRef.current = null;
       directedRecentWindowRef.current = null;
+      collectionReplyRequest.current += 1;
+      directedReplyRequest.current += 1;
       setDirectedCommentContext(null);
       setDirectedCommentLoading(false);
       commentSendRequest.current += 1;
       setBusy((current) =>
-        current === 'comment' || current === 'comment-lookup' ? '' : current,
+        current === 'comment' ||
+        current === 'comment-lookup' ||
+        current.startsWith('collection-replies:') ||
+        current.startsWith('directed-replies:')
+          ? ''
+          : current,
       );
       activeDocumentId.current = null;
       setDoc(null);
@@ -636,6 +654,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
 
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
+    collectionReplyRequest.current += 1;
+    directedReplyRequest.current += 1;
+    setBusy((current) =>
+      current.startsWith('collection-replies:') ||
+      current.startsWith('directed-replies:')
+        ? ''
+        : current,
+    );
     documentsGeneration.current += 1;
     documentsPageRequest.current += 1;
     documentsPageInProgress.current = false;
@@ -1052,6 +1078,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const loadConversationPage = useCallback(
     async (filter: ConversationFilter, append = false) => {
       if (!doc || !viewer) return false;
+      collectionReplyRequest.current += 1;
+      setBusy((current) =>
+        current.startsWith('collection-replies:') ? '' : current,
+      );
       const cursor = append ? conversationsNextCursor.current : null;
       if (append && !cursor) return false;
       const generation = conversationGeneration.current;
@@ -1175,6 +1205,12 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         commentId: attempt.commentId,
         replyIds: context.conversation.replies.map((reply) => reply.id),
       };
+      if (reconciled.reset) {
+        directedReplyRequest.current += 1;
+        setBusy((current) =>
+          current.startsWith('directed-replies:') ? '' : current,
+        );
+      }
       setDirectedCommentContext(reconciled.context);
       if (reconciled.reset)
         setNotice(
@@ -1192,6 +1228,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           if (!isCurrent()) return false;
           directedCommentContextRef.current = null;
           directedRecentWindowRef.current = null;
+          directedReplyRequest.current += 1;
+          setBusy((current) =>
+            current.startsWith('directed-replies:') ? '' : current,
+          );
           setDirectedCommentContext(null);
           setDirectedCommentError(
             'Este comentário não está disponível neste documento. Você pode voltar à coleção ou tentar novamente.',
@@ -2389,8 +2429,39 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
   }
   async function loadConversationReplies(conversation: ConversationRow) {
-    if (!doc || !conversation.repliesCursor || busy) return;
-    setBusy(`replies:${conversation.root.id}`);
+    if (!doc || !viewer || !conversation.repliesCursor || busy) return;
+    const directedId = directedCommentIdRef.current;
+    const directedContext = directedCommentContextRef.current;
+    const origin = directedId ? 'directed' : 'collection';
+    if (
+      origin === 'directed' &&
+      (directedContext?.conversation.root.id !== conversation.root.id ||
+        directedContext.conversation.repliesCursor !==
+          conversation.repliesCursor)
+    )
+      return;
+    const requestRef =
+      origin === 'directed' ? directedReplyRequest : collectionReplyRequest;
+    const attempt = {
+      origin,
+      documentId: doc.id,
+      viewerId: viewer.id,
+      rootId: conversation.root.id,
+      cursor: conversation.repliesCursor,
+      commentId: origin === 'directed' ? directedId : null,
+      request: ++requestRef.current,
+    } as const;
+    const busyKey = `${origin}-replies:${conversation.root.id}`;
+    const requestIsCurrent = () =>
+      mounted.current &&
+      conversationReplyPageRequestMatches(attempt, {
+        origin: directedCommentIdRef.current ? 'directed' : 'collection',
+        documentId: activeDocumentId.current,
+        viewerId: activeViewerId.current,
+        commentId: directedCommentIdRef.current,
+        request: requestRef.current,
+      });
+    setBusy(busyKey);
     try {
       const page = conversationRepliesFromResponse(
         await api<unknown>(
@@ -2401,35 +2472,59 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         ),
         conversation.root.id,
       );
-      if (!mounted.current || activeDocumentId.current !== doc.id) return;
-      setConversationRows((current) =>
-        current.map((entry) =>
-          entry.root.id === conversation.root.id
-            ? mergeConversationReplies(entry, page.replies, page.nextCursor)
-            : entry,
-        ),
-      );
-      const currentDirected = directedCommentContextRef.current;
-      if (currentDirected?.conversation.root.id === conversation.root.id) {
+      if (!requestIsCurrent()) return;
+      if (origin === 'directed') {
+        const currentDirected = directedCommentContextRef.current;
+        if (!currentDirected) return;
+        const merged = mergeConversationReplyPageForAttempt(
+          attempt,
+          {
+            origin,
+            documentId: activeDocumentId.current,
+            viewerId: activeViewerId.current,
+            rootId: currentDirected.conversation.root.id,
+            cursor: currentDirected.conversation.repliesCursor,
+            commentId: directedCommentIdRef.current,
+            request: directedReplyRequest.current,
+          },
+          currentDirected.conversation,
+          page,
+        );
+        if (merged === currentDirected.conversation) return;
         const nextDirected = {
           ...currentDirected,
-          conversation: mergeConversationReplies(
-            currentDirected.conversation,
-            page.replies,
-            page.nextCursor,
-          ),
+          conversation: merged,
         };
         directedCommentContextRef.current = nextDirected;
         setDirectedCommentContext(nextDirected);
+      } else {
+        setConversationRows((current) =>
+          current.map((entry) =>
+            mergeConversationReplyPageForAttempt(
+              attempt,
+              {
+                origin,
+                documentId: activeDocumentId.current,
+                viewerId: activeViewerId.current,
+                rootId: entry.root.id,
+                cursor: entry.repliesCursor,
+                commentId: null,
+                request: collectionReplyRequest.current,
+              },
+              entry,
+              page,
+            ),
+          ),
+        );
       }
     } catch (cause) {
+      if (!requestIsCurrent()) return;
       if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
         hideProtectedContent(cause);
       else setConversationsError(errorText(cause));
     } finally {
-      setBusy((current) =>
-        current === `replies:${conversation.root.id}` ? '' : current,
-      );
+      if (requestIsCurrent())
+        setBusy((current) => (current === busyKey ? '' : current));
     }
   }
   async function loadConversationHistory(rootId: string, append = false) {
