@@ -41,6 +41,7 @@ const currentMigrations = [
   '0007_nifty_iron_man.sql',
   '0008_lethal_ultron.sql',
   '0009_slimy_kingpin.sql',
+  '0010_serious_dazzler.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -63,6 +64,8 @@ const ids = {
   comment: '00000000-0000-4000-8000-000000000301',
   credential: '00000000-0000-4000-8000-000000000401',
   publication: '00000000-0000-4000-8000-000000000501',
+  revision2: '00000000-0000-4000-8000-000000000601',
+  revision3: '00000000-0000-4000-8000-000000000602',
 };
 
 function privateFile(path, content) {
@@ -126,6 +129,14 @@ VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Sy
 INSERT INTO comments(id,document_id,author_id,body,quote,source_start,source_revision_id,created_at)
 VALUES('${ids.comment}','${ids.document}','${ids.guest}','Synthetic comment','Synthetic plan',2,'${ids.document}','2026-09-10T00:02:00.000Z')
 ON CONFLICT(id) DO NOTHING;
+INSERT INTO document_revisions
+  (id,document_id,ordinal,author_id,title,filename,markdown,base_revision_id,summary,considered_comment_ids,created_at)
+VALUES
+  ('${ids.revision2}','${ids.document}',2,'${ids.owner}','${marker}-v2','plan-v2.md','# Synthetic v2','${ids.document}','Considered guest feedback','["${ids.comment}"]','2026-09-10T00:02:30.000Z');
+INSERT INTO document_revisions
+  (id,document_id,ordinal,author_id,title,filename,markdown,base_revision_id,summary,considered_comment_ids,created_at)
+VALUES
+  ('${ids.revision3}','${ids.document}',3,'${ids.owner}','${marker}-v3','plan-v3.md','# Synthetic v3','${ids.revision2}',NULL,'[]','2026-09-10T00:02:45.000Z');
 INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
 VALUES('${ids.credential}','${ids.owner}','Revoked synthetic credential','${revokedHash}','2026-09-10T00:03:00.000Z',1900000000,1789014000);
 INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
@@ -150,6 +161,11 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT source_revision_id FROM comments WHERE id='${ids.comment}') AS comment_revision_id,
       (SELECT publishing_token_id FROM publications WHERE id='${ids.publication}') AS publication_token_id,
       (SELECT title FROM documents WHERE id='${ids.document}') AS marker,
+      (SELECT current_revision_id FROM documents WHERE id='${ids.document}') AS current_revision_id,
+      (SELECT base_revision_id FROM document_revisions WHERE id='${ids.revision2}') AS revision2_base,
+      (SELECT summary FROM document_revisions WHERE id='${ids.revision2}') AS revision2_summary,
+      (SELECT considered_comment_ids FROM document_revisions WHERE id='${ids.revision2}') AS revision2_refs,
+      (SELECT base_revision_id FROM document_revisions WHERE id='${ids.revision3}') AS revision3_base,
       EXISTS(SELECT 1 FROM shares WHERE document_id='${ids.document}' AND email='guest@example.test') AS guest_grant,
       EXISTS(SELECT 1 FROM shares WHERE document_id='${ids.document}' AND email='stranger@example.test') AS stranger_grant`,
   ).results;
@@ -160,7 +176,7 @@ function verifyFixture(environment, marker = 'source-marker') {
     row.documents_count === 1 && row.comments_count === 1,
     'Plano/comentario divergentes.',
   );
-  assert(row.revisions_count === 1, 'Snapshot inicial divergente.');
+  assert(row.revisions_count === 3, 'Snapshots v1-v3 divergentes.');
   assert(
     row.shares_count === 1 && row.publications_count === 1,
     'Share/publicacao divergentes.',
@@ -183,7 +199,15 @@ function verifyFixture(environment, marker = 'source-marker') {
     row.publication_token_id === ids.credential,
     'Relacao da publicacao divergente.',
   );
-  assert(row.marker === marker, 'Marcador do banco divergente.');
+  assert(row.marker === `${marker}-v3`, 'Projecao atual do banco divergente.');
+  assert(
+    row.current_revision_id === ids.revision3 &&
+      row.revision2_base === ids.document &&
+      row.revision2_summary === 'Considered guest feedback' &&
+      row.revision2_refs === `["${ids.comment}"]` &&
+      row.revision3_base === ids.revision2,
+    'Base, resumo ou referencias dos snapshots v2/v3 divergentes.',
+  );
   assert(
     row.guest_grant === 1 && row.stranger_grant === 0,
     'Permissoes sinteticas divergentes.',

@@ -110,6 +110,34 @@ void test('publica snapshot, avança projeção e preserva referências exatas o
   );
 });
 
+void test('aceita o limite público de 100 referências com consulta JSON de poucos binds', async (t) => {
+  const f = await fixture();
+  t.after(() => f.sqlite.close());
+  await f.service.share(f.document.id, { email: guest.email, name: guest.name });
+  const commentIds: string[] = [];
+  for (let index = 0; index < 100; index++) {
+    const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+    commentIds.push(id);
+    await f.guestService.addComment(f.document.id, {
+      id,
+      authorId: guest.id,
+      body: `Crítica ${index}`,
+      quote: '',
+      sourceStart: null,
+      sourceRevisionId: f.document.current_revision_id,
+    });
+  }
+  const result = await f.service.createRevision(
+    f.document.id,
+    payload(f.document, { consideredCommentIds: commentIds.toReversed() }),
+  );
+  assert.deepEqual(result.revision.considered_comment_ids, commentIds);
+  assert.deepEqual(
+    result.revision.considered_comments.map((comment) => comment.id),
+    commentIds,
+  );
+});
+
 void test('replay exato vence base antiga e configuração de cota inválida', async (t) => {
   const f = await fixture();
   t.after(() => f.sqlite.close());
