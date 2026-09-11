@@ -50,6 +50,13 @@
       "when": 1789086401119,
       "tag": "0006_hesitant_dazzler",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789090490889,
+      "tag": "0007_nifty_iron_man",
+      "breakpoints": true
     }
   ]
 }

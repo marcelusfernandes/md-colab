@@ -6,10 +6,12 @@ import { api, errorText } from '@/lib/client-api';
 
 export function EmailLogin({
   authorMode = 'allowlist',
+  commentId,
   documentId,
   mode = 'email',
 }: {
   authorMode?: 'allowlist' | 'open';
+  commentId?: string;
   documentId?: string;
   mode?: 'email' | 'test';
 }) {
@@ -28,6 +30,7 @@ export function EmailLogin({
         const result = await api<{ redirect: string }>('auth/test', 'POST', {
           email,
           documentId,
+          commentId,
         });
         window.location.assign(result.redirect);
         return;
@@ -35,6 +38,7 @@ export function EmailLogin({
       const result = await api<{ message: string }>('auth/request', 'POST', {
         email,
         documentId,
+        commentId,
       });
       setMessage(result.message);
     } catch (e) {

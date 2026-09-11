@@ -395,6 +395,16 @@ export async function handleApi(
       }
       if (action === 'comments' && resourceId && !subresource)
         return json({ comment: await service.comment(id, resourceId) });
+      if (
+        action === 'comments' &&
+        resourceId &&
+        subresource === 'context' &&
+        !eventId
+      ) {
+        if ([...url.searchParams.keys()].length > 0)
+          throw new HttpError(400, 'Parâmetros de contexto inválidos.');
+        return json(await service.commentContext(id, resourceId));
+      }
       if (action === 'comments' && !resourceId)
         return json(
           await service.comments(id, commentPageQuery(url.searchParams)),

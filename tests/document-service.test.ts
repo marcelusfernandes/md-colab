@@ -1738,3 +1738,73 @@ void test('contagem e preview de respostas vêm do mesmo snapshot', async () => 
     sqlite.close();
   }
 });
+void test('contexto dirigido encontra resposta antiga fora das páginas e mantém snapshot limitado', async (t) => {
+  const { sqlite, owner, stranger } = fixture();
+  t.after(() => sqlite.close());
+  await Promise.all([owner.registerViewer(), stranger.registerViewer()]);
+  const document = await createDocument(owner, {
+    markdown: '# Contexto dirigido',
+    filename: 'contexto.md',
+  });
+  const root = await owner.addComment(document.id, {
+    id: stableCommentId(20_000),
+    authorId: owner.viewer.id,
+    body: 'Crítica original',
+    quote: 'Contexto dirigido',
+    sourceStart: 2,
+  });
+  const oldReply = await owner.addComment(document.id, {
+    id: stableCommentId(20_001),
+    authorId: owner.viewer.id,
+    body: 'Resposta antiga',
+    rootId: root.id,
+  });
+  for (let index = 0; index < 55; index += 1)
+    await owner.addComment(document.id, {
+      id: stableCommentId(20_002 + index),
+      authorId: owner.viewer.id,
+      body: `Resposta ${index}`,
+      rootId: root.id,
+    });
+  for (let index = 0; index < 55; index += 1)
+    await owner.addComment(document.id, {
+      id: stableCommentId(21_000 + index),
+      authorId: owner.viewer.id,
+      body: `Outra conversa ${index}`,
+    });
+  await owner.addConversationEvent(document.id, root.id, {
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    baseVersion: 0,
+    action: 'follow',
+    reason: 'Aplicar na próxima revisão.',
+  });
+
+  const firstPage = await owner.conversations(document.id);
+  assert.equal(
+    firstPage.conversations.some((entry) => entry.root.id === root.id),
+    false,
+  );
+  const context = await owner.commentContext(document.id, oldReply.id);
+  assert.equal(context.target.id, oldReply.id);
+  assert.equal(context.conversation.root.id, root.id);
+  assert.equal(context.conversation.root.quote, 'Contexto dirigido');
+  assert.equal(context.conversation.replyCount, 56);
+  assert.equal(context.conversation.decision, 'follow');
+  assert.equal(context.conversation.decisionReason, 'Aplicar na próxima revisão.');
+  assert.equal(context.conversation.version, 1);
+  assert.equal(context.conversation.replies.length, 50);
+  assert.equal(
+    context.conversation.replies.some((reply) => reply.id === oldReply.id),
+    false,
+  );
+  assert.ok(context.conversation.repliesCursor);
+  await assert.rejects(
+    stranger.commentContext(document.id, oldReply.id),
+    denied,
+  );
+  await assert.rejects(
+    owner.commentContext(document.id, 'invalid'),
+    (error) => error instanceof HttpError && error.status === 400,
+  );
+});

@@ -79,6 +79,31 @@ function randomToken() {
   ).join('');
 }
 
+const localIdPattern = /^[0-9a-f-]{36}$/i;
+
+function optionalDestination(input: Record<string, unknown>) {
+  const documentId =
+    input.documentId === undefined || input.documentId === null
+      ? null
+      : input.documentId;
+  const commentId =
+    input.commentId === undefined || input.commentId === null
+      ? null
+      : input.commentId;
+  if (
+    (documentId !== null &&
+      (typeof documentId !== 'string' || !localIdPattern.test(documentId))) ||
+    (commentId !== null &&
+      (typeof commentId !== 'string' || !localIdPattern.test(commentId))) ||
+    (commentId !== null && documentId === null)
+  )
+    throw new HttpError(400, 'Solicitação inválida.');
+  return { documentId, commentId } as {
+    documentId: string | null;
+    commentId: string | null;
+  };
+}
+
 export class AuthService {
   constructor(
     private db: D1Database,
@@ -111,11 +136,9 @@ export class AuthService {
     if (!this.config.testMode)
       throw new HttpError(404, 'Acesso de teste indisponível.');
     const email = validEmail(input.email);
-    const documentId = input.documentId ?? null;
+    const { documentId, commentId } = optionalDestination(input);
     if (documentId !== null) {
       if (
-        typeof documentId !== 'string' ||
-        !/^[0-9a-f-]{36}$/i.test(documentId) ||
         !(await this.db
           .prepare('SELECT id FROM documents WHERE id=? AND is_test=1')
           .bind(documentId)
@@ -123,6 +146,14 @@ export class AuthService {
       )
         throw new HttpError(404, 'Documento de teste indisponível.');
     }
+    if (
+      commentId !== null &&
+      !(await this.db
+        .prepare('SELECT id FROM comments WHERE id=? AND document_id=?')
+        .bind(commentId, documentId)
+        .first())
+    )
+      throw new HttpError(404, 'Comentário de teste indisponível.');
     const existing = await this.viewer(request);
     const id = existing?.id ?? crypto.randomUUID();
     if (!existing) {
@@ -142,7 +173,11 @@ export class AuthService {
     await this.logout(request);
     return {
       session,
-      redirect: documentId ? '/d/' + documentId : '/documentos',
+      redirect: documentId
+        ? '/d/' +
+          documentId +
+          (commentId ? '?comment=' + encodeURIComponent(commentId) : '')
+        : '/documentos',
     };
   }
   assertMailConfigured() {
@@ -190,23 +225,22 @@ export class AuthService {
 
   async requestLink(input: Record<string, unknown>, ip: string) {
     const email = validEmail(input.email);
-    const documentId =
-      input.documentId === undefined || input.documentId === null
-        ? null
-        : input.documentId;
-    if (
-      documentId !== null &&
-      (typeof documentId !== 'string' || !/^[0-9a-f-]{36}$/i.test(documentId))
-    )
-      throw new HttpError(400, 'Solicitação inválida.');
+    const { documentId, commentId } = optionalDestination(input);
     this.assertMailConfigured();
     await this.limit('request-ip', ip, 30, LINK_SECONDS);
     await this.limit('request-email', email, 5, LINK_SECONDS);
     if (await this.allowed(email, documentId)) {
+      const destinationExists =
+        commentId === null ||
+        !!(await this.db
+          .prepare('SELECT id FROM comments WHERE id=? AND document_id=?')
+          .bind(commentId, documentId)
+          .first());
+      if (!destinationExists) return { message: REQUEST_MESSAGE };
       // A provider failure must not reveal which addresses have access.
       // Authenticated invitations report failure to the owner separately.
       try {
-        await this.issue(email, documentId, false);
+        await this.issue(email, documentId, commentId, false);
       } catch {
         /* Generic response prevents address enumeration. */
       }
@@ -220,12 +254,13 @@ export class AuthService {
     await this.limit('invite-email', email, 5, LINK_SECONDS);
     if (!(await this.allowed(email, documentId)))
       throw new HttpError(404, 'Acesso não encontrado.');
-    await this.issue(email, documentId, true);
+    await this.issue(email, documentId, null, true);
   }
 
   private async issue(
     email: string,
     documentId: string | null,
+    commentId: string | null,
     invitation: boolean,
   ) {
     const now = this.now();
@@ -239,9 +274,9 @@ export class AuthService {
     const hash = await hashToken(token);
     await this.db
       .prepare(
-        'INSERT INTO magic_links(token_hash,email,document_id,expires_at,used_at) VALUES(?,?,?,?,NULL)',
+        'INSERT INTO magic_links(token_hash,email,document_id,comment_id,expires_at,used_at) VALUES(?,?,?,?,?,NULL)',
       )
-      .bind(hash, email, documentId, now + LINK_SECONDS)
+      .bind(hash, email, documentId, commentId, now + LINK_SECONDS)
       .run();
     try {
       // Fragment keeps the token out of HTTP access logs and referrer headers.
@@ -290,9 +325,16 @@ export class AuthService {
         OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id
           WHERE d.id=magic_links.document_id AND d.is_test=0 AND u.test_email IS NULL
           AND (u.email=magic_links.email OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=magic_links.email)))
-      ) RETURNING email,document_id`)
+      ) AND (comment_id IS NULL OR EXISTS(
+        SELECT 1 FROM comments c
+        WHERE c.id=magic_links.comment_id AND c.document_id=magic_links.document_id
+      )) RETURNING email,document_id,comment_id`)
       .bind(now, await hashToken(value), now, ...authorParameters)
-      .first<{ email: string; document_id: string | null }>();
+      .first<{
+        email: string;
+        document_id: string | null;
+        comment_id: string | null;
+      }>();
     if (!link) throw invalid();
     const invited = await this.db
       .prepare(
@@ -330,7 +372,13 @@ export class AuthService {
     return {
       viewer,
       session,
-      redirect: link.document_id ? '/d/' + link.document_id : '/documentos',
+      redirect: link.document_id
+        ? '/d/' +
+          link.document_id +
+          (link.comment_id
+            ? '?comment=' + encodeURIComponent(link.comment_id)
+            : '')
+        : '/documentos',
     };
   }
 

@@ -76,6 +76,10 @@ export type ConversationRow = {
   decisionReason: string | null;
   version: number;
 };
+export type DirectedCommentContext = {
+  target: CommentRow;
+  conversation: ConversationRow;
+};
 export type ConversationPageQuery = {
   filter?: ConversationFilter;
   cursor?: string;
@@ -1258,6 +1262,98 @@ export class DocumentService {
       .bind(id, commentId)
       .first<CommentRow>();
   }
+
+  async commentContext(
+    id: string,
+    commentId: string,
+  ): Promise<DirectedCommentContext> {
+    await this.document(id);
+    if (!/^[0-9a-f-]{36}$/i.test(commentId))
+      throw new HttpError(400, 'Comentário inválido.');
+    const rootIdSql = `SELECT COALESCE(target.root_id,target.id)
+      FROM comments target WHERE target.document_id=? AND target.id=?`;
+    const [targetResult, rootResult, stateResult, replyResult] =
+      await this.db.batch([
+        this.db
+          .prepare(
+            `SELECT ${publicCommentFields} FROM comments c JOIN users u ON u.id=c.author_id
+             WHERE c.document_id=? AND c.id=?`,
+          )
+          .bind(id, commentId),
+        this.db
+          .prepare(
+            `SELECT ${publicCommentFields} FROM comments c JOIN users u ON u.id=c.author_id
+             WHERE c.document_id=? AND c.id=(${rootIdSql})
+               AND COALESCE(c.root_id,c.id)=c.id`,
+          )
+          .bind(id, id, commentId),
+        this.db
+          .prepare(
+            `SELECT r.id AS root_id,COALESCE(e.state,'open') AS state,e.decision,
+               e.decision_reason,COALESCE(e.version,0) AS version,
+               (SELECT count(*) FROM comments reply
+                WHERE reply.document_id=r.document_id
+                  AND COALESCE(reply.root_id,reply.id)=r.id
+                  AND reply.id<>r.id) AS reply_count
+             FROM comments r LEFT JOIN conversation_events e ON e.sequence=(
+               SELECT latest.sequence FROM conversation_events latest
+               WHERE latest.document_id=r.document_id AND latest.root_id=r.id
+               ORDER BY latest.version DESC LIMIT 1
+             )
+             WHERE r.document_id=? AND r.id=(${rootIdSql})
+               AND COALESCE(r.root_id,r.id)=r.id`,
+          )
+          .bind(id, id, commentId),
+        this.db
+          .prepare(
+            `SELECT ${publicCommentFields},c.sequence AS transport_sequence
+             FROM comments c JOIN users u ON u.id=c.author_id
+             WHERE c.document_id=? AND c.root_id=(${rootIdSql})
+               AND c.id<>c.root_id
+             ORDER BY c.sequence DESC LIMIT ?`,
+          )
+          .bind(id, id, commentId, conversationReplyPageSize + 1),
+      ]);
+    const target = (targetResult.results as CommentRow[])[0];
+    const root = (rootResult.results as CommentRow[])[0];
+    const state = (
+      stateResult.results as Array<{
+        root_id: string;
+        state: 'open' | 'closed';
+        decision: 'follow' | 'refute' | 'defer' | null;
+        decision_reason: string | null;
+        version: number;
+        reply_count: number;
+      }>
+    )[0];
+    if (!target || !root || !state)
+      throw new HttpError(404, 'Comentário indisponível.');
+    const rows = replyResult.results as SequencedCommentRow[];
+    const page = rows.slice(0, conversationReplyPageSize);
+    return {
+      target,
+      conversation: {
+        root,
+        replies: publicComments(page),
+        repliesCursor:
+          rows.length > conversationReplyPageSize && page.length > 0
+            ? encodeConversationChildCursor({
+                v: 1,
+                type: 'conversation-replies',
+                documentId: id,
+                rootId: root.id,
+                sequence: sequenceOf(page.at(-1)),
+              })
+            : null,
+        replyCount: Number(state.reply_count),
+        state: state.state,
+        decision: state.decision,
+        decisionReason: state.decision_reason,
+        version: Number(state.version),
+      },
+    };
+  }
+
   async addComment(id: string, input: Record<string, unknown>) {
     const doc = await this.document(id);
     const authorId = requiredText(

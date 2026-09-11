@@ -1466,3 +1466,143 @@ void test('autoria aberta exige e-mail confirmado e mantém cada plano privado p
     true,
   );
 });
+void test('destino de comentário fica associado ao token e não cria oráculo de existência', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const service = new DocumentService(f.db, owner.viewer);
+  const document = await service.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Plano\n\nTrecho.',
+    filename: 'plano.md',
+  });
+  const other = await service.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Outro',
+    filename: 'outro.md',
+  });
+  const root = await service.addComment(document.id, {
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    body: 'Crítica',
+    quote: 'Trecho.',
+    sourceStart: 9,
+  });
+  const reply = await service.addComment(document.id, {
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    body: 'Resposta antiga',
+    rootId: root.id,
+  });
+  const otherComment = await service.addComment(other.id, {
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    body: 'Outro comentário',
+  });
+  f.sqlite
+    .prepare(
+      'INSERT INTO shares(document_id,email,name,created_at) VALUES(?,?,?,?)',
+    )
+    .run(
+      document.id,
+      'guest@example.com',
+      'Convidada',
+      new Date().toISOString(),
+    );
+
+  const requested = await f.call('auth/request', 'POST', {
+    email: 'guest@example.com',
+    documentId: document.id,
+    commentId: reply.id,
+  });
+  assert.equal(requested.status, 200);
+  const token = f.mailbox.lastToken();
+  const stored = f.sqlite
+    .prepare(
+      'SELECT document_id,comment_id FROM magic_links WHERE used_at IS NULL ORDER BY rowid DESC LIMIT 1',
+    )
+    .get() as { document_id: string; comment_id: string };
+  assert.equal(stored.document_id, document.id);
+  assert.equal(stored.comment_id, reply.id);
+  const verified = await f.call('auth/verify', 'POST', {
+    token,
+    documentId: other.id,
+    commentId: otherComment.id,
+  });
+  assert.equal(verified.status, 200);
+  assert.equal(
+    (await data(verified.clone())).redirect,
+    `/d/${document.id}?comment=${reply.id}`,
+  );
+  const guestCookie = verified.headers.get('set-cookie')!.split(';')[0];
+  const context = await f.call(
+    `documents/${document.id}/comments/${reply.id}/context`,
+    'GET',
+    undefined,
+    guestCookie,
+  );
+  assert.equal(context.status, 200);
+  const contextBody = (await context.json()) as {
+    target: { id: string };
+    conversation: { root: { id: string }; replyCount: number };
+  };
+  assert.equal(contextBody.target.id, reply.id);
+  assert.equal(contextBody.conversation.root.id, root.id);
+  assert.equal(contextBody.conversation.replyCount, 1);
+
+  const beforeGeneric = f.mailbox.messages.length;
+  for (const input of [
+    {
+      email: config.ownerEmail,
+      documentId: document.id,
+      commentId: crypto.randomUUID(),
+    },
+    {
+      email: config.ownerEmail,
+      documentId: document.id,
+      commentId: otherComment.id,
+    },
+    {
+      email: 'without-access@example.com',
+      documentId: document.id,
+      commentId: reply.id,
+    },
+  ])
+    assert.equal((await f.call('auth/request', 'POST', input)).status, 200);
+  assert.equal(f.mailbox.messages.length, beforeGeneric);
+  assert.equal(
+    (
+      await f.call('auth/request', 'POST', {
+        email: config.ownerEmail,
+        documentId: document.id,
+        commentId: '../outside',
+      })
+    ).status,
+    400,
+  );
+
+  await f.auth.requestLink(
+    {
+      email: 'guest@example.com',
+      documentId: document.id,
+      commentId: reply.id,
+    },
+    'revocation-test',
+  );
+  const revokedToken = f.mailbox.lastToken();
+  f.sqlite
+    .prepare('DELETE FROM shares WHERE document_id=? AND email=?')
+    .run(document.id, 'guest@example.com');
+  assert.equal(
+    (
+      await f.call('auth/verify', 'POST', {
+        token: revokedToken,
+        documentId: other.id,
+        commentId: otherComment.id,
+      })
+    ).status,
+    401,
+  );
+});
