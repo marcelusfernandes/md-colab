@@ -401,8 +401,74 @@ Em sucesso, stdout contém somente `origin`, `documentId`, `currentRevisionId`, 
 caminhos do diretório/contexto e `comparison`. Nomes, comentários e Markdown
 privados ficam nos arquivos. Uma coleta completa contém a revisão corrente e as
 revisões de origem citadas pelos comentários; `base_revision_id` é metadado e não
-provoca busca recursiva de todo o histórico. A CLI de republicação, com operação
-local recuperável e uso desse recibo, permanece para a próxima tarefa.
+provoca busca recursiva de todo o histórico.
+
+### Republicação local de revisão
+
+Crie pela interface uma credencial **Republicação de revisão** vinculada ao plano.
+Para iniciar uma nova revisão, escolha explicitamente a origem, o documento, o
+`context.json` completo da coleta, o Markdown editado e um caminho de operação
+ainda inexistente:
+
+```sh
+export MD_COLAB_PLAN_TOKEN='mdp_substitua_pela_credencial_copiada'
+npm run --silent revise:markdown -- \
+  --action publish \
+  --origin https://seu-dominio.example \
+  --document 26e0cb70-9a3e-49d7-9ac0-5a11f4ca46e3 \
+  --operation ./.md-colab-revisoes/revisao-003.json \
+  --context ./.md-colab-feedback/coleta-001/context.json \
+  --file ./plano-revisado.md \
+  --summary 'Incorpora as mudanças escolhidas' \
+  --considered-comment 36e0cb70-9a3e-49d7-9ac0-5a11f4ca46e5
+```
+
+`--summary`, `--title` e `--considered-comment` são opcionais; a última flag pode
+ser repetida para até 100 IDs exatos presentes no contexto. A CLI não expande uma
+raiz para suas respostas nem interpreta fechamento ou decisão como aprovação. O
+nome enviado usa o basename do arquivo. Sem `--title`, o título usa o primeiro H1
+com espaços externos removidos e limite de 240 caracteres, ou o nome sem extensão.
+Resumo vazio vira `null`.
+
+O `context.json` pode ter até 256 MiB e é validado como um conjunto completo, mas
+seus Markdown referenciados não são abertos. O arquivo escolhido deve ser regular,
+UTF-8, não vazio e ter até 1 MiB; BOM, Unicode e terminações de linha são
+preservados. A operação pode ter até 8 MiB e guarda o payload integral, inclusive
+Markdown, base, metadados e referências, com modo `0600` e digest de integridade.
+Ela não contém a credencial. O JSON HTTP tem limite separado de 2 MiB, portanto
+nem todo Markdown dentro de 1 MiB necessariamente cabe após a serialização.
+
+A operação é criada e sincronizada antes do único `POST`. Duas invocações
+concorrentes no mesmo caminho geram uma única identidade; a perdedora não envia
+requisição. Preserve esse arquivo para consultar uma tentativa incerta:
+
+```sh
+npm run --silent revise:markdown -- \
+  --action lookup \
+  --origin https://seu-dominio.example \
+  --document 26e0cb70-9a3e-49d7-9ac0-5a11f4ca46e3 \
+  --operation ./.md-colab-revisoes/revisao-003.json
+```
+
+`lookup` faz exatamente um `GET` do recibo. Um `404` não prova que um `POST`
+anterior deixou de confirmar. `retry` usa as mesmas flags do exemplo de lookup e
+faz exatamente um `POST` com o payload congelado. Essas ações não releem arquivo
+ou contexto, não geram outro UUID e não atualizam a base. Uma credencial
+`plan_revise` substituta ainda válida para o mesmo plano pode recuperar ou repetir
+a operação.
+
+Uma resposta compatível grava no arquivo somente o recibo estável adicional. O
+stdout de sucesso identifica ação, origem, documento, revisão, ordinal, base, URL
+do snapshot e caminho absoluto da operação. Ele confirma aquela revisão exata,
+sem afirmar que ela continua corrente. Timeout, perda de resposta e confirmação
+2xx incompatível mantêm resultado incerto e orientam `lookup`; falha de stdout
+depois do recibo salvo é informada separadamente.
+
+Conflito de base preserva a operação sem rebase. Depois de coletar outro contexto
+e decidir uma nova proposta, use outro caminho de operação e `publish` explícito.
+Não use `publish:markdown` para esse caso, pois ele cria outro plano. O comando não
+abre links, lê arquivos vizinhos, executa o Markdown ou transforma uma crítica em
+autorização para publicar ou executar.
 
 ### CLI local recuperável
 
