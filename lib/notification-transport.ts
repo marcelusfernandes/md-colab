@@ -74,7 +74,12 @@ export class ResendNotificationTransport implements NotificationTransport {
     }
 
     if (response.ok) {
-      if (typeof body?.id !== 'string' || body.id.length === 0)
+      if (
+        typeof body?.id !== 'string' ||
+        body.id.length === 0 ||
+        body.id.length > 256 ||
+        body.id.trim() !== body.id
+      )
         throw new NotificationSendError(
           'provider_invalid_response',
           true,

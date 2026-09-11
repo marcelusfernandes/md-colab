@@ -270,6 +270,65 @@ void test('429 conta Retry-After desde a resposta e não apaga incerteza anterio
   }
 });
 
+void test('revalida janela e lease depois de um claim lento antes do transporte', async () => {
+  const { sqlite, db, guest, document } = await fixture();
+  try {
+    await comment(guest, document.id, 'Crítica');
+    const initial = (await rows(db))[0];
+    const firstAttempt = Math.floor(Date.now() / 1000) - 100;
+    let clock = firstAttempt + 24 * 60 * 60 - 15 - 1;
+    await db
+      .prepare(
+        `UPDATE notification_deliveries SET status='pending',available_at=0,
+           attempts=1,first_attempt_at=?,uncertain=1,idempotency_key=?,payload=?
+         WHERE id=?`,
+      )
+      .bind(
+        firstAttempt,
+        `comment-notification/${String(initial.id)}`,
+        JSON.stringify({
+          from: 'Avisos <notices@example.com>',
+          to: [initial.recipient_email],
+          subject: 'Nova crítica em um plano compartilhado',
+          text: `http://127.0.0.1:3999/d/${document.id}?comment=${String(initial.comment_id)}`,
+        }),
+        initial.id,
+      )
+      .run();
+    const delayed = Object.create(db) as D1Database;
+    delayed.prepare = (sql: string) => {
+      const statement = db.prepare(sql);
+      if (!sql.includes("SET status='leased'")) return statement;
+      return {
+        bind(...values: unknown[]) {
+          const bound = statement.bind(...values);
+          return {
+            async first<T>() {
+              const claimed = await bound.first<T>();
+              clock += 20;
+              return claimed;
+            },
+          };
+        },
+      } as unknown as D1PreparedStatement;
+    };
+    const transport = new ControlledTransport();
+    const result = await drainNotifications(env(delayed), {
+      transport,
+      now: () => clock,
+    });
+    assert.equal(result.blocked, 1);
+    assert.equal(transport.messages.length, 0);
+    assert.equal((await rows(db))[0]?.status, 'blocked');
+    assert.equal(
+      (await rows(db))[0]?.last_error_code,
+      'uncertain_window_elapsed',
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
 void test('lease expirado permite retomada e resultado tardio não sobrescreve o novo dono', async () => {
   const { sqlite, db, guest, document } = await fixture();
   try {
@@ -665,6 +724,17 @@ void test('transporte Resend exige id válido e classifica rate limit e incertez
     invalidSuccess.sendNotification(message),
     (error: unknown) =>
       error instanceof NotificationSendError && error.uncertain,
+  );
+  const whitespaceId = new ResendNotificationTransport(
+    're_synthetic',
+    async () => Response.json({ id: '   ' }, { status: 200 }),
+  );
+  await assert.rejects(
+    whitespaceId.sendNotification(message),
+    (error: unknown) =>
+      error instanceof NotificationSendError &&
+      error.code === 'provider_invalid_response' &&
+      error.uncertain,
   );
 
   const rejected = new ResendNotificationTransport('re_synthetic', async () =>

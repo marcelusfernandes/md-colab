@@ -233,7 +233,8 @@ async function claim(
              WHERE s.document_id=doc.id AND s.email=u.email
            ))
        )
-       RETURNING id,idempotency_key,payload`,
+       RETURNING id,idempotency_key,payload,first_attempt_at,uncertain,
+         lease_expires_at`,
     )
     .bind(
       leaseToken,
@@ -243,7 +244,53 @@ async function claim(
       payload,
       candidate.id,
     )
-    .first<{ id: string; idempotency_key: string; payload: string }>();
+    .first<{
+      id: string;
+      idempotency_key: string;
+      payload: string;
+      first_attempt_at: number;
+      uncertain: number;
+      lease_expires_at: number;
+    }>();
+}
+
+async function renewClaim(
+  db: D1Database,
+  deliveryId: string,
+  leaseToken: string,
+  now: number,
+  leaseSeconds: number,
+) {
+  return db
+    .prepare(
+      `UPDATE notification_deliveries SET lease_expires_at=?
+       WHERE id=? AND status='leased' AND lease_token=? AND lease_expires_at>?
+       RETURNING first_attempt_at,uncertain,lease_expires_at`,
+    )
+    .bind(now + leaseSeconds, deliveryId, leaseToken, now)
+    .first<{
+      first_attempt_at: number;
+      uncertain: number;
+      lease_expires_at: number;
+    }>();
+}
+
+async function blockClaim(
+  db: D1Database,
+  deliveryId: string,
+  leaseToken: string,
+  now: number,
+) {
+  const blocked = await db
+    .prepare(
+      `UPDATE notification_deliveries SET status='blocked',lease_token=NULL,
+         lease_expires_at=NULL,last_error_code='uncertain_window_elapsed',
+         last_error_at=?
+       WHERE id=? AND status='leased' AND lease_token=? RETURNING id`,
+    )
+    .bind(now, deliveryId, leaseToken)
+    .first<{ id: string }>();
+  return Boolean(blocked);
 }
 
 export async function drainNotifications(
@@ -358,6 +405,49 @@ export async function drainNotifications(
       payload,
     );
     if (!claimed) continue;
+
+    const revalidationStartedAt = now();
+    if (
+      claimed.uncertain === 1 &&
+      revalidationStartedAt >=
+        claimed.first_attempt_at +
+          resendIdempotencyWindowSeconds -
+          retryCutoffMarginSeconds
+    ) {
+      if (
+        await blockClaim(
+          values.DB,
+          candidate.id,
+          leaseToken,
+          revalidationStartedAt,
+        )
+      )
+        result.blocked += 1;
+      continue;
+    }
+    const renewed = await renewClaim(
+      values.DB,
+      candidate.id,
+      leaseToken,
+      revalidationStartedAt,
+      leaseSeconds,
+    );
+    if (!renewed) continue;
+    const effectAt = now();
+    if (
+      effectAt >= renewed.lease_expires_at ||
+      (renewed.uncertain === 1 &&
+        effectAt >=
+          renewed.first_attempt_at +
+            resendIdempotencyWindowSeconds -
+            retryCutoffMarginSeconds)
+    ) {
+      if (effectAt < renewed.lease_expires_at) {
+        if (await blockClaim(values.DB, candidate.id, leaseToken, effectAt))
+          result.blocked += 1;
+      }
+      continue;
+    }
 
     try {
       const sent = await transport.sendNotification({
