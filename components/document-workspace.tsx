@@ -133,8 +133,10 @@ import {
   revisionAttemptMatches,
   revisionFromOperationResponse,
   revisionFromResponse,
+  revisionDraftMatchesOperation,
   revisionOperationMatchesAccess,
   revisionOperationMatchesContext,
+  revisionOperationMatchesIdentity,
   revisionOperationRequest,
   revisionOperationWithBase,
   updateRevisionOperation,
@@ -250,6 +252,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const commentOperationRef = useRef<CommentOperation | null>(null);
   const importOperationRef = useRef<ImportOperation | null>(null);
   const revisionOperationRef = useRef<RevisionOperation | null>(null);
+  const revisionSummaryRef = useRef('');
+  const consideredCommentIdsRef = useRef<string[]>([]);
   const commentValue = useRef('');
   const draftSourceRevisionId = useRef<string | null>(null);
   const draftReplyRootId = useRef<string | null>(null);
@@ -2125,6 +2129,23 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       }),
     );
     if (!revisionAttemptIsCurrent(operation, attempt)) return false;
+    if (!revisionOperationMatchesIdentity(operation, session.viewer)) {
+      hideProtectedContent(
+        new ApiError(
+          403,
+          'A identidade ou o modo da sessão mudou durante a revisão.',
+        ),
+      );
+      activeViewerId.current = session.viewer.id;
+      activeViewerIsTest.current = Boolean(session.viewer.isTest);
+      setViewer(session.viewer);
+      setCanCreate(session.canCreate);
+      setNeedsLogin(false);
+      setError('');
+      setLoading(true);
+      void load();
+      return false;
+    }
     activeViewerId.current = session.viewer.id;
     activeViewerIsTest.current = Boolean(session.viewer.isTest);
     setViewer(session.viewer);
@@ -2144,7 +2165,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           ))
     ) {
       blockRevisionOperation(
-        'A identidade, o plano ou a permissão mudou. Esta revisão não será enviada pela sessão atual.',
+        'O plano ou a permissão mudou. Esta revisão não será enviada pela sessão atual.',
       );
       return false;
     }
@@ -2215,12 +2236,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     if (revisionOperationRef.current?.id !== operation.id) return;
     storeRevisionOperation(null);
     setConfirmedRevision(receipt);
-    if (revisionSummary.trim() === operation.summary) setRevisionSummary('');
     if (
-      [...new Set(consideredCommentIds)].sort(compareText).join(',') ===
-      operation.consideredCommentIds.join(',')
-    )
+      revisionDraftMatchesOperation(
+        operation,
+        revisionSummaryRef.current,
+        consideredCommentIdsRef.current,
+      )
+    ) {
+      revisionSummaryRef.current = '';
+      consideredCommentIdsRef.current = [];
+      setRevisionSummary('');
       setConsideredCommentIds([]);
+    }
     setNotice(`Revisão ${receipt.ordinal} confirmada.`);
   }
   async function handleRevisionFailure(
@@ -2411,8 +2438,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     const generation = contextGeneration.current;
     const selectedDocument = doc;
     const selectedViewer = viewer;
-    const selectedSummary = revisionSummary;
-    const selectedComments = [...consideredCommentIds];
+    const selectedSummary = revisionSummaryRef.current;
+    const selectedComments = [...consideredCommentIdsRef.current];
     if (revisionInput.current) revisionInput.current.value = '';
     setConfirmedRevision(null);
     setError('');
@@ -2465,13 +2492,18 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   function toggleConsideredComment(commentId: string) {
     if (revisionOperationRef.current) return;
     setConsideredCommentIds((current) => {
-      if (current.includes(commentId))
-        return current.filter((id) => id !== commentId);
+      if (current.includes(commentId)) {
+        const next = current.filter((id) => id !== commentId);
+        consideredCommentIdsRef.current = next;
+        return next;
+      }
       if (current.length >= 100) {
         setNotice('Selecione no máximo 100 comentários considerados.');
         return current;
       }
-      return [...current, commentId].sort(compareText);
+      const next = [...current, commentId].sort(compareText);
+      consideredCommentIdsRef.current = next;
+      return next;
     });
   }
   const captureSelection = useCallback(() => {
@@ -3766,8 +3798,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   rows={2}
                   maxLength={2000}
                   value={revisionSummary}
-                  disabled={!!revisionOperation}
-                  onChange={(event) => setRevisionSummary(event.target.value)}
+                  disabled={!!revisionOperation || busy === 'revision'}
+                  onChange={(event) => {
+                    revisionSummaryRef.current = event.target.value;
+                    setRevisionSummary(event.target.value);
+                  }}
                   placeholder="O que mudou nesta revisão?"
                 />
               </label>
@@ -4449,7 +4484,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                             <input
                               type="checkbox"
                               checked={consideredCommentIds.includes(root.id)}
-                              disabled={!!revisionOperation}
+                              disabled={
+                                !!revisionOperation || busy === 'revision'
+                              }
                               onChange={() => toggleConsideredComment(root.id)}
                             />
                             Considerar nesta revisão
@@ -4607,7 +4644,9 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                                   <input
                                     type="checkbox"
                                     checked={consideredCommentIds.includes(entry.id)}
-                                    disabled={!!revisionOperation}
+                                    disabled={
+                                      !!revisionOperation || busy === 'revision'
+                                    }
                                     onChange={() =>
                                       toggleConsideredComment(entry.id)
                                     }

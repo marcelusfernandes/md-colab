@@ -112,6 +112,18 @@ export function revisionOperationRequest(operation: RevisionOperation) {
   };
 }
 
+export function revisionDraftMatchesOperation(
+  operation: RevisionOperation,
+  summary: string,
+  consideredCommentIds: readonly string[],
+) {
+  return (
+    summary.trim() === operation.summary &&
+    [...new Set(consideredCommentIds)].sort(compareText).join(',') ===
+      operation.consideredCommentIds.join(',')
+  );
+}
+
 export function revisionOperationMatchesContext(
   operation: RevisionOperation,
   documentId: string | null | undefined,
@@ -130,6 +142,15 @@ export function revisionOperationMatchesAccess(
 ) {
   return (
     operation.documentId === documentId &&
+    revisionOperationMatchesIdentity(operation, viewer)
+  );
+}
+
+export function revisionOperationMatchesIdentity(
+  operation: RevisionOperation,
+  viewer: Viewer | null | undefined,
+) {
+  return (
     operation.viewerId === viewer?.id &&
     operation.isTest === Boolean(viewer?.isTest)
   );

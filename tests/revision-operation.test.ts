@@ -6,8 +6,10 @@ import {
   revisionAttemptMatches,
   revisionFromOperationResponse,
   revisionFromResponse,
+  revisionDraftMatchesOperation,
   revisionOperationMatchesAccess,
   revisionOperationMatchesContext,
+  revisionOperationMatchesIdentity,
   revisionOperationRequest,
   revisionOperationWithBase,
 } from '../lib/revision-operation.ts';
@@ -101,6 +103,14 @@ void test('tentativa congela payload e atualizar base cria UUID sem enviar ou pe
   assert.equal(rebased.markdown, operation.markdown);
   assert.equal(rebased.summary, operation.summary);
   assert.deepEqual(rebased.consideredCommentIds, operation.consideredCommentIds);
+  assert.equal(
+    revisionDraftMatchesOperation(operation, '  Síntese ', [commentB, commentA]),
+    true,
+  );
+  assert.equal(
+    revisionDraftMatchesOperation(operation, 'Resumo B', [commentA]),
+    false,
+  );
 });
 
 void test('recibo aceita comentário legado e confirma todos os campos imutáveis', () => {
@@ -150,6 +160,14 @@ void test('retomada e respostas tardias exigem o mesmo plano, autor e pedido', (
     false,
   );
   assert.equal(revisionOperationMatchesAccess(operation, source.id, viewer), true);
+  assert.equal(
+    revisionOperationMatchesIdentity(operation, { ...viewer, id: 'viewer-b' }),
+    false,
+  );
+  assert.equal(
+    revisionOperationMatchesIdentity(operation, { ...viewer, isTest: true }),
+    false,
+  );
   assert.equal(
     revisionOperationMatchesContext(operation, crypto.randomUUID(), viewer, true),
     false,
