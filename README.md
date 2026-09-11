@@ -313,7 +313,58 @@ o mesmo `stamp`. Uma crítica, decisão ou revisão concorrente retorna `409` co
 `code: "feedback_changed"`; reinicie a coleta com um manifesto sem selo. Essa
 validação confirma completude naquele instante, sem prometer atualidade contínua.
 `counts.revisions` informa o total observado, mas esta API não lista todo o
-histórico. CLI e exportação segura dessa leitura ficam para o próximo recorte.
+histórico. O comando abaixo coleta o feedback e os snapshots necessários sem
+transformar esse total numa exportação de todo o histórico.
+
+### Coleta local de feedback
+
+Crie pela interface uma credencial **Leitura de feedback** vinculada ao plano e
+escolha um diretório de saída ainda inexistente, cujo diretório pai já exista:
+
+```sh
+export MD_COLAB_PLAN_TOKEN='mdp_substitua_pela_credencial_copiada'
+npm run --silent feedback:markdown -- \
+  --origin https://seu-dominio.example \
+  --document 26e0cb70-9a3e-49d7-9ac0-5a11f4ca46e3 \
+  --output ./.md-colab-feedback/coleta-001 \
+  --file ./plano-local.md
+```
+
+`--file` é opcional. Quando indicado, deve ser exatamente um arquivo regular
+UTF-8 de até 1 MiB; ele é somente lido e comparado byte a byte com a revisão
+corrente observada. BOM e terminações de linha contam. O resultado é
+`identical`, `different` ou `not_compared` e não autoriza substituir, publicar ou
+executar o arquivo local.
+
+O comando usa somente `MD_COLAB_PLAN_TOKEN`, não envia cookies, não segue
+redirects e faz apenas os `GET` documentados acima. Ele não abre links, lê outros
+arquivos, chama modelos nem executa conteúdo do plano ou do feedback. O timeout
+padrão é 30 segundos por requisição; `MD_COLAB_FEEDBACK_TIMEOUT_MS` aceita de 1 a
+300000 ms. Cada resposta fica limitada a 8 MiB, o total recebido a 256 MiB, cada
+coleção a 10000 registros e a coleta a 1000 snapshots necessários.
+
+O diretório é reservado de forma exclusiva com modo `0700`; destinos existentes,
+inclusive links simbólicos, são recusados. Os Markdown preservam bytes UTF-8 e são
+gravados como `revision-<sha256-do-UUID-exato>.md` com modo `0600`. Assim, IDs que
+diferem somente por caixa continuam distintos também em filesystems sem distinção
+de caixa. `context.json`, também privado, relaciona esses arquivos aos IDs, hashes,
+metadados, comentários, eventos e comparação, sem duplicar o Markdown nem incluir
+token, selo, cursor ou metadados da credencial.
+
+O `context.json` é publicado por último. Sua presença significa que arquivos e
+coleções foram verificados e o mesmo selo foi validado naquele instante; não
+promete que o servidor permanecerá sem mudanças. Uma falha anterior preserva o
+diretório incompleto sem `context.json`. Se o link final já ocorreu e a
+sincronização ou o stdout falhou, o comando informa confirmação incerta: preserve
+e inspecione o diretório, sem repetir no mesmo destino. Toda nova coleta exige
+outro diretório inexistente.
+
+Em sucesso, stdout contém somente `origin`, `documentId`, `currentRevisionId`, os
+caminhos do diretório/contexto e `comparison`. Nomes, comentários e Markdown
+privados ficam nos arquivos. Uma coleta completa contém a revisão corrente e as
+revisões de origem citadas pelos comentários; `base_revision_id` é metadado e não
+provoca busca recursiva de todo o histórico. Republicar uma revisão por credencial
+continua fora deste recorte.
 
 ### CLI local recuperável
 
