@@ -53,6 +53,36 @@ function fixture() {
   return { sqlite, values, mailbox, auth, call, ownerLogin };
 }
 
+function pauseRevisionHistoryRead(db: D1Database) {
+  let reached!: () => void;
+  let resume!: () => void;
+  const reading = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.includes('FROM document_revisions r JOIN users u'))
+      return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async all<T = unknown>() {
+            reached();
+            await gate;
+            return bound.all<T>();
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return { controlled, reading, resume };
+}
+
 void test('rota de revisão exige autor habilitado e GET segue acesso atual do plano', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());
@@ -378,4 +408,41 @@ void test('histórico pagina por ordinal e vincula cursor ao documento, identida
     ).status,
     404,
   );
+});
+
+void test('revogação durante a consulta impede devolver histórico lido depois', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.ownerLogin();
+  const service = new DocumentService(f.values.DB, owner.viewer);
+  const document = await service.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Inicial',
+    filename: 'inicial.md',
+  });
+  await service.share(document.id, { email: 'guest@example.com' });
+  await f.auth.invite('guest@example.com', document.id, owner.viewer.id);
+  const guest = await f.auth.redeem(f.mailbox.lastToken());
+  const guestCookie = f.auth.cookie(guest.session).split(';')[0];
+  const paused = pauseRevisionHistoryRead(f.values.DB);
+  f.values.DB = paused.controlled;
+  const pending = f.call(
+    `documents/${document.id}/revisions`,
+    'GET',
+    undefined,
+    guestCookie,
+  );
+  await paused.reading;
+  await service.revoke(document.id, 'guest@example.com');
+  await service.createRevision(document.id, {
+    id: crypto.randomUUID(),
+    baseRevisionId: document.current_revision_id,
+    markdown: '# Segunda',
+    filename: 'segunda.md',
+    summary: 'Publicada depois da revogação',
+    consideredCommentIds: [],
+  });
+  paused.resume();
+  assert.equal((await pending).status, 404);
 });

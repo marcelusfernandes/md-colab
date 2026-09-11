@@ -871,6 +871,7 @@ export class DocumentService {
         )
         .all<DocumentRevisionSummary>()
     ).results;
+    await this.document(id);
     const revisions = rows.slice(0, revisionPageSize);
     const last = revisions.at(-1);
     return {
