@@ -117,6 +117,8 @@ se qualquer etapa falhar.
 Antes de abrir tráfego, reexporte o destino e confira:
 
 - IDs, contagens e hashes esperados de todos os dados de aplicação;
+- eventos, entregas e reconciliações da outbox, incluindo tipo/destino, geração,
+  estado, attempts, incerteza, lease, provider ID e payload/chave congelados;
 - propriedade do plano, convite, autoria do comentário e relações da publicação;
 - ledger completo e migrações pendentes vazias;
 - schema/índices/FKs e `PRAGMA foreign_key_check` sem linhas;
@@ -138,6 +140,10 @@ sequência persistida. O ensaio preserva os exports completos brutos, compara os
 hashes dos reexports nativos de todas as tabelas allowlisted, restaura os valores
 explícitos de `comments.sequence` e comprova que uma nova inserção recebe uma
 sequência maior que todas as restauradas.
+O ensaio também migra separadamente uma outbox preenchida no schema anterior,
+com estados e geração reconciliada, e comprova que só uma revisão publicada depois
+do upgrade cria um novo evento. O restore importa os dados antes de instalar os
+gatilhos para não regenerar avisos.
 
 ## Recuperação e produção
 

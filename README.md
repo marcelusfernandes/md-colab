@@ -38,7 +38,8 @@ npm run db:migrate:local -- --persist-to .wrangler/state
 npm run dev
 ```
 
-O Wrangler aplica `drizzle/0000..0005` na ordem e registra o ledger no banco;
+O Wrangler aplica as migrações versionadas de `drizzle/` na ordem e registra o
+ledger no banco;
 repetir o comando não reaplica DDL. Use sempre um `--persist-to` explícito e não
 reutilize a persistência de outra sessão. Se `status` encontrar schema sem ledger,
 `migrate` recusa a escrita: siga o [runbook de D1](docs/d1-recovery.md) para
@@ -110,7 +111,11 @@ Para enviar a convidados, configure um remetente autorizado no serviço. As
 variáveis da hospedagem são independentes de `.env.local` e precisam ser
 configuradas como valores de execução; a chave deve ser um segredo.
 
-Comentários confirmados gravam os avisos no mesmo commit e não aguardam o Resend.
+Comentários confirmados e novas revisões gravam os avisos no mesmo commit e não
+aguardam o Resend. Uma revisão avisa somente participantes verificados que já
+comentaram no plano e ainda têm acesso naquele instante; não há envio retroativo
+nem aviso para convites silenciosos. O e-mail abre diretamente o comentário ou o
+snapshot exato, sem incluir Markdown, título, arquivo ou resumo no corpo.
 O processo Node inicia um drain limitado automaticamente; o Worker exporta um
 handler `scheduled` e inclui o cron de um minuto no artefato. Publicar a mudança é
 uma operação separada e é o que ativa esse cron no ambiente remoto. Em
@@ -156,8 +161,9 @@ metadados são paginados; cada snapshot pode ser aberto por um link próprio e
 comparado localmente, linha a linha, com outra revisão carregada. Comparações
 grandes exibem um limite explícito e mantêm os dois originais acessíveis. Abrir,
 comparar ou atualizar o histórico não altera rascunho, referência ou publicação
-pendente. Novos avisos sobre críticas antigas ficam para a próxima fatia de #5;
-o envelope legado de publicação continua igual.
+pendente. Ao publicar uma revisão, os contribuidores anteriores ainda autorizados
+recebem um link para aquele snapshot; o envelope legado de publicação continua
+igual.
 
 O mesmo UUID só pode ser repetido com autor, plano, corpo, contexto e vínculo de
 conversa idênticos. A listagem continua paginada pela sequência persistida; quando

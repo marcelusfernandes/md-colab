@@ -100,8 +100,12 @@ npm run db:node -- restore \
 O destino restaurado é sanitizado antes de ser disponibilizado: remove todos os
 convites, sessões, magic links e limites de autenticação, e revoga todas as
 credenciais de publicação ainda ativas. Os registros de credencial permanecem
-para conservar referências de publicações. Documentos, comentários, contas e
-publicações são preservados.
+para conservar referências de publicações. Documentos, comentários, contas,
+publicações e a cadeia da outbox são preservados. Isso inclui eventos imutáveis,
+gerações e reconciliações, estados de entrega, attempts, incerteza, leases,
+provider IDs e payload/chave já congelados. Ao iniciar o drain no destino, a
+revalidação de acesso suprime entregas cujo convite foi removido pelo restore; não
+regenere eventos ou gerações para compensar essa sanitização.
 
 Um snapshot em um prefixo conhecido anterior também pode ser restaurado: o
 resultado lista `pending`, permanece recusado pelo launcher e deve receber uma
