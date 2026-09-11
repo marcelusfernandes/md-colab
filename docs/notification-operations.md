@@ -14,6 +14,13 @@ que seu timeout e bloqueia antes da borda. Um bloqueio incerto permanece bloquea
 até haver evidência externa explícita. A ausência de um identificador ou uma busca
 sem resultado não prova que o e-mail deixou de ser aceito.
 
+`attempts` conta claims persistidos, não chamadas externas comprovadas. O claim já
+marca incerteza para que uma interrupção antes ou durante o efeito não seja tratada
+como rejeição conhecida. Por isso, ao retomar depois de 24 horas, o cutoff pode
+bloquear conservadoramente mesmo quando a última resposta registrada foi uma
+rejeição como 429. Os diagnósticos da outbox ajudam a investigar; isoladamente,
+eles não provam envio nem não entrega.
+
 ## Ativação e verificação
 
 O comando `npm run start:node` e o `CMD` da imagem Node usam
