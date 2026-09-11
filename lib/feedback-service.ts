@@ -114,6 +114,9 @@ function validSequence(value: unknown) {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
+const compareText = (left: string, right: string) =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 function encodeStamp(stamp: FeedbackStamp) {
   return base64Url(JSON.stringify(stamp));
 }
@@ -459,8 +462,7 @@ export class FeedbackService {
         parsed.some(
           (id) => typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id),
         ) ||
-        [...new Set(parsed)].sort((a, b) => a.localeCompare(b)).join(',') !==
-          parsed.join(',')
+        [...new Set(parsed)].sort(compareText).join(',') !== parsed.join(',')
       )
         throw new Error();
       consideredCommentIds = parsed as string[];

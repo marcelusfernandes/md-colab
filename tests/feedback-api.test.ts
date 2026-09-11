@@ -399,6 +399,74 @@ void test('manifesto, páginas e snapshots preservam feedback completo sob um se
   );
 });
 
+void test('snapshot aceita a mesma ordem binária de referências persistida pela revisão', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const ownerCookie = await f.login();
+  const { documentId } = await createPlan(f, ownerCookie);
+  const owner = f.sqlite
+    .prepare('SELECT owner_id,current_revision_id FROM documents WHERE id=?')
+    .get(documentId) as { owner_id: string; current_revision_id: string };
+  const upperId = 'BBBBBBBB-0000-4000-8000-000000000001';
+  const lowerId = 'aaaaaaaa-0000-7000-8000-000000000001';
+  const insert = f.sqlite.prepare(
+    `INSERT INTO comments(
+      id,document_id,author_id,body,quote,source_start,source_revision_id,root_id,created_at
+    ) VALUES(?,?,?,?,?,?,?,?,?)`,
+  );
+  for (const [index, id] of [lowerId, upperId].entries())
+    insert.run(
+      id,
+      documentId,
+      owner.owner_id,
+      `Referência ${index}`,
+      '',
+      null,
+      owner.current_revision_id,
+      null,
+      new Date(Date.UTC(2026, 8, 11, 2, 0, index)).toISOString(),
+    );
+  const revisionId = crypto.randomUUID();
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/revisions`,
+        'POST',
+        {
+          id: revisionId,
+          baseRevisionId: owner.current_revision_id,
+          markdown: '# Ordem binária\n',
+          filename: 'ordem.md',
+          consideredCommentIds: [lowerId, upperId],
+        },
+        ownerCookie,
+      )
+    ).status,
+    201,
+  );
+  const reader = await f.credential(ownerCookie, {
+    name: 'Referências exatas',
+    scope: 'plan_read',
+    documentId,
+  });
+  const manifest = (await (
+    await f.agent(`agent/documents/${documentId}/feedback`, reader.token)
+  ).json()) as { stamp: string };
+  const snapshot = await f.agent(
+    `agent/documents/${documentId}/revisions/${revisionId}?stamp=${manifest.stamp}`,
+    reader.token,
+  );
+  assert.equal(snapshot.status, 200);
+  assert.deepEqual(
+    (
+      (await snapshot.json()) as {
+        revision: { considered_comment_ids: string[] };
+      }
+    ).revision.considered_comment_ids,
+    [upperId, lowerId],
+  );
+});
+
 void test('vínculo, selo, cursores e revogação falham fechados sem fallback de sessão', async (t) => {
   const f = fixture();
   t.after(() => f.sqlite.close());
@@ -418,6 +486,24 @@ void test('vínculo, selo, cursores e revogação falham fechados sem fallback d
   const manifest = (await (
     await f.agent(`agent/documents/${first.documentId}/feedback`, reader.token)
   ).json()) as { stamp: string };
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${first.documentId}/feedback?stamp=`,
+        reader.token,
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await f.agent(
+        `agent/documents/${first.documentId}/feedback/comments?stamp=${manifest.stamp}&cursor=`,
+        reader.token,
+      )
+    ).status,
+    400,
+  );
   assert.equal(
     (
       await f.agent(

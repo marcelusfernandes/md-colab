@@ -270,9 +270,10 @@ function feedbackQuery(
   )
     throw new HttpError(400, 'Parâmetros de feedback inválidos.');
   const stamp = parameters.get('stamp');
-  if (options.stampRequired && stamp === null)
+  if (stamp === '' || (options.stampRequired && stamp === null))
     throw new HttpError(400, 'Informe o selo de feedback.');
   const cursor = parameters.get('cursor');
+  if (cursor === '') throw new HttpError(400, 'Cursor de feedback inválido.');
   return {
     ...(stamp === null ? {} : { stamp }),
     ...(cursor === null ? {} : { cursor }),
