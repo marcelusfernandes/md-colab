@@ -84,6 +84,7 @@ import {
   conversationPageFromResponse,
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
+  mergeConversationEventState,
   mergeConversationReplies,
   nextConversationHistoryRequest,
 } from '@/lib/conversation-page';
@@ -1083,6 +1084,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           reloaded = await loadConversationPage(
             activeConversationFilter.current,
           );
+        if (
+          !active ||
+          generation !== conversationGeneration.current ||
+          request !== conversationChangeRequest.current ||
+          activeDocumentId.current !== doc.id ||
+          activeViewerId.current !== viewer.id
+        )
+          return;
         if (!changed || !reloaded)
           conversationsChangeCursor.current = changeCursorAfterPoll({
             initial: initialCursor,
@@ -1868,17 +1877,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   }
   function applyConversationEvent(event: ConversationEventRow) {
     setConversationRows((current) =>
-      current.map((entry) =>
-        entry.root.id === event.root_id
-          ? {
-              ...entry,
-              state: event.state,
-              decision: event.decision,
-              decisionReason: event.decision_reason,
-              version: event.version,
-            }
-          : entry,
-      ),
+      current.map((entry) => mergeConversationEventState(entry, event)),
     );
   }
   async function sendConversationOperation(operation: ConversationOperation) {

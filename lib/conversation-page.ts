@@ -47,6 +47,24 @@ export function nextConversationHistoryRequest(
   return sequence.current;
 }
 
+export function mergeConversationEventState(
+  conversation: ConversationRow,
+  event: ConversationEventRow,
+) {
+  if (
+    conversation.root.id !== event.root_id ||
+    conversation.version >= event.version
+  )
+    return conversation;
+  return {
+    ...conversation,
+    state: event.state,
+    decision: event.decision,
+    decisionReason: event.decision_reason,
+    version: event.version,
+  };
+}
+
 function cursor(value: unknown, nullable = false) {
   return (
     (nullable && value === null) ||

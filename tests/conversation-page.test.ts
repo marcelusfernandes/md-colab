@@ -7,8 +7,10 @@ import {
   conversationPageFromResponse,
   conversationRepliesFromResponse,
   invalidateConversationLifecycle,
+  mergeConversationEventState,
   nextConversationHistoryRequest,
 } from '../lib/conversation-page.ts';
+import type { ConversationEventRow, ConversationRow } from '../lib/document-service.ts';
 
 const root = {
   id: '00000000-0000-4000-8000-000000000001',
@@ -145,5 +147,31 @@ void test('histórico não reutiliza identidade de request depois de limpar o co
       requests.get(root.id),
     ),
     false,
+  );
+});
+
+void test('lookup de evento antigo não regride estado canônico mais novo', () => {
+  const conversation = {
+    root,
+    state: 'open',
+    decision: 'defer',
+    decisionReason: 'Estado mais novo.',
+    version: 2,
+  } as ConversationRow;
+  const oldEvent = {
+    root_id: root.id,
+    state: 'closed',
+    decision: 'follow',
+    decision_reason: 'Estado antigo.',
+    version: 1,
+  } as ConversationEventRow;
+  assert.equal(mergeConversationEventState(conversation, oldEvent), conversation);
+  assert.equal(
+    mergeConversationEventState(conversation, {
+      ...oldEvent,
+      version: 3,
+      state: 'closed',
+    }).version,
+    3,
   );
 });
