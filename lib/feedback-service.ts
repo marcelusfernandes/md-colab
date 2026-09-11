@@ -241,7 +241,8 @@ export class FeedbackService {
          JOIN documents d ON d.id=p.document_id
          JOIN document_revisions r
            ON r.id=d.current_revision_id AND r.document_id=d.id
-         WHERE p.id=? AND p.token_hash=? AND p.user_id=? AND p.scope='plan_read'
+         WHERE p.id=? AND p.token_hash=? AND p.user_id=?
+           AND p.scope IN ('plan_read','plan_revise')
            AND p.document_id=? AND p.revoked_at IS NULL AND p.expires_at>?
            AND u.test_email IS NULL AND d.owner_id=p.user_id AND d.is_test=0`,
       )
@@ -259,7 +260,7 @@ export class FeedbackService {
 
   private async begin(documentId: string, encodedStamp: string) {
     if (
-      this.credential.scope !== 'plan_read' ||
+      !['plan_read', 'plan_revise'].includes(this.credential.scope) ||
       this.credential.documentId !== documentId
     )
       throw credentialUnavailable();
@@ -276,7 +277,7 @@ export class FeedbackService {
 
   async manifest(documentId: string, encodedStamp?: string) {
     if (
-      this.credential.scope !== 'plan_read' ||
+      !['plan_read', 'plan_revise'].includes(this.credential.scope) ||
       this.credential.documentId !== documentId
     )
       throw credentialUnavailable();

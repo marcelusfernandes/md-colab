@@ -76,6 +76,6 @@ execution or changes the author's final decision.
 
 The bundle includes complete comments and events plus only the current and cited
 source snapshots, not the full revision history. Publishing a new revision through
-a bearer credential is not available in this version; do not substitute the
+the repository CLI is not available in this version; do not substitute the
 initial-publication command for that missing operation. Leave all edits, later
 publication and execution under the author's control.

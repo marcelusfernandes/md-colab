@@ -68,6 +68,10 @@ export type DocumentRevisionReceipt = Omit<
   considered_comment_ids: string[];
   considered_comments: ConsideredCommentRow[];
 };
+export type RevisionCredentialGuard = {
+  credentialId: string;
+  tokenHash: string;
+};
 export type DocumentRevisionSummary = Omit<
   DocumentRevisionRow,
   'markdown' | 'considered_comment_ids'
@@ -663,7 +667,10 @@ function revisionInput(input: Record<string, unknown>): RevisionInput {
   );
   if (input.id !== id || !uuidPattern.test(id))
     throw new HttpError(400, 'Identificador da revisão inválido.');
-  if (input.baseRevisionId !== baseRevisionId || !uuidPattern.test(baseRevisionId))
+  if (
+    input.baseRevisionId !== baseRevisionId ||
+    !uuidPattern.test(baseRevisionId)
+  )
     throw new HttpError(400, 'Revisão de base inválida.');
   const summary =
     input.summary === undefined ||
@@ -684,7 +691,10 @@ function revisionInput(input: Record<string, unknown>): RevisionInput {
     ),
   ).sort(compareText);
   if (consideredCommentIds.length > 100)
-    throw new HttpError(400, 'Selecione no máximo 100 comentários considerados.');
+    throw new HttpError(
+      400,
+      'Selecione no máximo 100 comentários considerados.',
+    );
   const fields: Record<string, unknown> = {
     markdown: input.markdown,
     filename: input.filename,
@@ -825,7 +835,8 @@ export class DocumentService {
       const byId = new Map(rows.map((comment) => [comment.id, comment]));
       consideredComments = consideredCommentIds.map((id) => {
         const comment = byId.get(id);
-        if (!comment) throw new Error('Stored revision reference is unavailable.');
+        if (!comment)
+          throw new Error('Stored revision reference is unavailable.');
         return comment;
       });
     }
@@ -835,6 +846,27 @@ export class DocumentService {
       considered_comment_ids: consideredCommentIds,
       considered_comments: consideredComments,
     };
+  }
+  private async assertRevisionCredential(
+    id: string,
+    credential: RevisionCredentialGuard,
+  ) {
+    const authorized = await this.db
+      .prepare(
+        `SELECT 1 AS authorized
+         FROM publishing_tokens p
+         JOIN users u ON u.id=p.user_id
+         JOIN documents d ON d.id=p.document_id
+         WHERE p.id=? AND p.token_hash=? AND p.scope='plan_revise'
+           AND p.document_id=? AND p.user_id=? AND p.user_id=d.owner_id
+           AND p.revoked_at IS NULL
+           AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)
+           AND u.test_email IS NULL AND d.is_test=0`,
+      )
+      .bind(credential.credentialId, credential.tokenHash, id, this.viewer.id)
+      .first<{ authorized: number }>();
+    if (!authorized)
+      throw new HttpError(401, 'Credencial de publicação inválida ou ausente.');
   }
   async revision(id: string, revisionId: string) {
     await this.document(id);
@@ -1018,7 +1050,11 @@ export class DocumentService {
       );
     return this.initialDocumentReceipt(id);
   }
-  async createRevision(id: string, input: Record<string, unknown>) {
+  async createRevision(
+    id: string,
+    input: Record<string, unknown>,
+    credential?: RevisionCredentialGuard,
+  ) {
     await this.document(id, true);
     const requested = revisionInput(input);
     const storedIds = JSON.stringify(requested.consideredCommentIds);
@@ -1040,6 +1076,7 @@ export class DocumentService {
           'revision_id_conflict',
         );
       await this.document(id, true);
+      if (credential) await this.assertRevisionCredential(id, credential);
       return { revision: await this.revisionReceipt(existing), replayed: true };
     }
 
@@ -1051,6 +1088,16 @@ export class DocumentService {
         : `(SELECT count(*) FROM comments c
              WHERE c.document_id=d.id
                AND c.id IN (SELECT value FROM json_each(?)))=?`;
+    const credentialGuard = credential
+      ? `EXISTS(
+           SELECT 1 FROM publishing_tokens p JOIN users u ON u.id=p.user_id
+           WHERE p.id=? AND p.token_hash=? AND p.scope='plan_revise'
+             AND p.document_id=d.id AND p.user_id=d.owner_id AND p.user_id=?
+             AND p.revoked_at IS NULL
+             AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)
+             AND u.test_email IS NULL AND d.is_test=0
+         )`
+      : '1=1';
     let inserted = false;
     try {
       const result = await this.db
@@ -1065,6 +1112,7 @@ export class DocumentService {
              AND d.current_revision_id=? AND base.id=?
              AND NOT EXISTS(SELECT 1 FROM document_revisions WHERE id=?)
              AND (SELECT count(*) FROM document_revisions WHERE document_id=d.id)<?
+             AND ${credentialGuard}
              AND ${referenceGuard}`,
         )
         .bind(
@@ -1084,13 +1132,17 @@ export class DocumentService {
           requested.baseRevisionId,
           requested.id,
           limit,
+          ...(credential
+            ? [credential.credentialId, credential.tokenHash, this.viewer.id]
+            : []),
           ...(requested.consideredCommentIds.length === 0 ? [] : [storedIds]),
           ...(requested.consideredCommentIds.length === 0
             ? []
             : [requested.consideredCommentIds.length]),
         )
         .run();
-      inserted = Number(result.meta?.changes ?? result.meta?.rows_written ?? 0) > 0;
+      inserted =
+        Number(result.meta?.changes ?? result.meta?.rows_written ?? 0) > 0;
     } catch (error) {
       if (
         !(error instanceof Error) ||
@@ -1108,12 +1160,14 @@ export class DocumentService {
           'revision_id_conflict',
         );
       await this.document(id, true);
+      if (credential) await this.assertRevisionCredential(id, credential);
       return {
         revision: await this.revisionReceipt(persisted),
         replayed: !inserted,
       };
     }
 
+    if (credential) await this.assertRevisionCredential(id, credential);
     const current = await this.document(id, true);
     if (current.current_revision_id !== requested.baseRevisionId)
       throw new HttpError(
@@ -1129,7 +1183,9 @@ export class DocumentService {
         )
         .bind(id, storedIds)
         .first<{ count: number }>();
-      if (Number(references?.count ?? 0) !== requested.consideredCommentIds.length)
+      if (
+        Number(references?.count ?? 0) !== requested.consideredCommentIds.length
+      )
         throw new HttpError(
           409,
           'Uma ou mais referências não pertencem a este plano ou não estão disponíveis.',
@@ -1338,12 +1394,14 @@ export class DocumentService {
     // The watermark is captured before the snapshot so a concurrent write is
     // either represented in the snapshot or replayed by the unfiltered feed.
     const watermark =
-      (await this.db
-        .prepare(
-          'SELECT COALESCE(max(sequence),0) AS sequence FROM conversation_changes WHERE document_id=?',
-        )
-        .bind(id)
-        .first<{ sequence: number }>())?.sequence ?? 0;
+      (
+        await this.db
+          .prepare(
+            'SELECT COALESCE(max(sequence),0) AS sequence FROM conversation_changes WHERE document_id=?',
+          )
+          .bind(id)
+          .first<{ sequence: number }>()
+      )?.sequence ?? 0;
     const filterSql =
       filter === 'open'
         ? "AND COALESCE(e.state,'open')='open'"
@@ -1543,12 +1601,7 @@ export class DocumentService {
     await this.document(id);
     await this.conversationRoot(id, rootId);
     const boundary = cursor
-      ? decodeConversationChildCursor(
-          cursor,
-          id,
-          rootId,
-          'conversation-events',
-        )
+      ? decodeConversationChildCursor(cursor, id, rootId, 'conversation-events')
       : null;
     const rows = (
       await this.db
@@ -1571,7 +1624,10 @@ export class DocumentService {
     ).results;
     const page = rows.slice(0, conversationEventPageSize);
     return {
-      events: page.map(({ transport_sequence: _sequence, document_id: _id, ...event }) => event),
+      events: page.map(
+        ({ transport_sequence: _sequence, document_id: _id, ...event }) =>
+          event,
+      ),
       nextCursor:
         rows.length > conversationEventPageSize && page.length > 0
           ? encodeConversationChildCursor({
@@ -1610,12 +1666,17 @@ export class DocumentService {
     await this.conversationRoot(id, rootId);
     if (
       Object.keys(input).some(
-        (key) => !['id', 'authorId', 'baseVersion', 'action', 'reason'].includes(key),
+        (key) =>
+          !['id', 'authorId', 'baseVersion', 'action', 'reason'].includes(key),
       )
     )
       throw new HttpError(400, 'Alteração de conversa inválida.');
     const eventId = requiredText(input.id, 'Identificador da alteração', 36);
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId))
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        eventId,
+      )
+    )
       throw new HttpError(400, 'Identificador da alteração inválido.');
     const actorId = requiredText(input.authorId, 'Autor da alteração', 128);
     if (actorId !== this.viewer.id)
@@ -1651,7 +1712,10 @@ export class DocumentService {
         existing.action !== action ||
         existing.reason !== reason
       )
-        throw new HttpError(409, 'Esta alteração já foi usada em outra conversa ou com outro conteúdo.');
+        throw new HttpError(
+          409,
+          'Esta alteração já foi usada em outra conversa ou com outro conteúdo.',
+        );
       const { document_id: _documentId, ...event } = existing;
       return { event, replayed: true };
     }
@@ -2135,10 +2199,7 @@ export class DocumentService {
       .first<ShareRow>();
     if (existing) {
       if (existing.name !== name)
-        throw new HttpError(
-          409,
-          'Este convite já existe com outro nome.',
-        );
+        throw new HttpError(409, 'Este convite já existe com outro nome.');
       await this.document(id, true);
       return existing;
     }
@@ -2150,16 +2211,7 @@ export class DocumentService {
          NOT EXISTS(SELECT 1 FROM shares WHERE document_id=? AND email=?) AND
          (SELECT count(*) FROM shares WHERE document_id=?)<?`,
       )
-      .bind(
-        id,
-        email,
-        name,
-        new Date().toISOString(),
-        id,
-        email,
-        id,
-        limit,
-      )
+      .bind(id, email, name, new Date().toISOString(), id, email, id, limit)
       .run();
     await this.document(id, true);
     const share = await this.db
