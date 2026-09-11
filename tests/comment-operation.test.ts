@@ -45,6 +45,13 @@ void test('seleção vazia preserva a revisão capturada após refresh e início
   assert.equal(afterFirstCharacter, v1);
 });
 
+void test('rascunho novo captura a revisão exibida somente ao começar a redação', () => {
+  const v2 = '00000000-0000-4000-8000-000000000020';
+  const untouchedDraft: string | null = null;
+  const afterFirstCharacter = preserveDraftSourceRevision(untouchedDraft, v2);
+  assert.equal(afterFirstCharacter, v2);
+});
+
 void test('operação de resposta congela a conversa e rejeita confirmação de outra raiz', () => {
   const rootId = '00000000-0000-4000-8000-000000000099';
   const reply = createCommentOperation({

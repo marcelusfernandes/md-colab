@@ -816,11 +816,6 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         activeDocumentId.current = result.document.id;
         activeViewerId.current = user.id;
         setDoc(result.document);
-        if (!commentValue.current.trim() && !currentOperation)
-          draftSourceRevisionId.current = preserveDraftSourceRevision(
-            draftSourceRevisionId.current,
-            result.document.current_revision_id,
-          );
         activeConversationFilter.current = 'all';
         setConversationFilter('all');
         setConversationRows(conversationPage.conversations);

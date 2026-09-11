@@ -52,6 +52,11 @@ try {
     throw new Error('QA fixture requires a migrated database without application data.');
 
   const documentId = randomUUID();
+  const documentCreatedAt = new Date().toISOString();
+  const documentTitle = 'QA authorization plan';
+  const documentFilename = 'qa-plan.md';
+  const documentMarkdown =
+    '# QA authorization plan\n\nSynthetic content for browser validation.';
   const expiresAt = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
   const identities = [
     { role: 'owner', id: randomUUID(), email: 'owner@qa.invalid' },
@@ -74,17 +79,38 @@ try {
     opened.sqlite
       .prepare(
         `INSERT INTO documents(
-          id,owner_id,title,filename,markdown,created_at,is_test
-        ) VALUES(?,?,?,?,?,?,0)`,
+          id,owner_id,title,filename,markdown,created_at,is_test,current_revision_id
+        ) VALUES(?,?,?,?,?,?,0,NULL)`,
       )
       .run(
         documentId,
         identities[0].id,
-        'QA authorization plan',
-        'qa-plan.md',
-        '# QA authorization plan\n\nSynthetic content for browser validation.',
-        new Date().toISOString(),
+        documentTitle,
+        documentFilename,
+        documentMarkdown,
+        documentCreatedAt,
       );
+    opened.sqlite
+      .prepare(
+        `INSERT INTO document_revisions(
+          id,document_id,ordinal,author_id,title,filename,markdown,created_at
+        ) VALUES(?,?,1,?,?,?,?,?)`,
+      )
+      .run(
+        documentId,
+        documentId,
+        identities[0].id,
+        documentTitle,
+        documentFilename,
+        documentMarkdown,
+        documentCreatedAt,
+      );
+    opened.sqlite
+      .prepare(
+        `UPDATE documents SET current_revision_id=?
+         WHERE id=? AND current_revision_id IS NULL`,
+      )
+      .run(documentId, documentId);
     opened.sqlite
       .prepare(
         'INSERT INTO shares(document_id,email,name,created_at) VALUES(?,?,?,?)',
