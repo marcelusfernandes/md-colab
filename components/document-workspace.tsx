@@ -1881,37 +1881,75 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
     }
     return true;
   }
-  function confirmImportOperation(
+  async function refreshCollectionAfterConfirmedImport(
     operation: ImportOperation,
-    created: DocumentRow,
   ) {
+    const session = collectionSession.current;
+    if (
+      !session ||
+      session.viewerId !== operation.viewerId ||
+      session.isTest !== operation.isTest
+    )
+      return;
+    const attempt: CollectionAttempt = {
+      generation: documentsGeneration.current,
+      request: ++documentsPageRequest.current,
+      context: `${operation.viewerId}:${operation.isTest ? 'test' : 'email'}`,
+    };
+    try {
+      const page = documentPageFromResponse(
+        await api<unknown>('documents', 'GET', undefined, {
+          timeoutMs: COLLECTION_REQUEST_TIMEOUT_MS,
+        }),
+      );
+      const currentSession = collectionSession.current;
+      if (
+        !mounted.current ||
+        !currentSession ||
+        !collectionAttemptMatches(
+          attempt,
+          documentsGeneration.current,
+          documentsPageRequest.current,
+          `${currentSession.viewerId}:${currentSession.isTest ? 'test' : 'email'}`,
+        ) ||
+        activeViewerId.current !== operation.viewerId ||
+        Boolean(activeViewerIsTest.current) !== operation.isTest
+      )
+        return;
+      setList(page.documents);
+      documentsNextCursor.current = page.nextCursor;
+      setDocumentsHasMore(page.nextCursor !== null);
+      setDocumentsPageError('');
+    } catch (cause) {
+      const currentSession = collectionSession.current;
+      if (
+        !mounted.current ||
+        !currentSession ||
+        !collectionAttemptMatches(
+          attempt,
+          documentsGeneration.current,
+          documentsPageRequest.current,
+          `${currentSession.viewerId}:${currentSession.isTest ? 'test' : 'email'}`,
+        ) ||
+        activeViewerId.current !== operation.viewerId ||
+        Boolean(activeViewerIsTest.current) !== operation.isTest
+      )
+        return;
+      setDocumentsPageError(
+        `A importação inicial foi confirmada, mas não foi possível atualizar a lista atual: ${errorText(cause)}`,
+      );
+    }
+  }
+  function confirmImportOperation(operation: ImportOperation, receipt: DocumentRow) {
     if (importOperationRef.current?.id !== operation.id) return;
     importSendRequest.current += 1;
     setBusy((current) => (current === 'import' ? '' : current));
     storeImportOperation(null);
-    setConfirmedImport({ id: created.id, filename: created.filename });
-    const summary: DocumentSummary = {
-      id: created.id,
-      owner_id: created.owner_id,
-      title: created.title,
-      filename: created.filename,
-      is_test: created.is_test,
-      created_at: created.created_at,
-      owner_name:
-        viewer?.id === operation.viewerId ? viewer.name : operation.viewerId,
-      comment_count: 0,
-    };
-    setList((current) =>
-      current.some((entry) => entry.id === summary.id)
-        ? current
-        : mergeDocumentPages(current, [summary]),
-    );
+    setConfirmedImport({ id: receipt.id, filename: receipt.filename });
     setNotice(
-      'Importação confirmada. O plano está pronto para abrir.' +
-        (documentsNextCursor.current
-          ? ' Há mais planos antigos disponíveis para carregar.'
-          : ''),
+      'Recibo da importação inicial confirmado. Atualizando a leitura corrente da lista.',
     );
+    void refreshCollectionAfterConfirmedImport(operation);
   }
   async function handleImportFailure(
     operation: ImportOperation,
@@ -3670,8 +3708,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           {confirmedImport && (
             <section className="confirmed-import" aria-live="polite">
               <div>
-                <strong>Importação confirmada</strong>
-                <p>{confirmedImport.filename}</p>
+                <strong>Importação inicial confirmada</strong>
+                <p>Recibo original: {confirmedImport.filename}</p>
               </div>
               {/* oxlint-disable-next-line next/no-html-link-for-pages -- Native navigation preserves the existing beforeunload protection. */}
               <a href={'/d/' + confirmedImport.id}>Abrir plano</a>
