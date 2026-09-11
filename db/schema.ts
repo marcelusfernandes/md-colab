@@ -57,11 +57,19 @@ export const comments = sqliteTable(
     body: text('body').notNull(),
     quote: text('quote').notNull(),
     sourceStart: integer('source_start'),
+    // A root points to itself; replies point to that stable root. It remains
+    // nullable in the physical schema only for the legacy INSERT trigger.
+    rootId: text('root_id'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [
     index('comments_document_created').on(table.documentId, table.createdAt),
     index('comments_document_sequence').on(table.documentId, table.sequence),
+    index('comments_document_root_sequence').on(
+      table.documentId,
+      table.rootId,
+      table.sequence,
+    ),
   ],
 );
 

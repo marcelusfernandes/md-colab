@@ -137,6 +137,35 @@ function pauseAfterCommentInsert(db: D1Database) {
   return { controlled, inserted: insertedPromise, resume };
 }
 
+function pauseBeforeCommentInsert(db: D1Database) {
+  let waiting!: () => void;
+  let resume!: () => void;
+  const waitingPromise = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  const resumePromise = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.startsWith('INSERT INTO comments')) return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async run() {
+            waiting();
+            await resumePromise;
+            return bound.run();
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return { controlled, waiting: waitingPromise, resume };
+}
+
 void test('somente dono e convidados conseguem ler o documento e os comentários', async () => {
   const { sqlite, owner, guest, stranger } = fixture();
   try {
@@ -305,6 +334,157 @@ void test('reenvio do mesmo comentário não duplica e não pode sobrescrever ou
   }
 });
 
+void test('respostas usam a raiz estável, preservam seu contexto e rejeitam vínculos inválidos', async () => {
+  const { sqlite, owner, guest } = fixture();
+  try {
+    await owner.registerViewer();
+    await guest.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Plano\n\nTrecho original.',
+      filename: 'plano.md',
+    });
+    const other = await createDocument(owner, {
+      markdown: '# Outro',
+      filename: 'outro.md',
+    });
+    await owner.share(document.id, { email: guest.viewer.email });
+    const root = await guest.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: guest.viewer.id,
+      body: 'A crítica raiz.',
+      quote: 'Trecho original.',
+      sourceStart: 9,
+    });
+    assert.equal(root.root_id, root.id);
+    const replyPayload = {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Resposta do autor.',
+      rootId: root.id,
+    };
+    const reply = await owner.addComment(document.id, replyPayload);
+    assert.equal(reply.root_id, root.id);
+    assert.equal(reply.quote, '');
+    assert.equal(reply.source_start, null);
+    assert.deepEqual(await owner.addComment(document.id, replyPayload), reply);
+    const otherRoot = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Outra conversa.',
+    });
+    await assert.rejects(
+      owner.addComment(document.id, { ...replyPayload, rootId: otherRoot.id }),
+      (error) => error instanceof HttpError && error.status === 409,
+    );
+    await assert.rejects(
+      owner.addComment(document.id, {
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        body: 'Troca.',
+        rootId: root.id,
+        quote: 'forjado',
+        sourceStart: 0,
+      }),
+      (error) => error instanceof HttpError && error.status === 400,
+    );
+    await assert.rejects(
+      owner.addComment(other.id, {
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        body: 'Vaza?',
+        rootId: root.id,
+      }),
+      denied,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('página suplementa a raiz de uma resposta sem mover o cursor de sequência', async () => {
+  const { sqlite, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Plano',
+      filename: 'plano.md',
+    });
+    const root = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Raiz antiga.',
+    });
+    for (let index = 0; index < 100; index += 1)
+      await owner.addComment(document.id, {
+        id: crypto.randomUUID(),
+        authorId: owner.viewer.id,
+        body: `Raiz ${index}.`,
+      });
+    const reply = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Resposta recente.',
+      rootId: root.id,
+    });
+    const page = await owner.comments(document.id);
+    assert.equal(page.comments.length, 100);
+    assert.ok(page.comments.some((entry) => entry.id === reply.id));
+    assert.deepEqual(
+      page.roots.map((entry) => entry.id),
+      [root.id],
+    );
+    assert.ok(page.pagination.olderCursor);
+    const after = await owner.comments(document.id, {
+      after: page.pagination.nextCursor,
+    });
+    assert.deepEqual(after.comments, []);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('raízes suplementares em página cheia respeitam o limite de 100 bindings do D1', async () => {
+  const { sqlite, db, owner } = fixture();
+  try {
+    await owner.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Plano', filename: 'plano.md',
+    });
+    for (let index = 0; index < 100; index += 1) {
+      const rootId = stableCommentId(index + 5000);
+      await db.prepare(
+        'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,root_id,created_at) VALUES (?,?,?,?,?,?,?,?)',
+      ).bind(rootId, document.id, owner.viewer.id, `Raiz ${index}`, '', null, rootId, '2026-01-01T00:00:00.000Z').run();
+    }
+    for (let index = 0; index < 100; index += 1) {
+      const rootId = stableCommentId(index + 5000);
+      await db.prepare(
+        'INSERT INTO comments(id,document_id,author_id,body,quote,source_start,root_id,created_at) VALUES (?,?,?,?,?,?,?,?)',
+      ).bind(stableCommentId(index + 6000), document.id, owner.viewer.id, `Resposta ${index}`, '', null, rootId, '2026-01-02T00:00:00.000Z').run();
+    }
+    const guarded = Object.create(db) as D1Database;
+    guarded.prepare = (sql: string) => {
+      const statement = db.prepare(sql);
+      if (!sql.includes('c.id IN (')) return statement;
+      return {
+        bind(...values: unknown[]) {
+          assert.ok(values.length <= 100, `D1 recebeu ${values.length} bindings`);
+          return statement.bind(...values);
+        },
+      } as unknown as D1PreparedStatement;
+    };
+    const page = await new DocumentService(guarded, { ...owner.viewer }).comments(document.id);
+    assert.equal(page.comments.length, 100);
+    assert.equal(page.roots.length, 100);
+    assert.deepEqual(
+      page.roots.map((root) => root.id),
+      Array.from({ length: 100 }, (_, index) => stableCommentId(index + 5000)).reverse(),
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
 void test('replay de comentário revalida acesso após localizar a linha existente', async (t) => {
   const { sqlite, db, owner, guest } = fixture();
   t.after(() => sqlite.close());
@@ -325,7 +505,10 @@ void test('replay de comentário revalida acesso após localizar a linha existen
   const controlled = Object.create(db) as D1Database;
   controlled.prepare = (sql: string) => {
     const statement = db.prepare(sql);
-    if (!sql.includes('FROM comments c JOIN users u') || !sql.includes('c.id=?'))
+    if (
+      !sql.includes('FROM comments c JOIN users u') ||
+      !sql.includes('c.id=?')
+    )
       return statement;
     return {
       bind(...values: unknown[]) {
@@ -447,6 +630,43 @@ void test('revogação concluída durante o envio impede confirmar ou revelar o 
     schedule.resume();
     await assert.rejects(sending, denied);
     assert.equal((await owner.comments(doc.id)).comments.length, 1);
+  } finally {
+    sqlite.close();
+  }
+});
+
+void test('revogação antes do INSERT impede persistir uma resposta', async () => {
+  const { sqlite, db, owner, guest } = fixture();
+  try {
+    await owner.registerViewer();
+    await guest.registerViewer();
+    const document = await createDocument(owner, {
+      markdown: '# Plano',
+      filename: 'plano.md',
+    });
+    await owner.share(document.id, { email: guest.viewer.email });
+    const root = await owner.addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: owner.viewer.id,
+      body: 'Raiz.',
+    });
+    const schedule = pauseBeforeCommentInsert(db);
+    const sending = new DocumentService(schedule.controlled, {
+      ...guest.viewer,
+    }).addComment(document.id, {
+      id: crypto.randomUUID(),
+      authorId: guest.viewer.id,
+      body: 'Resposta.',
+      rootId: root.id,
+    });
+    await schedule.waiting;
+    await owner.revoke(document.id, guest.viewer.email);
+    schedule.resume();
+    await assert.rejects(sending, denied);
+    assert.deepEqual(
+      (await owner.comments(document.id)).comments.map((entry) => entry.id),
+      [root.id],
+    );
   } finally {
     sqlite.close();
   }

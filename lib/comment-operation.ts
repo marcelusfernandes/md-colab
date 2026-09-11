@@ -13,6 +13,7 @@ export type CommentOperation = Readonly<{
   body: string;
   quote: string;
   sourceStart: number | null;
+  rootId: string | null;
   composerRevision: number;
   status: CommentOperationStatus;
   message: string;
@@ -29,6 +30,7 @@ export function createCommentOperation(input: {
   body: string;
   quote: string;
   sourceStart: number | null;
+  rootId?: string | null;
   composerRevision: number;
 }): CommentOperation {
   return Object.freeze({
@@ -38,6 +40,7 @@ export function createCommentOperation(input: {
     body: input.body.trim(),
     quote: input.quote.trim(),
     sourceStart: input.sourceStart,
+    rootId: input.rootId ?? null,
     composerRevision: input.composerRevision,
     status: 'sending' as const,
     message: '',
@@ -96,6 +99,7 @@ export function operationRequest(operation: CommentOperation) {
     body: operation.body,
     quote: operation.quote,
     sourceStart: operation.sourceStart,
+    ...(operation.rootId === null ? {} : { rootId: operation.rootId }),
   };
 }
 
@@ -112,6 +116,7 @@ export function commentFromResponse(
     comment.body !== operation.body ||
     comment.quote !== operation.quote ||
     comment.source_start !== operation.sourceStart ||
+    comment.root_id !== (operation.rootId ?? operation.id) ||
     typeof comment.created_at !== 'string' ||
     typeof comment.author_name !== 'string'
   )

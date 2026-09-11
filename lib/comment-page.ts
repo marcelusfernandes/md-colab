@@ -28,11 +28,13 @@ function validCursor(cursor: unknown) {
 export function commentPageFromResponse(value: unknown): CommentPage {
   const result = value as {
     comments?: unknown;
+    roots?: unknown;
     pagination?: Partial<CommentPagination>;
   } | null;
   if (
     !result ||
     !Array.isArray(result.comments) ||
+    !Array.isArray(result.roots) ||
     result.comments.length > 100 ||
     !result.pagination ||
     !validCursor(result.pagination.nextCursor) ||
@@ -42,7 +44,7 @@ export function commentPageFromResponse(value: unknown): CommentPage {
   )
     throw new Error('O servidor retornou uma página de comentários inválida.');
   const ids = new Set<string>();
-  const comments = result.comments.map((value) => {
+  const commentFromValue = (value: unknown) => {
     const comment = value as Partial<CommentRow> | null;
     if (
       !comment ||
@@ -50,6 +52,8 @@ export function commentPageFromResponse(value: unknown): CommentPage {
       typeof comment.id !== 'string' ||
       !/^[0-9a-f-]{36}$/i.test(comment.id) ||
       ids.has(comment.id) ||
+      typeof comment.root_id !== 'string' ||
+      !/^[0-9a-f-]{36}$/i.test(comment.root_id) ||
       typeof comment.body !== 'string' ||
       typeof comment.quote !== 'string' ||
       (comment.source_start !== null &&
@@ -64,6 +68,7 @@ export function commentPageFromResponse(value: unknown): CommentPage {
     ids.add(comment.id);
     return {
       id: comment.id,
+      root_id: comment.root_id,
       body: comment.body,
       quote: comment.quote,
       source_start: comment.source_start,
@@ -71,11 +76,16 @@ export function commentPageFromResponse(value: unknown): CommentPage {
       author_id: comment.author_id,
       author_name: comment.author_name,
     } as CommentRow;
-  });
+  };
+  const comments = result.comments.map(commentFromValue);
+  const roots = result.roots.map(commentFromValue);
+  if (roots.some((root) => root.root_id !== root.id))
+    throw new Error('O servidor retornou a raiz de uma conversa inválida.');
   if (result.pagination.hasMore && comments.length === 0)
     throw new Error('O servidor retornou uma continuação vazia.');
   return {
     comments,
+    roots,
     pagination: result.pagination as CommentPagination,
   };
 }

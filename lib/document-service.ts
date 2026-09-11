@@ -23,6 +23,7 @@ export type DocumentRow = {
 };
 export type CommentRow = {
   id: string;
+  root_id: string;
   body: string;
   quote: string;
   source_start: number | null;
@@ -37,6 +38,7 @@ export type CommentPagination = {
 };
 export type CommentPage = {
   comments: CommentRow[];
+  roots: CommentRow[];
   pagination: CommentPagination;
 };
 export type CommentPageQuery = {
@@ -58,7 +60,7 @@ const documentPageSize = 50;
 const sharePageSize = 100;
 const commentPageSize = 100;
 const publicCommentFields =
-  'c.id,c.body,c.quote,c.source_start,c.created_at,c.author_id,u.name AS author_name';
+  'c.id,COALESCE(c.root_id,c.id) AS root_id,c.body,c.quote,c.source_start,c.created_at,c.author_id,u.name AS author_name';
 type CommentCursorKind = 'before' | 'after';
 type CommentCursor = {
   v: 1;
@@ -512,6 +514,7 @@ export class DocumentService {
       const hasOlder = rows.length > commentPageSize;
       return {
         comments: publicComments(page),
+        roots: await this.commentRoots(id, page),
         pagination: {
           olderCursor:
             hasOlder && page.length > 0
@@ -538,6 +541,7 @@ export class DocumentService {
       const page = rows.slice(0, commentPageSize);
       return {
         comments: publicComments(page),
+        roots: await this.commentRoots(id, page),
         pagination: {
           olderCursor: null,
           nextCursor: encodeCommentCursor(
@@ -563,6 +567,7 @@ export class DocumentService {
     const hasOlder = rows.length > commentPageSize;
     return {
       comments: publicComments(page),
+      roots: await this.commentRoots(id, page),
       pagination: {
         olderCursor:
           hasOlder && page.length > 0
@@ -572,6 +577,46 @@ export class DocumentService {
         hasMore: false,
       },
     };
+  }
+
+  private async commentRoots(id: string, page: SequencedCommentRow[]) {
+    const rootIds = [
+      ...new Set(
+        page
+          .map((entry) => entry.root_id)
+          .filter(
+            (rootId) =>
+              rootId !== undefined &&
+              !page.some((entry) => entry.id === rootId),
+          ),
+      ),
+    ];
+    if (rootIds.length === 0) return [];
+    // D1 accepts at most 100 bindings. document_id consumes one, so a root
+    // lookup may contain at most 99 ids even when a page has 100 replies.
+    const chunks = Array.from(
+      { length: Math.ceil(rootIds.length / 99) },
+      (_, index) => rootIds.slice(index * 99, (index + 1) * 99),
+    );
+    const pages = await Promise.all(
+      chunks.map(async (ids) => {
+        const placeholders = ids.map(() => '?').join(',');
+        return (
+          await this.db
+            .prepare(
+              `SELECT ${publicCommentFields} FROM comments c JOIN users u ON u.id=c.author_id
+               WHERE c.document_id=? AND c.id IN (${placeholders})`,
+            )
+            .bind(id, ...ids)
+            .all<CommentRow>()
+        ).results;
+      }),
+    );
+    const roots = new Map(pages.flat().map((root) => [root.id, root]));
+    return rootIds.flatMap((rootId) => {
+      const root = roots.get(rootId);
+      return root ? [root] : [];
+    });
   }
 
   async comment(id: string, commentId: string) {
@@ -617,6 +662,45 @@ export class DocumentService {
     const commentId = requiredText(input.id, 'Identificador do comentário', 64);
     if (!/^[0-9a-f-]{36}$/i.test(commentId))
       throw new HttpError(400, 'Identificador inválido.');
+    if (
+      Object.keys(input).some(
+        (key) =>
+          ![
+            'id',
+            'authorId',
+            'body',
+            'quote',
+            'sourceStart',
+            'rootId',
+          ].includes(key),
+      )
+    )
+      throw new HttpError(400, 'Comentário inválido.');
+    const requestedRootId =
+      input.rootId === undefined || input.rootId === null
+        ? null
+        : requiredText(input.rootId, 'Conversa', 64);
+    if (requestedRootId && !/^[0-9a-f-]{36}$/i.test(requestedRootId))
+      throw new HttpError(400, 'Conversa inválida.');
+    // A reply never carries a fresh anchor: the root owns the preserved context.
+    let rootId = commentId;
+    if (requestedRootId) {
+      const root = await this.db
+        .prepare(
+          `SELECT id,document_id,COALESCE(root_id,id) AS root_id
+           FROM comments WHERE id=? AND document_id=?`,
+        )
+        .bind(requestedRootId, id)
+        .first<{ id: string; document_id: string; root_id: string }>();
+      if (!root || root.id !== root.root_id)
+        throw new HttpError(404, 'Conversa indisponível.');
+      if (quote !== '' || sourceStart !== null)
+        throw new HttpError(
+          400,
+          'Uma resposta preserva o trecho e a origem da conversa raiz.',
+        );
+      rootId = root.id;
+    }
     const existing = await this.db
       .prepare(
         `SELECT ${publicCommentFields},c.document_id FROM comments c JOIN users u ON u.id=c.author_id WHERE c.id=?`,
@@ -629,7 +713,8 @@ export class DocumentService {
         existing.document_id !== id ||
         existing.body !== body ||
         existing.quote !== quote ||
-        existing.source_start !== sourceStart
+        existing.source_start !== sourceStart ||
+        existing.root_id !== rootId
       )
         throw new HttpError(
           409,
@@ -641,10 +726,12 @@ export class DocumentService {
     const limit = commentLimit(this.quotaEnvironment);
     await this.db
       .prepare(
-        `INSERT INTO comments (id,document_id,author_id,body,quote,source_start,created_at)
-         SELECT ?,?,?,?,?,?,? WHERE
+        `INSERT INTO comments (id,document_id,author_id,body,quote,source_start,root_id,created_at)
+         SELECT ?,?,?,?,?,?,?,? WHERE
          NOT EXISTS(SELECT 1 FROM comments WHERE id=?) AND
-         (SELECT count(*) FROM comments WHERE document_id=?)<?`,
+         (SELECT count(*) FROM comments WHERE document_id=?)<? AND
+         EXISTS(SELECT 1 FROM documents d WHERE d.id=? AND d.is_test=? AND
+           (d.owner_id=? OR ?=1 OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=?)))`,
       )
       .bind(
         commentId,
@@ -653,10 +740,16 @@ export class DocumentService {
         body,
         quote,
         sourceStart,
+        rootId,
         new Date().toISOString(),
         commentId,
         id,
         limit,
+        id,
+        this.viewer.isTest ? 1 : 0,
+        this.viewer.id,
+        this.viewer.isTest ? 1 : 0,
+        this.viewer.isTest ? '' : this.viewer.email,
       )
       .run();
     // Access can be revoked while the write is in flight. Do not disclose the
@@ -677,7 +770,8 @@ export class DocumentService {
       comment.document_id !== id ||
       comment.body !== body ||
       comment.quote !== quote ||
-      comment.source_start !== sourceStart
+      comment.source_start !== sourceStart ||
+      comment.root_id !== rootId
     )
       throw new HttpError(
         409,

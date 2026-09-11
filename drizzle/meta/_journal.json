@@ -36,6 +36,13 @@
       "when": 1789032839776,
       "tag": "0004_polite_mandrill",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789083883318,
+      "tag": "0005_first_apocalypse",
+      "breakpoints": true
     }
   ]
 }
