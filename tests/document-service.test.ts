@@ -680,6 +680,30 @@ void test('revogação concluída durante o envio impede confirmar ou revelar o 
     schedule.resume();
     await assert.rejects(sending, denied);
     assert.equal((await owner.comments(doc.id)).comments.length, 1);
+    assert.equal(
+      (
+        await db
+          .prepare(
+            `SELECT count(*) AS count FROM notification_events
+             WHERE document_id=?`,
+          )
+          .bind(doc.id)
+          .first<{ count: number }>()
+      )?.count,
+      1,
+    );
+    assert.equal(
+      (
+        await db
+          .prepare(
+            `SELECT status FROM notification_deliveries
+             WHERE recipient_id=?`,
+          )
+          .bind(owner.viewer.id)
+          .first<{ status: string }>()
+      )?.status,
+      'pending',
+    );
   } finally {
     sqlite.close();
   }

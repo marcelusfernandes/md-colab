@@ -128,6 +128,87 @@ export const conversationChanges = sqliteTable(
   ],
 );
 
+export const notificationEvents = sqliteTable(
+  'notification_events',
+  {
+    id: text('id').primaryKey(),
+    commentId: text('comment_id')
+      .notNull()
+      .unique()
+      .references(() => comments.id),
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    rootId: text('root_id').notNull(),
+    actorId: text('actor_id')
+      .notNull()
+      .references(() => users.id),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('notification_events_document').on(table.documentId)],
+);
+
+export const notificationDeliveries = sqliteTable(
+  'notification_deliveries',
+  {
+    id: text('id').primaryKey(),
+    eventId: text('event_id')
+      .notNull()
+      .references(() => notificationEvents.id),
+    recipientId: text('recipient_id')
+      .notNull()
+      .references(() => users.id),
+    recipientEmail: text('recipient_email').notNull(),
+    generation: integer('generation').notNull().default(1),
+    retryOfId: text('retry_of_id'),
+    status: text('status').notNull().default('pending'),
+    availableAt: integer('available_at').notNull(),
+    leaseToken: text('lease_token'),
+    leaseExpiresAt: integer('lease_expires_at'),
+    attempts: integer('attempts').notNull().default(0),
+    firstAttemptAt: integer('first_attempt_at'),
+    uncertain: integer('uncertain').notNull().default(0),
+    idempotencyKey: text('idempotency_key'),
+    payload: text('payload'),
+    providerId: text('provider_id'),
+    lastErrorCode: text('last_error_code'),
+    lastErrorAt: integer('last_error_at'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('notification_deliveries_event_recipient_generation').on(
+      table.eventId,
+      table.recipientId,
+      table.generation,
+    ),
+    uniqueIndex('notification_deliveries_retry_of').on(table.retryOfId),
+    index('notification_deliveries_ready').on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+    ),
+  ],
+);
+
+export const notificationReconciliations = sqliteTable(
+  'notification_reconciliations',
+  {
+    actionId: text('action_id').primaryKey(),
+    deliveryId: text('delivery_id')
+      .notNull()
+      .references(() => notificationDeliveries.id),
+    operatorId: text('operator_id').notNull(),
+    evidence: text('evidence').notNull(),
+    providerId: text('provider_id'),
+    note: text('note'),
+    resultDeliveryId: text('result_delivery_id'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('notification_reconciliations_delivery').on(table.deliveryId),
+  ],
+);
+
 export const magicLinks = sqliteTable(
   'magic_links',
   {

@@ -1600,14 +1600,27 @@ export class DocumentService {
   async revoke(id: string, email: string) {
     await this.document(id, true);
     const normalizedEmail = normalizeEmail(email);
-    await this.db
-      .prepare('DELETE FROM shares WHERE document_id=? AND email=?')
-      .bind(id, normalizedEmail)
-      .run();
-    await this.db
-      .prepare('DELETE FROM magic_links WHERE document_id=? AND email=?')
-      .bind(id, normalizedEmail)
-      .run();
+    const revokedAt = Math.floor(Date.now() / 1000);
+    await this.db.batch([
+      this.db
+        .prepare('DELETE FROM shares WHERE document_id=? AND email=?')
+        .bind(id, normalizedEmail),
+      this.db
+        .prepare('DELETE FROM magic_links WHERE document_id=? AND email=?')
+        .bind(id, normalizedEmail),
+      this.db
+        .prepare(
+          `UPDATE notification_deliveries SET status='suppressed',
+             lease_token=NULL,lease_expires_at=NULL,
+             last_error_code='access_revoked',last_error_at=?
+           WHERE recipient_email=?
+             AND status IN ('pending','leased','blocked')
+             AND event_id IN (
+               SELECT id FROM notification_events WHERE document_id=?
+             )`,
+        )
+        .bind(revokedAt, normalizedEmail, id),
+    ]);
     return normalizedEmail;
   }
   async people(query: string) {

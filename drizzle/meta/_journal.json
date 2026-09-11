@@ -57,6 +57,13 @@
       "when": 1789090490889,
       "tag": "0007_nifty_iron_man",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1789094249302,
+      "tag": "0008_lethal_ultron",
+      "breakpoints": true
     }
   ]
 }

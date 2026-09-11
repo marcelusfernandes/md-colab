@@ -27,6 +27,11 @@ COPY --from=build --chown=node:node /app/scripts/start-node.ts /app/ops/scripts/
 COPY --from=build --chown=node:node /app/lib/node-d1.ts /app/ops/lib/node-d1.ts
 COPY --from=build --chown=node:node /app/lib/node-migrations.ts /app/ops/lib/node-migrations.ts
 COPY --from=build --chown=node:node /app/lib/node-operations.ts /app/ops/lib/node-operations.ts
+COPY --from=build --chown=node:node /app/lib/node-notification-runner.ts /app/ops/lib/node-notification-runner.ts
+COPY --from=build --chown=node:node /app/lib/notification-outbox.ts /app/ops/lib/notification-outbox.ts
+COPY --from=build --chown=node:node /app/lib/notification-transport.ts /app/ops/lib/notification-transport.ts
+COPY --from=build --chown=node:node /app/lib/notification-operations.ts /app/ops/lib/notification-operations.ts
+COPY --from=build --chown=node:node /app/scripts/notification-ops.ts /app/ops/scripts/notification-ops.ts
 RUN mkdir -p /data && chown node:node /data
 
 USER node
