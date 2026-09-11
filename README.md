@@ -215,9 +215,11 @@ Uma pessoa autenticada por e-mail e atualmente habilitada como autora pode abrir
 **API** no cabeçalho, escolher a finalidade, dar um nome à credencial e copiá-la.
 **Publicação inicial** cria planos sem ler feedback. **Leitura de feedback** fica
 vinculada a um único plano próprio, escolhido por ID ou link do mesmo serviço, e
-não publica planos ou revisões. O servidor confirma o vínculo e a propriedade; o
-texto digitado na interface não concede acesso por si só. Credenciais existentes
-continuam sendo apenas de publicação inicial e não são convertidas.
+não publica planos ou revisões. **Republicação de revisão** fica igualmente
+vinculada a um plano próprio, lê seu feedback e pode publicar novas revisões nesse
+mesmo plano. O servidor confirma o vínculo e a propriedade; o texto digitado na
+interface não concede acesso por si só. Credenciais existentes conservam a
+finalidade original e não são convertidas.
 
 O segredo começa com `mdp_`, contém 256 bits aleatórios e aparece somente nessa
 criação. O banco guarda apenas seu hash. Cada credencial expira 90 dias depois da
@@ -236,15 +238,19 @@ A gestão usa o cookie da sessão verificada:
   resposta;
 - para leitura, o mesmo `POST` recebe
   `{ "name": "Agente de revisão", "scope": "plan_read", "documentId": "…" }`;
+- para leitura e republicação, recebe
+  `{ "name": "Agente de republicação", "scope": "plan_revise", "documentId": "…" }`;
 - `DELETE /api/publishing-tokens/:id` retorna `{ "viewerId", "credential" }` e
   revoga uma credencial própria.
 
 Uma credencial `publish` autentica exclusivamente `POST /api/publications`. Uma
 credencial `plan_read` autentica exclusivamente a API de feedback do plano ao qual
-foi vinculada. Nenhuma substitui o cookie na gestão de credenciais, na interface
-de leitura, em comentários ou em compartilhamento. A publicação também confere
-novamente a política atual de autoria e fica indisponível em `ACCESS_MODE=test`.
-Credenciais expiradas ou revogadas são recusadas.
+foi vinculada. Uma credencial `plan_revise` acrescenta a publicação de revisões e
+a leitura de seus recibos exatos somente nesse alvo; ela não cria outro plano.
+Nenhuma substitui o cookie na gestão de credenciais, na interface de leitura, em
+comentários ou em compartilhamento. A escrita também confere novamente a política
+atual de autoria e fica indisponível em `ACCESS_MODE=test`. Credenciais expiradas
+ou revogadas são recusadas.
 
 A requisição aceita JSON com `markdown`, `filename` e `title` opcional. O Markdown
 continua limitado a 1 MB e é preservado como recebido. `Idempotency-Key` é
@@ -265,8 +271,9 @@ do Wrangler ou da plataforma seguem a configuração própria desses ambientes.
 ### Leitura de feedback por API
 
 A superfície de agente aceita somente `Authorization: Bearer <credencial>` com
-uma credencial `plan_read` do plano exato. Ela não usa a sessão do navegador como
-fallback e fica indisponível em `ACCESS_MODE=test`. As rotas são somente `GET`:
+uma credencial `plan_read` ou `plan_revise` do plano exato. Ela não usa a sessão
+do navegador como fallback e fica indisponível em `ACCESS_MODE=test`. A leitura
+usa estas rotas `GET`:
 
 - `/api/agent/documents/:id/feedback` cria o manifesto ou, com `?stamp=…`, faz a
   validação final da mesma observação;
@@ -316,10 +323,41 @@ validação confirma completude naquele instante, sem prometer atualidade contí
 histórico. O comando abaixo coleta o feedback e os snapshots necessários sem
 transformar esse total numa exportação de todo o histórico.
 
+### Republicação de revisão por API
+
+Uma credencial `plan_revise` ativa pode reutilizar o protocolo de revisão do
+navegador sem usar cookies:
+
+- `POST /api/agent/documents/:id/revisions` recebe `id`, `baseRevisionId`,
+  `markdown`, `filename`, `title` opcional, `summary` opcional e
+  `consideredCommentIds` opcional;
+- `GET /api/agent/documents/:id/revisions/:revisionId`, sem query, recupera o
+  recibo exato dessa revisão. A variante com `?stamp=…` continua sendo a leitura
+  de snapshot do protocolo de feedback.
+
+O `POST` retorna `{ "revision": { … } }` com status `201` no avanço e `200` no
+replay exato. O recibo preserva UUID, base, conteúdo e metadados persistidos,
+`considered_comment_ids` e a projeção de leitura `considered_comments`. Repetir o
+UUID com outro alvo, base ou payload retorna `409`. Base concorrente, referência
+estrangeira e cota também retornam `409`, sem snapshot, avanço ou aviso parcial.
+O corpo HTTP é limitado a 2 MiB; o Markdown continua limitado a 1 MiB e a lista
+aceita no máximo 100 IDs exatos.
+
+Todo `POST`, inclusive replay, exige que a conta dona continue habilitada para
+publicar. Retirar somente essa capacidade retorna `403` na escrita, mas não
+impede o `GET` autorizado. Token ausente, de outro escopo ou alvo, expirado ou
+revogado retorna `401`; UUID ou parâmetros inválidos retornam `400`; um recibo
+inexistente retorna `404`. Uma credencial `plan_revise` substituta do mesmo plano
+pode recuperar um recibo existente, mas selos e cursores de feedback continuam
+vinculados à credencial que os emitiu. Se a escrita tiver sido confirmada no banco
+e a credencial for revogada antes da resposta, a falta de confirmação não desfaz
+a revisão.
+
 ### Coleta local de feedback
 
-Crie pela interface uma credencial **Leitura de feedback** vinculada ao plano e
-escolha um diretório de saída ainda inexistente, cujo diretório pai já exista:
+Crie pela interface uma credencial **Leitura de feedback** ou **Republicação de
+revisão** vinculada ao plano e escolha um diretório de saída ainda inexistente,
+cujo diretório pai já exista:
 
 ```sh
 export MD_COLAB_PLAN_TOKEN='mdp_substitua_pela_credencial_copiada'
@@ -363,8 +401,8 @@ Em sucesso, stdout contém somente `origin`, `documentId`, `currentRevisionId`, 
 caminhos do diretório/contexto e `comparison`. Nomes, comentários e Markdown
 privados ficam nos arquivos. Uma coleta completa contém a revisão corrente e as
 revisões de origem citadas pelos comentários; `base_revision_id` é metadado e não
-provoca busca recursiva de todo o histórico. Republicar uma revisão por credencial
-continua fora deste recorte.
+provoca busca recursiva de todo o histórico. A CLI de republicação, com operação
+local recuperável e uso desse recibo, permanece para a próxima tarefa.
 
 ### CLI local recuperável
 

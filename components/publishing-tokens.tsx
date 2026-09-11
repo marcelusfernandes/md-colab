@@ -35,7 +35,7 @@ import { Label } from '@/components/ui/label';
 type Credential = {
   id: string;
   name: string;
-  scope: 'publish' | 'plan_read';
+  scope: 'publish' | 'plan_read' | 'plan_revise';
   document_id: string | null;
   document_title: string | null;
   created_at: string;
@@ -68,7 +68,7 @@ export function PublishingTokens({
   const [open, setOpen] = useState(false);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [name, setName] = useState('');
-  const [scope, setScope] = useState<'publish' | 'plan_read'>('publish');
+  const [scope, setScope] = useState<Credential['scope']>('publish');
   const [documentTarget, setDocumentTarget] = useState('');
   const [secret, setSecret] = useState('');
   const [pendingCreated, setPendingCreated] =
@@ -143,10 +143,10 @@ export function PublishingTokens({
     event.preventDefault();
     if (!name.trim() || busy || pendingCreated) return;
     const documentId =
-      scope === 'plan_read'
-        ? planIdFromTarget(documentTarget, window.location.origin)
-        : null;
-    if (scope === 'plan_read' && !documentId) {
+      scope === 'publish'
+        ? null
+        : planIdFromTarget(documentTarget, window.location.origin);
+    if (scope !== 'publish' && !documentId) {
       setError('Informe o ID ou link válido de um plano próprio.');
       return;
     }
@@ -168,9 +168,7 @@ export function PublishingTokens({
       const result = await api<CreatedCredential>(
         'publishing-tokens',
         'POST',
-        scope === 'publish'
-          ? { name }
-          : { name, scope: 'plan_read', documentId },
+        scope === 'publish' ? { name } : { name, scope, documentId },
       );
       if (
         operation.current !== currentOperation ||
@@ -327,6 +325,28 @@ export function PublishingTokens({
                   </span>
                 </label>
                 <label
+                  htmlFor="publishing-token-scope-plan-revise"
+                  aria-label="Republicação de revisão"
+                >
+                  <input
+                    id="publishing-token-scope-plan-revise"
+                    type="radio"
+                    name="publishing-token-scope"
+                    checked={scope === 'plan_revise'}
+                    onChange={() => {
+                      setScope('plan_revise');
+                      setError('');
+                    }}
+                  />
+                  <span>
+                    <strong>Republicação de revisão</strong>
+                    <small>
+                      Lê o feedback e publica revisões somente de um plano
+                      próprio.
+                    </small>
+                  </span>
+                </label>
+                <label
                   htmlFor="publishing-token-scope-plan-read"
                   aria-label="Leitura de feedback"
                 >
@@ -361,7 +381,7 @@ export function PublishingTokens({
                     !!busy ||
                     !!pendingCreated ||
                     !name.trim() ||
-                    (scope === 'plan_read' && !documentTarget.trim())
+                    (scope !== 'publish' && !documentTarget.trim())
                   }
                   type="submit"
                 >
@@ -373,7 +393,7 @@ export function PublishingTokens({
                   Gerar
                 </Button>
               </div>
-              {scope === 'plan_read' && (
+              {scope !== 'publish' && (
                 <div className="publishing-token-target">
                   <Label htmlFor="publishing-token-document">
                     Plano próprio
@@ -462,7 +482,9 @@ export function PublishingTokens({
                       <span>
                         {credential.scope === 'publish'
                           ? 'Publicação inicial'
-                          : `Feedback · ${credential.document_title ?? 'Plano indisponível'}`}
+                          : credential.scope === 'plan_read'
+                            ? `Feedback · ${credential.document_title ?? 'Plano indisponível'}`
+                            : `Republicação · ${credential.document_title ?? 'Plano indisponível'}`}
                       </span>
                       {credential.document_id && (
                         <code>{credential.document_id}</code>
@@ -512,7 +534,9 @@ export function PublishingTokens({
             <AlertDialogDescription>
               {revoke?.scope === 'plan_read'
                 ? `Leituras futuras de “${revoke.name}” serão bloqueadas.`
-                : `Publicações futuras que usarem “${revoke?.name}” serão bloqueadas.`}
+                : revoke?.scope === 'plan_revise'
+                  ? `Leituras e republicações futuras de “${revoke.name}” serão bloqueadas.`
+                  : `Publicações futuras que usarem “${revoke?.name}” serão bloqueadas.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
