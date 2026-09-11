@@ -68,6 +68,16 @@ export type DocumentRevisionReceipt = Omit<
   considered_comment_ids: string[];
   considered_comments: ConsideredCommentRow[];
 };
+export type DocumentRevisionSummary = Omit<
+  DocumentRevisionRow,
+  'markdown' | 'considered_comment_ids'
+> & {
+  author_name: string;
+};
+export type RevisionPage = {
+  revisions: DocumentRevisionSummary[];
+  nextCursor: string | null;
+};
 export type CommentPagination = {
   olderCursor: string | null;
   nextCursor: string;
@@ -141,6 +151,7 @@ export type DocumentPage = {
 };
 export type SharePage = { shares: ShareRow[]; nextCursor: string | null };
 const documentPageSize = 50;
+const revisionPageSize = 50;
 const sharePageSize = 100;
 const commentPageSize = 100;
 const conversationPageSize = 50;
@@ -176,6 +187,15 @@ type ShareCursor = {
   isTest: boolean;
   createdAt: string;
   email: string;
+};
+type RevisionCursor = {
+  v: 1;
+  type: 'revision-history';
+  direction: 'older';
+  documentId: string;
+  viewerId: string;
+  isTest: boolean;
+  beforeOrdinal: number;
 };
 type ConversationCursor = {
   v: 1;
@@ -271,6 +291,41 @@ function decodeDocumentCursor(value: string, viewer: Viewer) {
     return cursor as DocumentCursor;
   } catch {
     throw new HttpError(400, 'Cursor de documentos inválido.');
+  }
+}
+
+function encodeRevisionCursor(cursor: RevisionCursor) {
+  return cursorBase64(JSON.stringify(cursor));
+}
+
+function decodeRevisionCursor(
+  value: string,
+  documentId: string,
+  viewer: Viewer,
+) {
+  try {
+    if (!validCursorText(value)) throw new Error();
+    const cursor = JSON.parse(cursorText(value)) as Partial<RevisionCursor>;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor) ||
+      Object.keys(cursor).sort().join(',') !==
+        'beforeOrdinal,direction,documentId,isTest,type,v,viewerId' ||
+      cursor.v !== 1 ||
+      cursor.type !== 'revision-history' ||
+      cursor.direction !== 'older' ||
+      cursor.documentId !== documentId ||
+      cursor.viewerId !== viewer.id ||
+      cursor.isTest !== Boolean(viewer.isTest) ||
+      !Number.isSafeInteger(cursor.beforeOrdinal) ||
+      cursor.beforeOrdinal! < 2 ||
+      encodeRevisionCursor(cursor as RevisionCursor) !== value
+    )
+      throw new Error();
+    return cursor.beforeOrdinal!;
+  } catch {
+    throw new HttpError(400, 'Cursor de revisões inválido.');
   }
 }
 
@@ -790,6 +845,49 @@ export class DocumentService {
       throw new HttpError(404, 'Revisão indisponível.');
     await this.document(id);
     return this.revisionReceipt(revision);
+  }
+  async revisions(
+    id: string,
+    query: CursorPageQuery = {},
+  ): Promise<RevisionPage> {
+    await this.document(id);
+    const beforeOrdinal =
+      query.cursor === undefined
+        ? null
+        : decodeRevisionCursor(query.cursor, id, this.viewer);
+    const rows = (
+      await this.db
+        .prepare(
+          `SELECT r.id,r.document_id,r.ordinal,r.author_id,u.name AS author_name,
+             r.title,r.filename,r.base_revision_id,r.summary,r.created_at
+           FROM document_revisions r JOIN users u ON u.id=r.author_id
+           WHERE r.document_id=? ${beforeOrdinal === null ? '' : 'AND r.ordinal<?'}
+           ORDER BY r.ordinal DESC LIMIT ?`,
+        )
+        .bind(
+          id,
+          ...(beforeOrdinal === null ? [] : [beforeOrdinal]),
+          revisionPageSize + 1,
+        )
+        .all<DocumentRevisionSummary>()
+    ).results;
+    const revisions = rows.slice(0, revisionPageSize);
+    const last = revisions.at(-1);
+    return {
+      revisions,
+      nextCursor:
+        rows.length > revisionPageSize && last
+          ? encodeRevisionCursor({
+              v: 1,
+              type: 'revision-history',
+              direction: 'older',
+              documentId: id,
+              viewerId: this.viewer.id,
+              isTest: Boolean(this.viewer.isTest),
+              beforeOrdinal: last.ordinal,
+            })
+          : null,
+    };
   }
   private async initialDocumentReceipt(id: string) {
     const receipt = await this.db

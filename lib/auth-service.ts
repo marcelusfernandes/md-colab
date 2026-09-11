@@ -90,17 +90,25 @@ function optionalDestination(input: Record<string, unknown>) {
     input.commentId === undefined || input.commentId === null
       ? null
       : input.commentId;
+  const revisionId =
+    input.revisionId === undefined || input.revisionId === null
+      ? null
+      : input.revisionId;
   if (
     (documentId !== null &&
       (typeof documentId !== 'string' || !localIdPattern.test(documentId))) ||
     (commentId !== null &&
       (typeof commentId !== 'string' || !localIdPattern.test(commentId))) ||
-    (commentId !== null && documentId === null)
+    (revisionId !== null &&
+      (typeof revisionId !== 'string' || !localIdPattern.test(revisionId))) ||
+    ((commentId !== null || revisionId !== null) && documentId === null) ||
+    (commentId !== null && revisionId !== null)
   )
     throw new HttpError(400, 'Solicitação inválida.');
-  return { documentId, commentId } as {
+  return { documentId, commentId, revisionId } as {
     documentId: string | null;
     commentId: string | null;
+    revisionId: string | null;
   };
 }
 
@@ -136,7 +144,7 @@ export class AuthService {
     if (!this.config.testMode)
       throw new HttpError(404, 'Acesso de teste indisponível.');
     const email = validEmail(input.email);
-    const { documentId, commentId } = optionalDestination(input);
+    const { documentId, commentId, revisionId } = optionalDestination(input);
     if (documentId !== null) {
       if (
         !(await this.db
@@ -154,6 +162,16 @@ export class AuthService {
         .first())
     )
       throw new HttpError(404, 'Comentário de teste indisponível.');
+    if (
+      revisionId !== null &&
+      !(await this.db
+        .prepare(
+          'SELECT id FROM document_revisions WHERE id=? AND document_id=?',
+        )
+        .bind(revisionId, documentId)
+        .first())
+    )
+      throw new HttpError(404, 'Revisão de teste indisponível.');
     const existing = await this.viewer(request);
     const id = existing?.id ?? crypto.randomUUID();
     if (!existing) {
@@ -176,7 +194,11 @@ export class AuthService {
       redirect: documentId
         ? '/d/' +
           documentId +
-          (commentId ? '?comment=' + encodeURIComponent(commentId) : '')
+          (commentId
+            ? '?comment=' + encodeURIComponent(commentId)
+            : revisionId
+              ? '?revision=' + encodeURIComponent(revisionId)
+              : '')
         : '/documentos',
     };
   }
@@ -225,22 +247,29 @@ export class AuthService {
 
   async requestLink(input: Record<string, unknown>, ip: string) {
     const email = validEmail(input.email);
-    const { documentId, commentId } = optionalDestination(input);
+    const { documentId, commentId, revisionId } = optionalDestination(input);
     this.assertMailConfigured();
     await this.limit('request-ip', ip, 30, LINK_SECONDS);
     await this.limit('request-email', email, 5, LINK_SECONDS);
     if (await this.allowed(email, documentId)) {
-      const destinationExists =
-        commentId === null ||
-        !!(await this.db
-          .prepare('SELECT id FROM comments WHERE id=? AND document_id=?')
-          .bind(commentId, documentId)
-          .first());
+      const destinationExists = commentId
+        ? !!(await this.db
+            .prepare('SELECT id FROM comments WHERE id=? AND document_id=?')
+            .bind(commentId, documentId)
+            .first())
+        : revisionId
+          ? !!(await this.db
+              .prepare(
+                'SELECT id FROM document_revisions WHERE id=? AND document_id=?',
+              )
+              .bind(revisionId, documentId)
+              .first())
+          : true;
       if (!destinationExists) return { message: REQUEST_MESSAGE };
       // A provider failure must not reveal which addresses have access.
       // Authenticated invitations report failure to the owner separately.
       try {
-        await this.issue(email, documentId, commentId, false);
+        await this.issue(email, documentId, commentId, revisionId, false);
       } catch {
         /* Generic response prevents address enumeration. */
       }
@@ -254,13 +283,14 @@ export class AuthService {
     await this.limit('invite-email', email, 5, LINK_SECONDS);
     if (!(await this.allowed(email, documentId)))
       throw new HttpError(404, 'Acesso não encontrado.');
-    await this.issue(email, documentId, null, true);
+    await this.issue(email, documentId, null, null, true);
   }
 
   private async issue(
     email: string,
     documentId: string | null,
     commentId: string | null,
+    revisionId: string | null,
     invitation: boolean,
   ) {
     const now = this.now();
@@ -274,9 +304,9 @@ export class AuthService {
     const hash = await hashToken(token);
     await this.db
       .prepare(
-        'INSERT INTO magic_links(token_hash,email,document_id,comment_id,expires_at,used_at) VALUES(?,?,?,?,?,NULL)',
+        'INSERT INTO magic_links(token_hash,email,document_id,comment_id,revision_id,expires_at,used_at) VALUES(?,?,?,?,?,?,NULL)',
       )
-      .bind(hash, email, documentId, commentId, now + LINK_SECONDS)
+      .bind(hash, email, documentId, commentId, revisionId, now + LINK_SECONDS)
       .run();
     try {
       // Fragment keeps the token out of HTTP access logs and referrer headers.
@@ -325,15 +355,20 @@ export class AuthService {
         OR EXISTS(SELECT 1 FROM documents d JOIN users u ON u.id=d.owner_id
           WHERE d.id=magic_links.document_id AND d.is_test=0 AND u.test_email IS NULL
           AND (u.email=magic_links.email OR EXISTS(SELECT 1 FROM shares s WHERE s.document_id=d.id AND s.email=magic_links.email)))
-      ) AND (comment_id IS NULL OR EXISTS(
+      ) AND NOT (comment_id IS NOT NULL AND revision_id IS NOT NULL)
+      AND (comment_id IS NULL OR EXISTS(
         SELECT 1 FROM comments c
         WHERE c.id=magic_links.comment_id AND c.document_id=magic_links.document_id
-      )) RETURNING email,document_id,comment_id`)
+      )) AND (revision_id IS NULL OR EXISTS(
+        SELECT 1 FROM document_revisions r
+        WHERE r.id=magic_links.revision_id AND r.document_id=magic_links.document_id
+      )) RETURNING email,document_id,comment_id,revision_id`)
       .bind(now, await hashToken(value), now, ...authorParameters)
       .first<{
         email: string;
         document_id: string | null;
         comment_id: string | null;
+        revision_id: string | null;
       }>();
     if (!link) throw invalid();
     const invited = await this.db
@@ -377,7 +412,9 @@ export class AuthService {
           link.document_id +
           (link.comment_id
             ? '?comment=' + encodeURIComponent(link.comment_id)
-            : '')
+            : link.revision_id
+              ? '?revision=' + encodeURIComponent(link.revision_id)
+              : '')
         : '/documentos',
     };
   }
