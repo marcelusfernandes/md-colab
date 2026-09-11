@@ -428,6 +428,155 @@ a:focus-visible {
   margin-top: 14px;
   font-size: 14px;
 }
+.revision-history-panel {
+  margin-bottom: 22px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+.revision-history-heading,
+.revision-snapshot-heading,
+.revision-snapshot-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.revision-history-heading h2,
+.revision-comparison h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.revision-history-panel p {
+  margin-top: 5px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.revision-history-notice {
+  display: block;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: var(--muted);
+  font-size: 14px;
+}
+.revision-history-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+  list-style: none;
+}
+.revision-history-list li {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.revision-history-list li.revision-history-active {
+  border-color: #507aa5;
+  box-shadow: 0 0 0 1px #507aa5;
+}
+.revision-history-list button {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  padding: 10px;
+  text-align: left;
+}
+.revision-history-list span,
+.revision-history-list time {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.revision-snapshot {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.revision-snapshot-actions {
+  justify-content: flex-end;
+}
+.revision-snapshot-actions button,
+.revision-considered-comments button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.revision-snapshot-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
+  margin: 16px 0;
+  font-size: 14px;
+}
+.revision-snapshot-meta div { min-width: 0; }
+.revision-snapshot-meta dt { color: var(--muted-foreground); }
+.revision-snapshot-meta dd { overflow-wrap: anywhere; }
+.revision-original,
+.revision-diff-lines {
+  max-height: 480px;
+  overflow: auto;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+}
+.revision-considered-comments,
+.revision-comparison {
+  margin-top: 18px;
+}
+.revision-considered-comments ul { margin: 8px 0 0 20px; }
+.revision-comparison label {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.revision-comparison select {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--input);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.revision-format-note,
+.revision-diff-unavailable {
+  padding: 9px 11px;
+  border-radius: 7px;
+  background: var(--muted);
+}
+.revision-comparison-meta {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  font-size: 14px;
+}
+.revision-comparison-meta div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; }
+.revision-comparison-meta dt { color: var(--muted-foreground); }
+.revision-comparison-meta dd { overflow-wrap: anywhere; }
+.revision-diff-lines code { display: grid; }
+.revision-diff-lines span { display: block; min-height: 1.55em; }
+.revision-diff-added { background: #e8f7ed; color: #185b36; }
+.revision-diff-removed { background: #fff0ee; color: #862c25; }
+.revision-diff details { margin-top: 12px; }
+.revision-diff summary { cursor: pointer; font-weight: 600; }
 .reading-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
@@ -897,10 +1046,17 @@ a:focus-visible {
   .revision-publisher-heading,
   .origin-revision-heading,
   .origin-revision-actions,
+  .revision-history-heading,
+  .revision-snapshot-heading,
+  .revision-snapshot-actions,
   .revision-operation-actions {
     align-items: stretch;
     display: grid;
   }
+  .revision-history-panel { padding: 14px; }
+  .revision-history-list,
+  .revision-snapshot-meta { grid-template-columns: minmax(0, 1fr); }
+  .revision-history-heading > button { width: 100%; }
   .preserved-comment {
     margin: -42px 12px 48px;
     padding: 16px;

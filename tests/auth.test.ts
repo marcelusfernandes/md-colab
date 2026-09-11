@@ -1595,3 +1595,107 @@ void test('destino de comentário fica associado ao token e não cria oráculo d
     401,
   );
 });
+
+void test('destino de revisão é exclusivo, ligado ao token e revalidado no resgate', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.login();
+  const service = new DocumentService(f.db, owner.viewer);
+  const document = await service.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Inicial',
+    filename: 'inicial.md',
+  });
+  const revision = (
+    await service.createRevision(document.id, {
+      id: crypto.randomUUID(),
+      baseRevisionId: document.current_revision_id,
+      markdown: '# Segunda',
+      filename: 'segunda.md',
+      consideredCommentIds: [],
+    })
+  ).revision;
+  const other = await service.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Outro',
+    filename: 'outro.md',
+  });
+  const comment = await service.addComment(document.id, {
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    body: 'Comentário',
+    sourceRevisionId: revision.id,
+  });
+  await service.share(document.id, { email: 'guest@example.com' });
+
+  const requested = await f.call('auth/request', 'POST', {
+    email: 'guest@example.com',
+    documentId: document.id,
+    revisionId: revision.id,
+  });
+  assert.equal(requested.status, 200);
+  const token = f.mailbox.lastToken();
+  const stored = f.sqlite
+    .prepare(
+      'SELECT document_id,comment_id,revision_id FROM magic_links WHERE used_at IS NULL ORDER BY rowid DESC LIMIT 1',
+    )
+    .get() as {
+    document_id: string;
+    comment_id: string | null;
+    revision_id: string | null;
+  };
+  assert.equal(stored.document_id, document.id);
+  assert.equal(stored.comment_id, null);
+  assert.equal(stored.revision_id, revision.id);
+  const verified = await f.call('auth/verify', 'POST', {
+    token,
+    documentId: other.id,
+    revisionId: other.id,
+  });
+  assert.equal(verified.status, 200);
+  assert.equal(
+    (await data(verified)).redirect,
+    `/d/${document.id}?revision=${revision.id}`,
+  );
+
+  assert.equal(
+    (
+      await f.call('auth/request', 'POST', {
+        email: 'guest@example.com',
+        documentId: document.id,
+        commentId: comment.id,
+        revisionId: revision.id,
+      })
+    ).status,
+    400,
+  );
+  const messageCount = f.mailbox.messages.length;
+  for (const destination of [
+    { documentId: document.id, revisionId: crypto.randomUUID() },
+    { documentId: other.id, revisionId: revision.id },
+  ])
+    assert.equal(
+      (
+        await f.call('auth/request', 'POST', {
+          email: 'guest@example.com',
+          ...destination,
+        })
+      ).status,
+      200,
+    );
+  assert.equal(f.mailbox.messages.length, messageCount);
+
+  await f.auth.requestLink(
+    {
+      email: 'guest@example.com',
+      documentId: document.id,
+      revisionId: revision.id,
+    },
+    'revision-revocation',
+  );
+  const revokedToken = f.mailbox.lastToken();
+  await service.revoke(document.id, 'guest@example.com');
+  await assert.rejects(f.auth.redeem(revokedToken), isDenied);
+});

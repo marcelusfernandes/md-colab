@@ -193,7 +193,7 @@ function commentPageQuery(parameters: URLSearchParams): CommentPageQuery {
 
 function cursorPageQuery(
   parameters: URLSearchParams,
-  collection: 'documentos' | 'convidados',
+  collection: 'documentos' | 'convidados' | 'revisões',
 ): CursorPageQuery {
   const keys = [...parameters.keys()];
   if (
@@ -398,6 +398,13 @@ export async function handleApi(
       }
       if (action === 'revisions' && resourceId && !subresource)
         return json({ revision: await service.revision(id, resourceId) });
+      if (action === 'revisions' && !resourceId)
+        return json(
+          await service.revisions(
+            id,
+            cursorPageQuery(url.searchParams, 'revisões'),
+          ),
+        );
       if (action === 'comments' && resourceId && !subresource)
         return json({ comment: await service.comment(id, resourceId) });
       if (

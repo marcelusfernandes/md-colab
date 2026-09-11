@@ -1,0 +1,1 @@
+ALTER TABLE `magic_links` ADD `revision_id` text REFERENCES document_revisions(id);

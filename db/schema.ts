@@ -250,6 +250,7 @@ export const magicLinks = sqliteTable(
     email: text('email').notNull(),
     documentId: text('document_id').references(() => documents.id),
     commentId: text('comment_id').references(() => comments.id),
+    revisionId: text('revision_id').references(() => documentRevisions.id),
     expiresAt: integer('expires_at').notNull(),
     usedAt: integer('used_at'),
   },

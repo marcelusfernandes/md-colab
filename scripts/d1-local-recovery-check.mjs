@@ -42,6 +42,7 @@ const currentMigrations = [
   '0008_lethal_ultron.sql',
   '0009_slimy_kingpin.sql',
   '0010_serious_dazzler.sql',
+  '0011_tiny_valeria_richards.sql',
 ];
 const currentTables = [
   'd1_migrations',
@@ -137,6 +138,10 @@ INSERT INTO document_revisions
   (id,document_id,ordinal,author_id,title,filename,markdown,base_revision_id,summary,considered_comment_ids,created_at)
 VALUES
   ('${ids.revision3}','${ids.document}',3,'${ids.owner}','${marker}-v3','plan-v3.md','# Synthetic v3','${ids.revision2}',NULL,'[]','2026-09-10T00:02:45.000Z');
+INSERT INTO magic_links(token_hash,email,document_id,comment_id,revision_id,expires_at,used_at)
+VALUES
+  ('synthetic-comment-link','guest@example.test','${ids.document}','${ids.comment}',NULL,1900000000,NULL),
+  ('synthetic-revision-link','guest@example.test','${ids.document}',NULL,'${ids.revision2}',1900000000,NULL);
 INSERT INTO publishing_tokens(id,user_id,name,token_hash,created_at,expires_at,revoked_at)
 VALUES('${ids.credential}','${ids.owner}','Revoked synthetic credential','${revokedHash}','2026-09-10T00:03:00.000Z',1900000000,1789014000);
 INSERT INTO publications(id,document_id,author_id,publishing_token_id,idempotency_key_hash,payload_digest,created_at)
@@ -155,6 +160,7 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT count(*) FROM shares) AS shares_count,
       (SELECT count(*) FROM publications) AS publications_count,
       (SELECT count(*) FROM publishing_tokens WHERE revoked_at IS NOT NULL) AS revoked_count,
+      (SELECT count(*) FROM magic_links) AS magic_links_count,
       (SELECT owner_id FROM documents WHERE id='${ids.document}') AS owner_id,
       (SELECT author_id FROM comments WHERE id='${ids.comment}') AS comment_author_id,
       (SELECT sequence FROM comments WHERE id='${ids.comment}') AS comment_sequence,
@@ -166,6 +172,10 @@ function verifyFixture(environment, marker = 'source-marker') {
       (SELECT summary FROM document_revisions WHERE id='${ids.revision2}') AS revision2_summary,
       (SELECT considered_comment_ids FROM document_revisions WHERE id='${ids.revision2}') AS revision2_refs,
       (SELECT base_revision_id FROM document_revisions WHERE id='${ids.revision3}') AS revision3_base,
+      (SELECT comment_id FROM magic_links WHERE token_hash='synthetic-comment-link') AS comment_link_comment_id,
+      (SELECT revision_id FROM magic_links WHERE token_hash='synthetic-comment-link') AS comment_link_revision_id,
+      (SELECT comment_id FROM magic_links WHERE token_hash='synthetic-revision-link') AS revision_link_comment_id,
+      (SELECT revision_id FROM magic_links WHERE token_hash='synthetic-revision-link') AS revision_link_revision_id,
       EXISTS(SELECT 1 FROM shares WHERE document_id='${ids.document}' AND email='guest@example.test') AS guest_grant,
       EXISTS(SELECT 1 FROM shares WHERE document_id='${ids.document}' AND email='stranger@example.test') AS stranger_grant`,
   ).results;
@@ -182,6 +192,7 @@ function verifyFixture(environment, marker = 'source-marker') {
     'Share/publicacao divergentes.',
   );
   assert(row.revoked_count === 1, 'Credencial revogada ausente.');
+  assert(row.magic_links_count === 2, 'Destinos sinteticos de acesso divergentes.');
   assert(row.owner_id === ids.owner, 'Propriedade do plano divergente.');
   assert(
     row.comment_author_id === ids.guest,
@@ -207,6 +218,13 @@ function verifyFixture(environment, marker = 'source-marker') {
       row.revision2_refs === `["${ids.comment}"]` &&
       row.revision3_base === ids.revision2,
     'Base, resumo ou referencias dos snapshots v2/v3 divergentes.',
+  );
+  assert(
+    row.comment_link_comment_id === ids.comment &&
+      row.comment_link_revision_id === null &&
+      row.revision_link_comment_id === null &&
+      row.revision_link_revision_id === ids.revision2,
+    'Destinos exclusivos de comentario/revisao divergentes.',
   );
   assert(
     row.guest_grant === 1 && row.stranger_grant === 0,
@@ -363,6 +381,11 @@ export function run(outputValue) {
   );
   executeSql(
     legacy,
+    `INSERT INTO magic_links(token_hash,email,document_id,expires_at,used_at)
+     VALUES('legacy-link','legacy@example.test','legacy-document',1900000000,NULL)`,
+  );
+  executeSql(
+    legacy,
     `INSERT INTO comments(id,document_id,author_id,body,quote,source_start,created_at) VALUES
      ('ffffffff-ffff-4fff-8fff-ffffffffffff','legacy-document','legacy-user','second by id','quote b',2,'2026-01-02T00:00:00.000Z'),
      ('00000000-0000-4000-8000-000000000001','legacy-document','legacy-user','first by id','quote a',1,'2026-01-02T00:00:00.000Z'),
@@ -451,6 +474,15 @@ export function run(outputValue) {
   assert(
     foreignKeyViolations(legacy).length === 0,
     'FK do legado atualizado falhou.',
+  );
+  assert(
+    executeSql(
+      legacy,
+      `SELECT count(*) AS count FROM magic_links
+       WHERE token_hash='legacy-link' AND document_id='legacy-document'
+         AND comment_id IS NULL AND revision_id IS NULL AND used_at IS NULL`,
+    ).results[0]?.count === 1,
+    'A migracao nao preservou o destino de documento do token legado.',
   );
   assert(
     executeSql(legacy, 'SELECT count(*) AS count FROM notification_events')

@@ -10,6 +10,7 @@ import {
 import type { HTMLAttributes } from 'react';
 import { EmailLogin } from '@/components/email-login';
 import { PublishingTokens } from '@/components/publishing-tokens';
+import { RevisionHistory } from '@/components/revision-history';
 import { api, ApiError, errorText } from '@/lib/client-api';
 import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -143,6 +144,7 @@ import {
   type RevisionAttempt,
   type RevisionOperation,
 } from '@/lib/revision-operation';
+import { documentDestination } from '@/lib/revision-history';
 
 const COMMENT_REQUEST_TIMEOUT_MS = 30_000;
 const IMPORT_REQUEST_TIMEOUT_MS = 30_000;
@@ -280,6 +282,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const revisionReadInProgress = useRef(false);
   const revisionSendRequest = useRef(0);
   const originRevisionRequest = useRef(0);
+  const currentHistoryRequest = useRef(0);
   const loadRequest = useRef(0);
   const documentsGeneration = useRef(0);
   const documentsPageRequest = useRef(0);
@@ -382,6 +385,10 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   const [directedCommentId, setDirectedCommentId] = useState<string | null>(
     null,
   );
+  const [revisionDestinationId, setRevisionDestinationId] = useState<
+    string | null
+  >(null);
+  const [destinationError, setDestinationError] = useState('');
   const [directedCommentContext, setDirectedCommentContext] =
     useState<DirectedCommentContext | null>(null);
   const [directedCommentLoading, setDirectedCommentLoading] = useState(false);
@@ -460,11 +467,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
 
   const updateCommentDestination = useCallback(
     (push: boolean, value?: string | null) => {
-      const parsed = commentDestination(
+      const destination =
         value === undefined
-          ? new URLSearchParams(window.location.search).get('comment')
-          : value,
-      );
+          ? documentDestination(new URLSearchParams(window.location.search))
+          : { commentId: value, revisionId: null, error: '' };
+      const parsed = commentDestination(destination.commentId);
       directedCommentRequest.current += 1;
       directedCommentIdRef.current = parsed.id;
       directedCommentContextRef.current = null;
@@ -475,6 +482,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setDirectedCommentContext(null);
       setDirectedCommentLoading(false);
       setDirectedCommentError(parsed.error);
+      setRevisionDestinationId(destination.revisionId);
+      setDestinationError(destination.error);
       setBusy((current) =>
         current.startsWith('collection-replies:') ||
         current.startsWith('directed-replies:')
@@ -485,12 +494,36 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         const url = new URL(window.location.href);
         if (parsed.id) url.searchParams.set('comment', parsed.id);
         else url.searchParams.delete('comment');
+        url.searchParams.delete('revision');
         window.history.pushState(
           null,
           '',
           url.pathname + url.search + url.hash,
         );
       }
+    },
+    [],
+  );
+
+  const updateRevisionDestination = useCallback(
+    (value: string | null) => {
+      directedCommentRequest.current += 1;
+      directedCommentIdRef.current = null;
+      directedCommentContextRef.current = null;
+      directedRecentWindowRef.current = null;
+      collectionReplyRequest.current += 1;
+      directedReplyRequest.current += 1;
+      setDirectedCommentId(null);
+      setDirectedCommentContext(null);
+      setDirectedCommentLoading(false);
+      setDirectedCommentError('');
+      setRevisionDestinationId(value);
+      setDestinationError('');
+      const url = new URL(window.location.href);
+      url.searchParams.delete('comment');
+      if (value) url.searchParams.set('revision', value);
+      else url.searchParams.delete('revision');
+      window.history.pushState(null, '', url.pathname + url.search + url.hash);
     },
     [],
   );
@@ -670,6 +703,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       collectionReplyRequest.current += 1;
       directedReplyRequest.current += 1;
       originRevisionRequest.current += 1;
+      currentHistoryRequest.current += 1;
       setOriginRevision(null);
       setOriginRevisionLoading(false);
       setOriginRevisionError('');
@@ -3516,6 +3550,30 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
   function closeCommentLink() {
     updateCommentDestination(true, null);
   }
+  async function reloadCurrentFromHistory() {
+    if (!doc || !viewer) return false;
+    const request = ++currentHistoryRequest.current;
+    const generation = contextGeneration.current;
+    const expectedDocumentId = doc.id;
+    const expectedViewerId = viewer.id;
+    const response = await api<{ document: unknown; isOwner: boolean }>(
+      `documents/${expectedDocumentId}`,
+    );
+    if (
+      !mounted.current ||
+      request !== currentHistoryRequest.current ||
+      generation !== contextGeneration.current ||
+      activeDocumentId.current !== expectedDocumentId ||
+      activeViewerId.current !== expectedViewerId
+    )
+      return false;
+    const current = documentFromValue(response.document);
+    if (current.id !== expectedDocumentId)
+      throw new Error('O servidor retornou outro plano ao reler a revisão atual.');
+    setDoc(current);
+    setIsOwner(response.isOwner);
+    return true;
+  }
   function showQuote(entry: CommentRow) {
     if (!doc) return;
     if (
@@ -3634,6 +3692,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           authorMode={authorMode}
           commentId={directedCommentId ?? undefined}
           documentId={documentId}
+          revisionId={revisionDestinationId ?? undefined}
+          destinationError={destinationError || undefined}
           mode={accessMode}
         />
       ) : !documentId ? (
@@ -4030,6 +4090,19 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                 </div>
               )}
             </section>
+          )}
+          {viewer && (
+            <RevisionHistory
+              document={doc}
+              viewer={viewer}
+              revisionId={revisionDestinationId}
+              destinationError={destinationError}
+              onNavigate={updateRevisionDestination}
+              onOpenComment={openCommentLink}
+              onProtectedError={hideProtectedContent}
+              onReloadCurrent={reloadCurrentFromHistory}
+              onNotice={setNotice}
+            />
           )}
           {(originRevision || originRevisionLoading || originRevisionError) && (
             <section className="origin-revision-panel" aria-label="Revisão de origem">

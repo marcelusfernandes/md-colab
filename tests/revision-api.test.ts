@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleApi } from '../lib/api-handler.ts';
 import { AuthService } from '../lib/auth-service.ts';
-import type { DocumentRevisionReceipt, DocumentRow } from '../lib/document-service.ts';
+import {
+  DocumentService,
+  type DocumentRevisionReceipt,
+  type DocumentRevisionSummary,
+  type DocumentRow,
+} from '../lib/document-service.ts';
 import { database, TestMailbox } from './fixture.ts';
 
 const origin = 'https://docs.example.com';
@@ -46,6 +51,36 @@ function fixture() {
     return { ...redeemed, cookie: auth.cookie(redeemed.session).split(';')[0] };
   }
   return { sqlite, values, mailbox, auth, call, ownerLogin };
+}
+
+function pauseRevisionHistoryRead(db: D1Database) {
+  let reached!: () => void;
+  let resume!: () => void;
+  const reading = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const controlled = Object.create(db) as D1Database;
+  controlled.prepare = (sql: string) => {
+    const statement = db.prepare(sql);
+    if (!sql.includes('FROM document_revisions r JOIN users u'))
+      return statement;
+    return {
+      bind(...values: unknown[]) {
+        const bound = statement.bind(...values);
+        return {
+          async all<T = unknown>() {
+            reached();
+            await gate;
+            return bound.all<T>();
+          },
+        };
+      },
+    } as unknown as D1PreparedStatement;
+  };
+  return { controlled, reading, resume };
 }
 
 void test('rota de revisão exige autor habilitado e GET segue acesso atual do plano', async (t) => {
@@ -223,4 +258,191 @@ void test('rota recusa JSON acima de 2 MB antes de criar snapshot', async (t) =>
     owner.cookie,
   );
   assert.equal(response.status, 413);
+});
+
+void test('histórico pagina por ordinal e vincula cursor ao documento, identidade e modo', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.ownerLogin();
+  const documentId = crypto.randomUUID();
+  const created = await f.call(
+    'documents',
+    'POST',
+    {
+      id: documentId,
+      authorId: owner.viewer.id,
+      markdown: '# Revisão 1',
+      filename: 'revisao-1.md',
+    },
+    owner.cookie,
+  );
+  assert.equal(created.status, 201);
+  let baseRevisionId = documentId;
+  const service = new DocumentService(f.values.DB, owner.viewer, {
+    MAX_REVISIONS_PER_DOCUMENT: '100',
+  });
+  const originalIds = [documentId];
+  for (let ordinal = 2; ordinal <= 55; ordinal += 1) {
+    const id = crypto.randomUUID();
+    const result = await service.createRevision(documentId, {
+      id,
+      baseRevisionId,
+      markdown: `# Revisão ${ordinal}`,
+      filename: `revisao-${ordinal}.md`,
+      summary: `Resumo ${ordinal}`,
+      consideredCommentIds: [],
+    });
+    baseRevisionId = result.revision.id;
+    originalIds.push(id);
+  }
+
+  const firstResponse = await f.call(
+    `documents/${documentId}/revisions`,
+    'GET',
+    undefined,
+    owner.cookie,
+  );
+  assert.equal(firstResponse.status, 200);
+  const first = (await firstResponse.json()) as {
+    revisions: DocumentRevisionSummary[];
+    nextCursor: string | null;
+  };
+  assert.equal(first.revisions.length, 50);
+  assert.deepEqual(
+    first.revisions.map((revision) => revision.ordinal),
+    Array.from({ length: 50 }, (_, index) => 55 - index),
+  );
+  assert.ok(first.nextCursor);
+  assert.equal('markdown' in first.revisions[0]!, false);
+  assert.equal('considered_comment_ids' in first.revisions[0]!, false);
+  assert.equal(first.revisions[0]?.author_name, 'Dona');
+
+  const newestId = crypto.randomUUID();
+  await service.createRevision(documentId, {
+    id: newestId,
+    baseRevisionId,
+    markdown: '# Revisão 56',
+    filename: 'revisao-56.md',
+    consideredCommentIds: [],
+  });
+  const secondResponse = await f.call(
+    `documents/${documentId}/revisions?cursor=${encodeURIComponent(first.nextCursor!)}`,
+    'GET',
+    undefined,
+    owner.cookie,
+  );
+  assert.equal(secondResponse.status, 200);
+  const second = (await secondResponse.json()) as {
+    revisions: DocumentRevisionSummary[];
+    nextCursor: string | null;
+  };
+  assert.deepEqual(
+    second.revisions.map((revision) => revision.ordinal),
+    [5, 4, 3, 2, 1],
+  );
+  assert.equal(second.nextCursor, null);
+  assert.deepEqual(
+    new Set([...first.revisions, ...second.revisions].map((entry) => entry.id)),
+    new Set(originalIds),
+  );
+
+  const refreshed = (await (
+    await f.call(
+      `documents/${documentId}/revisions`,
+      'GET',
+      undefined,
+      owner.cookie,
+    )
+  ).json()) as { revisions: DocumentRevisionSummary[]; nextCursor: string };
+  assert.equal(refreshed.revisions[0]?.id, newestId);
+  assert.equal(refreshed.revisions[0]?.ordinal, 56);
+
+  const otherId = crypto.randomUUID();
+  await f.call(
+    'documents',
+    'POST',
+    {
+      id: otherId,
+      authorId: owner.viewer.id,
+      markdown: '# Outro',
+      filename: 'outro.md',
+    },
+    owner.cookie,
+  );
+  assert.equal(
+    (
+      await f.call(
+        `documents/${otherId}/revisions?cursor=${encodeURIComponent(first.nextCursor!)}`,
+        'GET',
+        undefined,
+        owner.cookie,
+      )
+    ).status,
+    400,
+  );
+
+  await service.share(documentId, { email: 'guest@example.com' });
+  await f.auth.invite('guest@example.com', documentId, owner.viewer.id);
+  const guest = await f.auth.redeem(f.mailbox.lastToken());
+  const guestCookie = f.auth.cookie(guest.session).split(';')[0];
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/revisions?cursor=${encodeURIComponent(first.nextCursor!)}`,
+        'GET',
+        undefined,
+        guestCookie,
+      )
+    ).status,
+    400,
+  );
+  await service.revoke(documentId, 'guest@example.com');
+  assert.equal(
+    (
+      await f.call(
+        `documents/${documentId}/revisions`,
+        'GET',
+        undefined,
+        guestCookie,
+      )
+    ).status,
+    404,
+  );
+});
+
+void test('revogação durante a consulta impede devolver histórico lido depois', async (t) => {
+  const f = fixture();
+  t.after(() => f.sqlite.close());
+  const owner = await f.ownerLogin();
+  const service = new DocumentService(f.values.DB, owner.viewer);
+  const document = await service.create({
+    id: crypto.randomUUID(),
+    authorId: owner.viewer.id,
+    markdown: '# Inicial',
+    filename: 'inicial.md',
+  });
+  await service.share(document.id, { email: 'guest@example.com' });
+  await f.auth.invite('guest@example.com', document.id, owner.viewer.id);
+  const guest = await f.auth.redeem(f.mailbox.lastToken());
+  const guestCookie = f.auth.cookie(guest.session).split(';')[0];
+  const paused = pauseRevisionHistoryRead(f.values.DB);
+  f.values.DB = paused.controlled;
+  const pending = f.call(
+    `documents/${document.id}/revisions`,
+    'GET',
+    undefined,
+    guestCookie,
+  );
+  await paused.reading;
+  await service.revoke(document.id, 'guest@example.com');
+  await service.createRevision(document.id, {
+    id: crypto.randomUUID(),
+    baseRevisionId: document.current_revision_id,
+    markdown: '# Segunda',
+    filename: 'segunda.md',
+    summary: 'Publicada depois da revogação',
+    consideredCommentIds: [],
+  });
+  paused.resume();
+  assert.equal((await pending).status, 404);
 });
