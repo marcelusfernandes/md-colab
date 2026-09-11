@@ -388,6 +388,13 @@ export function RevisionHistory({
     onOpenComment(id);
   }
 
+  function chooseComparison(id: string | null) {
+    currentReadRequest.current += 1;
+    setCurrentLoading(false);
+    setCurrentError('');
+    setComparisonId(id);
+  }
+
   async function returnCurrent() {
     if (currentLoading) return;
     const request = ++currentReadRequest.current;
@@ -642,7 +649,7 @@ export function RevisionHistory({
                   <select
                     value={comparisonId ?? ''}
                     onChange={(event) =>
-                      setComparisonId(event.target.value || null)
+                      chooseComparison(event.target.value || null)
                     }
                   >
                     <option value="">Escolha uma revisão</option>
@@ -674,7 +681,12 @@ export function RevisionHistory({
                     {comparisonError}{' '}
                     <button
                       type="button"
-                      onClick={() => setComparisonRetry((value) => value + 1)}
+                      onClick={() => {
+                        currentReadRequest.current += 1;
+                        setCurrentLoading(false);
+                        setCurrentError('');
+                        setComparisonRetry((value) => value + 1);
+                      }}
                     >
                       Tentar novamente
                     </button>
