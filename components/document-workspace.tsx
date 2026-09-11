@@ -2918,7 +2918,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                           void retryConversationAsNew(conversationOperation)
                         }
                       >
-                        Recarregar e tentar com novo identificador
+                        Recarregar e tentar novamente
                       </button>
                       <button
                         type="button"
