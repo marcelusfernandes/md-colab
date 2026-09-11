@@ -25,6 +25,7 @@ import {
   CliError,
   CommittedBundleError,
   FeedbackClient,
+  readLocalMarkdown,
   reserveOutput,
   writeBundle,
 } from '../scripts/md-colab-feedback.mjs';
@@ -122,7 +123,7 @@ function fixture() {
     body: 'Divergência preservada',
     quote: '',
     source_start: null,
-    source_revision_id: currentRevisionId,
+    source_revision_id: sourceRevisionId,
     created_at: new Date(Date.UTC(2026, 8, 11, 1, 0, 0)).toISOString(),
     is_root: false,
     conversation: null,
@@ -145,8 +146,8 @@ function fixture() {
     contract_version: 1,
     document: {
       id: documentId,
-      title: 'Plano',
-      filename: 'plano.md',
+      title: 'Atual',
+      filename: 'atual.md',
       current_revision_id: currentRevisionId,
       current_revision_ordinal: 2,
     },
@@ -256,6 +257,7 @@ function client(fetchImpl: typeof fetch) {
 }
 
 const operations = { chmod, link, lstat, mkdir, open, readFile, unlink };
+const fakeOperations = (value: unknown) => value as typeof operations;
 
 function runCli(arguments_: string[], selectedToken = token) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>(
@@ -343,6 +345,17 @@ void test('coleta páginas completas, valida contexto e separa UUIDs que diferem
     sha256: sha256(currentBytes),
   });
   assert.equal(built.comparison, 'identical');
+  assert.equal(
+    buildContext(origin, collected, null).comparison,
+    'not_compared',
+  );
+  assert.equal(
+    buildContext(origin, collected, {
+      byteLength: currentBytes.byteLength,
+      sha256: sha256(Buffer.from('# Diferente\n')),
+    }).comparison,
+    'different',
+  );
   assert.equal(
     new Set(built.context.revisions.map((item: { file: string }) => item.file))
       .size,
@@ -473,6 +486,108 @@ void test('mudança final, cursor cíclico e contagens falsas nunca produzem col
   await assert.rejects(
     client(fixtureFetch(wrongCount, []) as unknown as typeof fetch).collect(),
     /contagens do manifesto/,
+  );
+});
+
+void test('rejeita relações impossíveis entre comentários, eventos, manifesto e snapshots', async () => {
+  async function rejected(
+    mutate: (data: ReturnType<typeof fixture>) => void,
+    message: RegExp,
+  ) {
+    const data = fixture();
+    mutate(data);
+    await assert.rejects(
+      client(fixtureFetch(data, []) as unknown as typeof fetch).collect(),
+      message,
+    );
+  }
+
+  await rejected((data) => {
+    data.comments.at(-1)!.source_revision_id = currentRevisionId;
+  }, /origem preservada/);
+  await rejected((data) => {
+    data.comments.at(-1)!.quote = 'Trecho próprio';
+    data.comments.at(-1)!.source_start = 10;
+  }, /origem preservada/);
+  await rejected((data) => {
+    data.manifest.document.title = 'Outro título';
+  }, /snapshot corrente diverge/);
+  await rejected((data) => {
+    Object.assign(data.events[0], {
+      action: 'follow',
+      state: 'closed',
+      decision: null,
+    });
+  }, /transição registrada/);
+  await rejected((data) => {
+    data.manifest.counts.revisions = 1;
+  }, /história observada/);
+  await rejected((data) => {
+    data.revisions.get(sourceRevisionId)!.ordinal = 90;
+  }, /história observada/);
+  await rejected((data) => {
+    data.revisions.get(sourceRevisionId)!.markdown = 'x'.repeat(
+      1024 * 1024 + 1,
+    );
+  }, /snapshot inválido/);
+  await rejected((data) => {
+    data.revisions.get(sourceRevisionId)!.markdown = '\ud800';
+  }, /snapshot inválido/);
+});
+
+void test('arquivo local é recusado sem bloqueio ou leitura ilimitada sob troca concorrente', async () => {
+  let opened = false;
+  await assert.rejects(
+    readLocalMarkdown(
+      '/tmp/fifo',
+      fakeOperations({
+        lstat: async () => ({ isFile: () => false }),
+        open: async () => {
+          opened = true;
+          throw new Error('não deve abrir');
+        },
+      }),
+    ),
+    /não é um arquivo regular/,
+  );
+  assert.equal(opened, false);
+
+  let maximumReadBuffer = 0;
+  await assert.rejects(
+    readLocalMarkdown(
+      '/tmp/growing.md',
+      fakeOperations({
+        lstat: async () => ({ isFile: () => true }),
+        open: async () => ({
+          stat: async () => ({ isFile: () => true, size: 5 }),
+          read: async (buffer: Buffer, offset: number, length: number) => {
+            maximumReadBuffer = Math.max(maximumReadBuffer, buffer.byteLength);
+            buffer.fill(0x61, offset, offset + length);
+            return { bytesRead: length, buffer };
+          },
+          close: async () => {},
+        }),
+      }),
+    ),
+    /no máximo 1 MiB/,
+  );
+  assert.equal(maximumReadBuffer, 1024 * 1024 + 1);
+
+  await assert.rejects(
+    readLocalMarkdown(
+      '/tmp/replaced.md',
+      fakeOperations({
+        lstat: async () => ({ isFile: () => true }),
+        open: async () => ({
+          stat: async () => ({ isFile: () => false, size: 0 }),
+          read: async () => {
+            throw new Error('não deve ler');
+          },
+          close: async () => {},
+        }),
+      }),
+    ),
+    /não é um arquivo regular/,
   );
 });
 

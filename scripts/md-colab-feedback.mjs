@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomBytes } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
   chmod,
   link,
@@ -164,15 +165,33 @@ export async function reserveOutput(output, operations = defaultOperations) {
 export async function readLocalMarkdown(path, operations = defaultOperations) {
   let handle;
   try {
-    handle = await operations.open(path, 'r');
+    const pathStat = await operations.lstat(path);
+    if (!pathStat.isFile())
+      throw new CliError('O Markdown local não é um arquivo regular.');
+    handle = await operations.open(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
     const stat = await handle.stat();
     if (!stat.isFile())
       throw new CliError('O Markdown local não é um arquivo regular.');
     if (stat.size > MAX_LOCAL_MARKDOWN_BYTES)
       throw new CliError('O Markdown local deve ter no máximo 1 MiB.');
-    const bytes = await handle.readFile();
-    if (bytes.byteLength > MAX_LOCAL_MARKDOWN_BYTES)
+    const buffer = Buffer.allocUnsafe(MAX_LOCAL_MARKDOWN_BYTES + 1);
+    let byteLength = 0;
+    while (byteLength < buffer.byteLength) {
+      const result = await handle.read(
+        buffer,
+        byteLength,
+        buffer.byteLength - byteLength,
+        byteLength,
+      );
+      if (result.bytesRead === 0) break;
+      byteLength += result.bytesRead;
+    }
+    if (byteLength > MAX_LOCAL_MARKDOWN_BYTES)
       throw new CliError('O Markdown local deve ter no máximo 1 MiB.');
+    const bytes = buffer.subarray(0, byteLength);
     try {
       new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
     } catch {
@@ -375,6 +394,10 @@ function validateRevision(value, documentId, revisionId, stamp) {
     typeof revision.title !== 'string' ||
     typeof revision.filename !== 'string' ||
     typeof revision.markdown !== 'string' ||
+    Buffer.byteLength(revision.markdown, 'utf8') > MAX_LOCAL_MARKDOWN_BYTES ||
+    new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      Buffer.from(revision.markdown, 'utf8'),
+    ) !== revision.markdown ||
     !(
       revision.base_revision_id === null || validUuid(revision.base_revision_id)
     ) ||
@@ -403,9 +426,21 @@ function validateRelationships(manifest, comments, events, revisions) {
       .filter((comment) => comment.is_root)
       .map((comment) => [comment.id, comment]),
   );
-  for (const comment of comments)
+  for (const comment of comments) {
     if (!roots.has(comment.root_id))
       throw new CliError('O feedback referencia uma raiz ausente.');
+    if (!comment.is_root) {
+      const root = roots.get(comment.root_id);
+      if (
+        comment.quote !== '' ||
+        comment.source_start !== null ||
+        comment.source_revision_id !== root.source_revision_id
+      )
+        throw new CliError(
+          'Uma resposta diverge da origem preservada pela conversa.',
+        );
+    }
+  }
   for (const root of roots.values()) {
     const replies = comments.filter(
       (comment) => !comment.is_root && comment.root_id === root.id,
@@ -419,12 +454,34 @@ function validateRelationships(manifest, comments, events, revisions) {
   for (const event of events) {
     if (!roots.has(event.root_id))
       throw new CliError('Um evento referencia uma conversa ausente.');
-    const previous = eventsByRoot.get(event.root_id)?.at(-1);
+    const chain = eventsByRoot.get(event.root_id) ?? [];
+    const previous = chain.at(-1);
     if (event.base_version !== (previous?.version ?? 0))
       throw new CliError(
         'O histórico de uma conversa tem versões divergentes.',
       );
-    const chain = eventsByRoot.get(event.root_id) ?? [];
+    const priorState = previous?.state ?? 'open';
+    const priorDecision = previous?.decision ?? null;
+    const priorDecisionReason = previous?.decision_reason ?? null;
+    const isDecision = ['follow', 'refute', 'defer'].includes(event.action);
+    const expectedState =
+      event.action === 'close'
+        ? 'closed'
+        : event.action === 'reopen'
+          ? 'open'
+          : priorState;
+    const expectedDecision = isDecision ? event.action : priorDecision;
+    const expectedDecisionReason = isDecision
+      ? event.reason
+      : priorDecisionReason;
+    if (
+      event.state !== expectedState ||
+      event.decision !== expectedDecision ||
+      event.decision_reason !== expectedDecisionReason
+    )
+      throw new CliError(
+        'Um evento diverge da transição registrada para a conversa.',
+      );
     chain.push(event);
     eventsByRoot.set(event.root_id, chain);
   }
@@ -458,9 +515,21 @@ function validateRelationships(manifest, comments, events, revisions) {
   );
   if (
     !current ||
-    current.ordinal !== manifest.document.current_revision_ordinal
+    current.ordinal !== manifest.document.current_revision_ordinal ||
+    current.title !== manifest.document.title ||
+    current.filename !== manifest.document.filename
   )
     throw new CliError('O snapshot corrente diverge do manifesto.');
+  if (
+    manifest.document.current_revision_ordinal !== manifest.counts.revisions ||
+    revisions.length > manifest.counts.revisions ||
+    revisions.some(
+      (revision) => revision.ordinal > manifest.counts.revisions,
+    ) ||
+    new Set(revisions.map((revision) => revision.ordinal)).size !==
+      revisions.length
+  )
+    throw new CliError('Os snapshots divergem da história observada do plano.');
   if (
     manifest.counts.comments !== comments.length ||
     manifest.counts.events !== events.length
