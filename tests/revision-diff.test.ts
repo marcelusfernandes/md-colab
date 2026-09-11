@@ -12,6 +12,7 @@ void test('diff distingue inclusão, remoção, substituição e bloco movido', 
     insertion.lines.filter((line) => line.kind !== 'equal'),
     [{ kind: 'added', text: 'b' }],
   );
+  assert.equal(insertion.lineEndingsChanged, false);
 
   const removal = compareRevisionMarkdown('a\nb\nc', 'a\nc');
   assert.deepEqual(
@@ -80,7 +81,11 @@ void test('orçamentos recusam produto, linha, render e entrada acima do limite'
     Array.from({ length: 251 }, (_, index) => `b-${index}`).join('\n'),
   );
   const overInput = compareRevisionMarkdown('a'.repeat(1024 * 1024 + 1), 'b');
-  for (const result of [product, longLine, render, overInput]) {
+  const overInputLines = compareRevisionMarkdown(
+    '\n'.repeat(1024 * 1024 + 1),
+    'b',
+  );
+  for (const result of [product, longLine, render, overInput, overInputLines]) {
     assert.equal(result.available, false);
     assert.equal(result.message, REVISION_DIFF_UNAVAILABLE);
     assert.deepEqual(result.lines, []);

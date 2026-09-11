@@ -98,6 +98,46 @@ function parsedMarkdown(markdown: string): ParsedMarkdown {
   };
 }
 
+function markdownFormat(markdown: string): ParsedMarkdown {
+  const bom = markdown.startsWith('\uFEFF');
+  const text = bom ? markdown.slice(1) : markdown;
+  let lf = 0;
+  let crlf = 0;
+  let cr = 0;
+  let finalNewline = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text.charCodeAt(index);
+    if (character === 10) {
+      lf += 1;
+      finalNewline = index === text.length - 1;
+    } else if (character === 13) {
+      if (text.charCodeAt(index + 1) === 10) {
+        crlf += 1;
+        index += 1;
+      } else cr += 1;
+      finalNewline = index === text.length - 1;
+    } else finalNewline = false;
+  }
+  const styles = Number(lf > 0) + Number(crlf > 0) + Number(cr > 0);
+  return {
+    bom,
+    lines: [],
+    terminators: new Uint8Array(),
+    oversizedLine: false,
+    lineEndings:
+      styles === 0
+        ? 'none'
+        : styles > 1
+          ? 'mixed'
+          : lf
+            ? 'LF'
+            : crlf
+              ? 'CRLF'
+              : 'CR',
+    finalNewline,
+  };
+}
+
 function exactBytesEqual(left: Uint8Array, right: Uint8Array) {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index += 1)
@@ -142,27 +182,35 @@ export function compareRevisionMarkdown(
   beforeMarkdown: string,
   afterMarkdown: string,
 ): RevisionDiff {
+  const beforeBytes = encoder.encode(beforeMarkdown).byteLength;
+  const afterBytes = encoder.encode(afterMarkdown).byteLength;
+  if (beforeBytes > MAX_MARKDOWN_BYTES || afterBytes > MAX_MARKDOWN_BYTES) {
+    const before = markdownFormat(beforeMarkdown);
+    const after = markdownFormat(afterMarkdown);
+    return unavailable(
+      before,
+      after,
+      before.bom !== after.bom,
+      before.lineEndings !== after.lineEndings ||
+        before.finalNewline !== after.finalNewline,
+    );
+  }
   const before = parsedMarkdown(beforeMarkdown);
   const after = parsedMarkdown(afterMarkdown);
   const bomChanged = before.bom !== after.bom;
-  const lineEndingsChanged = !exactBytesEqual(
-    before.terminators,
-    after.terminators,
-  );
-  if (
-    encoder.encode(beforeMarkdown).byteLength > MAX_MARKDOWN_BYTES ||
-    encoder.encode(afterMarkdown).byteLength > MAX_MARKDOWN_BYTES ||
-    before.oversizedLine ||
-    after.oversizedLine
-  )
+  const sameLines = exactLinesEqual(before.lines, after.lines);
+  const lineEndingsChanged =
+    before.lineEndings !== after.lineEndings ||
+    before.finalNewline !== after.finalNewline ||
+    (sameLines && !exactBytesEqual(before.terminators, after.terminators));
+  if (before.oversizedLine || after.oversizedLine)
     return unavailable(before, after, bomChanged, lineEndingsChanged);
 
-  const sameLines = exactLinesEqual(before.lines, after.lines);
   if (sameLines)
     return {
       available: true,
       message: null,
-      identical: !bomChanged && !lineEndingsChanged,
+      identical: beforeMarkdown === afterMarkdown,
       bomChanged,
       lineEndingsChanged,
       before: formatOf(before),
