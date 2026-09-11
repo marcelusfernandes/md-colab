@@ -4,6 +4,7 @@ import {
   commentDestination,
   directedCommentAttemptMatches,
   directedCommentContextFromResponse,
+  mergeDirectedConfirmedComment,
   visibleDirectedReplies,
 } from '../lib/directed-comment.ts';
 
@@ -103,4 +104,39 @@ void test('resposta tardia só pertence à mesma sessão, documento, destino e s
     },
   ])
     assert.equal(directedCommentAttemptMatches(attempt, current), false);
+});
+
+void test('confirmação preserva a fronteira do cursor e não reconta o alvo separado', () => {
+  const replies = Array.from({ length: 50 }, (_, index) =>
+    comment(`00000000-0000-4000-8000-${String(index + 10).padStart(12, '0')}`),
+  );
+  const target = comment(replyId);
+  const context = {
+    target,
+    conversation: {
+      root: comment(rootId),
+      replies,
+      repliesCursor: 'cursor-after-oldest-loaded',
+      replyCount: 56,
+      state: 'open' as const,
+      decision: null,
+      decisionReason: null,
+      version: 0,
+    },
+  };
+  const confirmed = comment('00000000-0000-4000-8000-000000000099');
+  const merged = mergeDirectedConfirmedComment(context, confirmed);
+  assert.equal(merged.conversation.replies.length, 51);
+  assert.equal(merged.conversation.replies[0]?.id, confirmed.id);
+  assert.equal(merged.conversation.replies[50]?.id, replies[49]?.id);
+  assert.equal(
+    merged.conversation.repliesCursor,
+    context.conversation.repliesCursor,
+  );
+  assert.equal(merged.conversation.replyCount, 57);
+
+  const replayedTarget = mergeDirectedConfirmedComment(context, target);
+  assert.equal(replayedTarget.conversation.replyCount, 56);
+  assert.equal(replayedTarget.conversation.replies.length, 51);
+  assert.equal(replayedTarget.target, target);
 });

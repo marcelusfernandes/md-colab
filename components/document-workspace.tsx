@@ -102,6 +102,7 @@ import {
   commentDestination,
   directedCommentAttemptMatches,
   directedCommentContextFromResponse,
+  mergeDirectedConfirmedComment,
   visibleDirectedReplies,
 } from '@/lib/directed-comment';
 import {
@@ -515,36 +516,14 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
         current === 'comment' || current === 'comment-lookup' ? '' : current,
       );
       setComments((current) => mergeComments(current, [confirmed]));
-      setDirectedCommentContext((current) => {
-        if (!current || current.conversation.root.id !== confirmed.root_id)
-          return current;
-        const alreadyPresent = current.conversation.replies.some(
-          (reply) => reply.id === confirmed.id,
-        );
-        const replies = [
-          confirmed,
-          ...current.conversation.replies.filter(
-            (reply) => reply.id !== confirmed.id,
-          ),
-        ];
-        return {
-          target:
-            current.target.id === confirmed.id ? confirmed : current.target,
-          conversation: {
-            ...current.conversation,
-            replies:
-              confirmed.id === current.conversation.root.id
-                ? current.conversation.replies
-                : current.conversation.repliesCursor && replies.length > 50
-                  ? replies.slice(0, 50)
-                  : replies,
-            replyCount:
-              confirmed.id === current.conversation.root.id || alreadyPresent
-                ? current.conversation.replyCount
-                : current.conversation.replyCount + 1,
-          },
-        };
-      });
+      const refreshDirected = directedCommentIdRef.current !== null;
+      if (refreshDirected) {
+        directedCommentRequest.current += 1;
+        setDirectedCommentLoading(false);
+      }
+      setDirectedCommentContext((current) =>
+        current ? mergeDirectedConfirmedComment(current, confirmed) : current,
+      );
       if (shouldClearComposer(operation, composerRevision.current)) {
         commentValue.current = '';
         setComment('');
@@ -557,6 +536,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       setCommentOperation(null);
       setNotice('Comentário confirmado.');
       void refreshConversationsRef.current?.();
+      if (refreshDirected) void refreshDirectedCommentRef.current?.();
     },
     [],
   );
@@ -1299,9 +1279,8 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           const collectionReloaded = await loadConversationPage(
             activeConversationFilter.current,
           );
-          const directedRootId = directedCommentContext?.conversation.root.id;
           const directedReloaded =
-            directedRootId && changedRoots.has(directedRootId)
+            directedCommentIdRef.current && changedRoots.size > 0
               ? await refreshDirectedCommentRef.current?.()
               : true;
           reloaded = collectionReloaded && directedReloaded === true;
@@ -1355,13 +1334,7 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
       window.clearInterval(timer);
       window.removeEventListener('focus', poll);
     };
-  }, [
-    directedCommentContext?.conversation.root.id,
-    doc,
-    hideProtectedContent,
-    loadConversationPage,
-    viewer,
-  ]);
+  }, [doc, hideProtectedContent, loadConversationPage, viewer]);
 
   useEffect(() => {
     if (!loadedDocumentId || !window.location.hash) return;
@@ -2119,6 +2092,11 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
           }
         : current,
     );
+    if (directedCommentIdRef.current) {
+      directedCommentRequest.current += 1;
+      setDirectedCommentLoading(false);
+      void refreshDirectedCommentRef.current?.();
+    }
   }
   async function sendConversationOperation(operation: ConversationOperation) {
     if (
@@ -3403,10 +3381,13 @@ export function DocumentWorkspace({ documentId }: { documentId?: string }) {
                   Carregando contexto do comentário…
                 </div>
               ) : directedMode &&
-                !directedCommentContext ? null : conversationsLoading &&
+                !directedCommentContext ? null : !directedMode &&
+                conversationsLoading &&
                 conversationRows.length === 0 ? (
                 <div className="comments-empty">Carregando conversas…</div>
-              ) : conversationsLoaded && conversationRows.length === 0 ? (
+              ) : !directedMode &&
+                conversationsLoaded &&
+                conversationRows.length === 0 ? (
                 <div className="comments-empty">
                   {conversationFilter === 'all'
                     ? 'Nenhum comentário ainda.'

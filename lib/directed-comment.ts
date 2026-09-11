@@ -94,3 +94,33 @@ export function visibleDirectedReplies(
     (reply) => reply.id !== context.target.id,
   );
 }
+
+export function mergeDirectedConfirmedComment(
+  context: DirectedCommentContext,
+  confirmed: CommentRow,
+): DirectedCommentContext {
+  if (context.conversation.root.id !== confirmed.root_id) return context;
+  const isRoot = confirmed.id === context.conversation.root.id;
+  const alreadyPresent =
+    isRoot ||
+    context.target.id === confirmed.id ||
+    context.conversation.replies.some((reply) => reply.id === confirmed.id);
+  return {
+    target: context.target.id === confirmed.id ? confirmed : context.target,
+    conversation: {
+      ...context.conversation,
+      root: isRoot ? confirmed : context.conversation.root,
+      replies: isRoot
+        ? context.conversation.replies
+        : [
+            confirmed,
+            ...context.conversation.replies.filter(
+              (reply) => reply.id !== confirmed.id,
+            ),
+          ],
+      replyCount: alreadyPresent
+        ? context.conversation.replyCount
+        : context.conversation.replyCount + 1,
+    },
+  };
+}
