@@ -964,6 +964,30 @@ a:focus-visible {
   font-size: 15px;
   line-height: 1.7;
 }
+.comment-thread {
+  min-width: 0;
+}
+.comment-reply {
+  min-height: 36px;
+  margin-top: 12px;
+  color: #315380;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.comment-reply:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+.comment-reply-item {
+  margin-left: 18px;
+  padding: 16px 0 16px 14px;
+  border-left: 2px solid #dbe4f2;
+}
+.comment-reply-item .comment-author {
+  margin-bottom: 9px;
+}
 .comment-quote {
   display: block;
   width: 100%;
@@ -1953,5 +1977,18 @@ a:focus-visible {
 
   .landing-button:hover {
     transform: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .comment-reply-item {
+    margin-left: 12px;
+    padding-left: 12px;
+  }
+}
+@media (pointer: coarse) {
+  .comment-reply {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
